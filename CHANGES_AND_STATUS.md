@@ -19,6 +19,12 @@
   оставлена алиасом), установщик `RemoteHarnessMCP-Setup-<version>.exe`, задачи Windows
   `RemoteHarnessMCPWatchdog` / `RemoteHarnessMCPUpdater`, systemd/launchd `rhm-agent`,
   `com.remoteharness.mcp.agent`.
+- **npm:** опубликованы `remote-harness-mcp@0.4.4` и пакет-алиас `gemini-computer-use@0.4.4`
+  (`npm/gemini-computer-use/`) — тонкая обёртка с зависимостью `remote-harness-mcp@^0.4.4`, которая
+  прокидывает аргументы в тот же CLI (`npx gemini-computer-use` продолжает работать). Порядок публикации
+  защищён скриптом `npm/publish-alias.sh`: он отказывается публиковать алиас, пока целевая версия не
+  резолвится в реестре (имя `remote-harness-mcp` при первой публикации уходило на ревью npm и отдавалось
+  как placeholder `0.0.0-stage`).
 - **Обратная совместимость:** новый `core/paths.py` выбирает новые каталоги (`~/.config/remote-harness-mcp`,
   `/etc/remote-harness-mcp`, `~/.cache/remote-harness-mcp`), но продолжает использовать старые, если они —
   единственные на хосте (токен, `agent.env`, `domain.env`, история джобов и журнал обновлений не теряются);

@@ -1,0 +1,37 @@
+{
+  "name": "gemini-computer-use",
+  "version": "0.4.4",
+  "description": "Alias for remote-harness-mcp: turn any PC, laptop, server or Android phone into an autonomous execution node for Gemini via native MCP.",
+  "main": "cli.js",
+  "bin": {
+    "gemini-computer-use": "cli.js"
+  },
+  "files": [
+    "cli.js",
+    "README.md"
+  ],
+  "dependencies": {
+    "remote-harness-mcp": "^0.4.4"
+  },
+  "keywords": [
+    "gemini",
+    "mcp",
+    "computer-use",
+    "model-context-protocol",
+    "remote-harness-mcp",
+    "automation",
+    "google-gemini",
+    "spark"
+  ],
+  "author": "LevRa7",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/LevRa7/remote-harness-mcp.git",
+    "directory": "npm/gemini-computer-use"
+  },
+  "bugs": {
+    "url": "https://github.com/LevRa7/remote-harness-mcp/issues"
+  },
+  "homepage": "https://github.com/LevRa7/remote-harness-mcp#readme"
+}

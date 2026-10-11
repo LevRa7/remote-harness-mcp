@@ -32,3 +32,7 @@ dist/
 .verify-temp/
 .verify-payload/
 .pytest-tmp/
+# The repository also publishes an npm alias package (npm/gemini-computer-use);
+# a local `npm install` in a checkout must never be committed.
+node_modules/
+npm-debug.log*

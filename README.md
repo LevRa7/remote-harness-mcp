@@ -241,6 +241,10 @@ runtime and shows the MCP link at the end — see [docs/GUI_INSTALLER.md](docs/G
 npx remote-harness-mcp
 ```
 
+The pre-rename name still works: `npx gemini-computer-use` is an alias package
+that depends on `remote-harness-mcp` and forwards every argument to the same CLI
+(see [npm/gemini-computer-use](npm/gemini-computer-use/README.md)).
+
 **🛠️ From source**
 ```bash
 git clone https://github.com/LevRa7/remote-harness-mcp.git
@@ -791,6 +795,10 @@ irm https://racknerd-5a24bf9.merino-carob.ts.net/install.ps1 | iex
 ```bash
 npx remote-harness-mcp
 ```
+
+Старое имя тоже работает: `npx gemini-computer-use` — пакет-алиас, который
+зависит от `remote-harness-mcp` и передаёт ему все аргументы того же CLI
+(см. [npm/gemini-computer-use](npm/gemini-computer-use/README.md)).
 
 **🛠️ Из исходников**
 ```bash

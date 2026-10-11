@@ -19,6 +19,8 @@ these are hard gates like any other suite.
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -27,6 +29,11 @@ import pytest
 from core import paths
 
 REPO = Path(__file__).resolve().parent.parent
+
+BASH = shutil.which("bash")
+NODE = shutil.which("node")
+needs_shell = pytest.mark.skipif(
+    not (BASH and NODE), reason="bash and node are required for the alias publish checks")
 
 
 def _read(relative: str) -> str:
@@ -250,3 +257,67 @@ def test_the_release_workflow_publishes_the_new_installer_name():
 
 def test_readme_names_the_project():
     assert "Remote Harness MCP" in _read("README.md").splitlines()[0]
+
+
+# ---------------------------------------------------------------------------
+# The npm alias package: the old name keeps installing the current code
+# ---------------------------------------------------------------------------
+
+def test_the_npm_alias_package_points_at_the_current_package():
+    alias = json.loads(_read("npm/gemini-computer-use/package.json"))
+    main = json.loads(_read("package.json"))
+    assert alias["name"] == "gemini-computer-use"
+    assert alias["version"] == main["version"], "the alias ships in lockstep with the node package"
+    assert alias["dependencies"] == {"remote-harness-mcp": "^%s" % main["version"]}
+    assert alias["bin"] == {"gemini-computer-use": "cli.js"}
+
+
+def test_the_npm_alias_shim_forwards_to_the_real_cli():
+    shim = _read("npm/gemini-computer-use/cli.js")
+    assert "require.resolve" in shim and "remote-harness-mcp" in shim
+    assert "spawn" in shim and "stdio: 'inherit'" in shim
+    assert "process.exit" in shim, "the child's exit code must be propagated"
+
+
+@needs_shell
+def test_the_alias_publish_script_refuses_while_the_target_is_not_installable(tmp_path):
+    """Publishing the alias first would break `npm install gemini-computer-use`.
+
+    The guard asks the registry whether the exact version it depends on resolves,
+    which is what caught npm holding the new package name for review.
+    """
+    stub_dir = tmp_path / "bin"
+    stub_dir.mkdir()
+    npm = stub_dir / "npm"
+    npm.write_text("#!/bin/sh\n[ \"$1\" = view ] && exit 1\nexit 0\n", encoding="utf-8")
+    npm.chmod(0o755)
+    environment = dict(os.environ)
+    environment["PATH"] = str(stub_dir) + os.pathsep + environment["PATH"]
+    result = subprocess.run([BASH, str(REPO / "npm" / "publish-alias.sh")],
+                            capture_output=True, text=True, cwd=str(REPO),
+                            env=environment, timeout=60)
+    assert result.returncode == 1
+    assert "not installable yet" in result.stderr
+    assert "0.0.0-stage" in result.stderr
+
+
+@needs_shell
+def test_the_alias_publish_script_publishes_once_the_target_resolves(tmp_path):
+    stub_dir = tmp_path / "bin"
+    stub_dir.mkdir()
+    log = tmp_path / "npm.log"
+    npm = stub_dir / "npm"
+    npm.write_text("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"%s\"\nexit 0\n" % ("%s", log),
+                   encoding="utf-8")
+    npm.chmod(0o755)
+    environment = dict(os.environ)
+    environment["PATH"] = str(stub_dir) + os.pathsep + environment["PATH"]
+    result = subprocess.run([BASH, str(REPO / "npm" / "publish-alias.sh")],
+                            capture_output=True, text=True, cwd=str(REPO),
+                            env=environment, timeout=60)
+    assert result.returncode == 0, result.stderr
+    calls = log.read_text(encoding="utf-8")
+    assert "publish --access public" in calls
+    main = json.loads(_read("package.json"))
+    assert "gemini-computer-use@%s" % main["version"] in result.stdout
+
