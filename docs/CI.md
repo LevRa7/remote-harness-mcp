@@ -47,8 +47,10 @@ the published one, and only this workflow computes both from the same tree.
    optional `-rc.N` suffix is allowed.
 2. `package.json` — same version (the npm package and the Python node must never
    ship as two versions), and its `description` mentions the current tool count.
-3. `README.md` — the copy/paste examples naming `RemoteHarnessMCP-Setup-<version>.exe`
-   (a test fails if they still advertise the previous version).
+3. `README.md` and `README_RU.md` — the copy/paste examples naming
+   `RemoteHarnessMCP-Setup-<version>.exe` (a test fails if they still advertise the
+   previous version). The two files are one document split by language and link to
+   each other; a change to one belongs in the other.
 4. `docs/releases/v<version>.md` — the release notes (a test requires the file).
 5. Run the gates locally: `python -m pytest -q -p no:cacheprovider tests/test_updater.py
    tests/test_version_single_source.py`.

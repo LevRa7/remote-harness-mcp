@@ -144,7 +144,7 @@ BROADCAST_HTTP_RESPONSES = os.environ.get(
 #     the handshake and the client reports an opaque "cannot connect to host";
 #   * the node name stops being a security-relevant routing key, which keeps the
 #     installer's "name already taken -> node-2" behaviour harmless.
-# Canonical endpoints (see README "Connecting to Google Gemini"):
+# Canonical endpoints (see README.md "Quick start — 2 minutes"):
 #   SSE      https://<shared-domain>/sse?user=<node>&token=<token>
 #   HTTP     https://<shared-domain>/mcp?user=<node>&token=<token>
 #   Tunnel   wss://<shared-domain>/ws/tunnel?user=<node>&token=<token>

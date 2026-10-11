@@ -22,6 +22,7 @@
     "install-gui.strings.json",
     "install-gui.cmd",
     "README.md",
+    "README_RU.md",
     "LICENSE",
     "gateway.py"
   ],
