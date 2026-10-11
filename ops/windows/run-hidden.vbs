@@ -1,5 +1,5 @@
 ' ==============================================================================
-'  Antigravity Mesh - run a node script with no console window at all
+'  Remote Harness MCP - run a node script with no console window at all
 '
 '  WHY THIS FILE EXISTS
 '  Task Scheduler starts a task inside the interactive session, and the task has
@@ -13,7 +13,7 @@
 '  window style of 0 passes SW_HIDE in the child's STARTUPINFO, so cmd.exe (and
 '  therefore PowerShell) is created hidden from the very first moment - nothing is
 '  ever drawn. This is the same mechanism the logon launcher
-'  (antigravity-agent.vbs) uses, which is why a node starts without a window.
+'  (rhm-agent.vbs) uses, which is why a node starts without a window.
 '
 '  USAGE - the two scheduled tasks use exactly this. The script path is relative
 '  to the payload (the directory that holds core\, ops\ and install.ps1), which
@@ -47,7 +47,7 @@ For index = 1 To WScript.Arguments.Count - 1
     extra = extra & " " & WScript.Arguments(index)
 Next
 
-logDir = shell.ExpandEnvironmentStrings("%USERPROFILE%") & "\.config\antigravity-mesh"
+logDir = shell.ExpandEnvironmentStrings("%USERPROFILE%") & "\.config\remote-harness-mcp"
 If Not fso.FolderExists(logDir) Then
     logDir = payload
 End If

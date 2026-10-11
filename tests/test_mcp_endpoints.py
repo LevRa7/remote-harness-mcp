@@ -5,7 +5,7 @@ def test_mcp_server_initialization():
     server = create_mcp_server()
     assert server is not None
     assert hasattr(server, "name")
-    assert server.name == "antigravity_mesh"
+    assert server.name == "remote_harness_mcp"
 
 def test_bash_exec_tool():
     server = create_mcp_server()
@@ -28,4 +28,4 @@ def test_get_orchestration_skill_tool():
     assert "get_orchestration_skill" in server.tools
     skill = server.tools["get_orchestration_skill"]()
     assert isinstance(skill, str)
-    assert "Antigravity" in skill
+    assert "Remote Harness" in skill

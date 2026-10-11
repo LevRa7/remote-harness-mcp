@@ -18,7 +18,7 @@ DEFAULT_SAVE_DIR = os.path.join(_COORDINATOR_ROOT, ".state", "sessions")
 DEFAULT_APP_DATA_DIR = os.path.join(_COORDINATOR_ROOT, ".state", "artifacts")
 
 ROOT_SYSTEM_INSTRUCTIONS = (
-    "You are the Root Orchestrator for the Antigravity Remote Execution Mesh. "
+    "You are the Root Orchestrator for the Remote Harness MCP. "
     "Execute commands strictly through native tools and verified subagents. "
     "Adhere to Zero Drive Queue Policy and Hard Error Halt invariants."
 )

@@ -1,6 +1,6 @@
 {
   "en": {
-    "app_title": "Antigravity Mesh - Visual Installer",
+    "app_title": "Remote Harness MCP - Visual Installer",
     "lang_label": "Language",
     "btn_next": "Next >",
     "btn_back": "< Back",
@@ -50,7 +50,7 @@
     "mode_ssh_desc": "Copy the node code to a Linux host and run install.sh there.",
 
     "opt_quick_group": "Quick setup",
-    "opt_quick_summary": "Node name:      {0}\r\nGateway domain: {1}\r\nAutostart:      Windows Startup folder (antigravity-agent.vbs)",
+    "opt_quick_summary": "Node name:      {0}\r\nGateway domain: {1}\r\nAutostart:      Windows Startup folder (rhm-agent.vbs)",
     "opt_node_label": "Node name",
     "opt_node_hint": "a-z, 0-9, dash and underscore only",
     "opt_domain_label": "Shared gateway domain",
@@ -105,7 +105,7 @@
   },
 
   "ru": {
-    "app_title": "Antigravity Mesh - Визуальный установщик",
+    "app_title": "Remote Harness MCP - Визуальный установщик",
     "lang_label": "Язык",
     "btn_next": "Далее >",
     "btn_back": "< Назад",
@@ -155,7 +155,7 @@
     "mode_ssh_desc": "Скопировать код узла на Linux-хост и запустить там install.sh.",
 
     "opt_quick_group": "Быстрая настройка",
-    "opt_quick_summary": "Имя узла:       {0}\r\nДомен шлюза:    {1}\r\nАвтозапуск:     папка «Автозагрузка» Windows (antigravity-agent.vbs)",
+    "opt_quick_summary": "Имя узла:       {0}\r\nДомен шлюза:    {1}\r\nАвтозапуск:     папка «Автозагрузка» Windows (rhm-agent.vbs)",
     "opt_node_label": "Имя узла",
     "opt_node_hint": "только a-z, 0-9, дефис и подчёркивание",
     "opt_domain_label": "Общий домен шлюза",

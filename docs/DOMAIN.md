@@ -23,8 +23,8 @@ MESH_PUBLIC_URL=https://mesh.example.com
 
 | ОС | Путь |
 | :--- | :--- |
-| Linux | `/etc/antigravity-mesh/domain.env` |
-| Windows | `%USERPROFILE%\.config\antigravity-mesh\domain.env` |
+| Linux | `/etc/remote-harness-mcp/domain.env` |
+| Windows | `%USERPROFILE%\.config\remote-harness-mcp\domain.env` |
 
 Путь переопределяется `MESH_DOMAIN_FILE`. Файл может быть с BOM — это учитывают и
 Python (`encoding="utf-8-sig"`), и shell-резолвер (`ops/mesh-domain.sh`).
@@ -37,7 +37,7 @@ Python (`encoding="utf-8-sig"`), и shell-резолвер (`ops/mesh-domain.sh`
 | `gateway.py` | `PUBLIC_BASE_URL`/`PUBLIC_HOST`, ссылки в ответах и текстах |
 | `core/web_share.py` | публичные ссылки на файлы: `https://<домен>/<узел>/<слаг>/…` |
 | `core/mcp_tools.py` | передаёт `public_url` в публикацию файлов |
-| `agy_sync.py`, `agy_watcher.py` | ссылки в генерируемых фактах и логах |
+| `rhm_sync.py`, `rhm_watcher.py` | ссылки в генерируемых фактах и логах |
 | `install.sh`, `install.ps1` | плейсхолдер `__MESH_DOMAIN__`; домен подставляется при публикации |
 | `deploy_gateway.sh` | `ops/mesh-domain.sh`; пишет `domain.env` на шлюзе |
 | nginx | `ops/nginx/mesh-domain.vhost.template` + `ops/nginx/render-domain.sh` |
@@ -52,14 +52,14 @@ Shell-сторона использует один и тот же резолве
 2. **Сертификат.** Выпустить на новое имя: `certbot certonly --nginx -d <домен>`
    или, если имя принадлежит Tailscale, `tailscale cert <имя>`.
 3. **nginx на шлюзе.** `ops/nginx/render-domain.sh --apply` — рендерит vhost из
-   шаблона, делает бэкап в `/root/backups/antigravity-mesh/nginx-<метка>/`,
+   шаблона, делает бэкап в `/root/backups/remote-harness-mcp/nginx-<метка>/`,
    проверяет `nginx -t` и только потом перезагружает. `--check` сравнивает живой
    конфиг с шаблоном, `--out DIR` просто рендерит рядом.
 4. **Опубликовать установщики.**
    `MESH_GATEWAY_SSH=root@<шлюз> MESH_PUBLIC_URL=https://<домен> ./deploy_gateway.sh`
    — подставит домен в отдаваемые `install.sh`/`install.ps1`, положит
    `core/domain.py` рядом со шлюзом и запишет `domain.env` на хосте.
-5. **Узлы.** Перезапустить агента: `systemctl --user restart antigravity-agent`
+5. **Узлы.** Перезапустить агента: `systemctl --user restart rhm-agent`
    (Linux) или перезапустить задачу автозапуска (Windows). Новое значение
    подхватится из `domain.env`.
 

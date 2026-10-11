@@ -1,4 +1,4 @@
-"""core/agent.py - Antigravity Mesh tunnel node (thin transport).
+"""core/agent.py - Remote Harness MCP tunnel node (thin transport).
 
 All tool logic lives in :mod:`core.mcp_tools`; this module only maintains the
 websocket tunnel to the gateway and forwards ``tools/call`` requests.  The
@@ -12,7 +12,7 @@ Configuration (read once at import/startup)::
     MESH_TOKEN        node token
     MESH_CONFIG_FILE  KEY=VALUE file used for any of the three above that is not
                       set in the environment (default:
-                      ~/.config/antigravity-mesh/agent.env).  This keeps the token
+                      ~/.config/remote-harness-mcp/agent.env).  This keeps the token
                       out of launchers such as the Windows Startup script.  Any
                       other MESH_* key in that file is exported as well.
     MESH_SHELL        Windows command shell: "cmd" or "git-bash" (default:
@@ -59,13 +59,15 @@ except ImportError as _websockets_error:      # a launcher pinned a Python witho
 else:
     _WEBSOCKETS_IMPORT_ERROR = None
 
-from core import domain, mcp_tools, updater
+from core import domain, mcp_tools, paths, updater
 from core import version as version_module
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger("agy-agent")
+logger = logging.getLogger("rhm-agent")
 
-CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".config", "antigravity-mesh")
+#: Resolved through :mod:`core.paths`: a fresh install uses the new name, an
+#: upgraded node keeps the directory its token already lives in.
+CONFIG_DIR = paths.config_dir()
 DEFAULT_CONFIG_FILE = os.path.join(CONFIG_DIR, "agent.env")
 
 #: Diagnostics that answer "why is this node offline?" without the tunnel. The

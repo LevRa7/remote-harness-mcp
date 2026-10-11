@@ -26,7 +26,14 @@ import uvicorn
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("gateway")
 
-REGISTRY_PATH = "/etc/antigravity-mesh/registry.json"
+REGISTRY_PATH = "/etc/remote-harness-mcp/registry.json"
+#: Registry location from before the rename. A gateway deployed earlier keeps its
+#: node registrations there, so an existing install is read and written in place
+#: instead of starting from an empty registry (gateway.py is deployed standalone,
+#: so this stays a local fallback rather than importing core.paths).
+LEGACY_REGISTRY_PATH = "/etc/antigravity-mesh/registry.json"
+if not os.path.exists(REGISTRY_PATH) and os.path.exists(LEGACY_REGISTRY_PATH):
+    REGISTRY_PATH = LEGACY_REGISTRY_PATH
 active_tunnels = {}  # user -> {"ws": WebSocket, "pending": {req_id: Future}}
 # user -> list of asyncio.Queue, OLDEST stream first. This was a set, which has
 # no order: the per-user cap below has to evict the OLDEST stream, and every
@@ -153,7 +160,7 @@ if _domain is not None:
     PUBLIC_BASE_URL = _domain.public_base_url()
 else:
     # gateway.py is sometimes installed on its own (for example
-    # /opt/antigravity-mesh/gateway.py with no core/ next to it). Shipping
+    # /opt/remote-harness-mcp/gateway.py with no core/ next to it). Shipping
     # core/domain.py alongside it is part of the deployment; this branch only keeps
     # the service starting when that was forgotten, and it refuses to invent a
     # domain of its own - the project default lives in core/domain.py alone.
@@ -349,14 +356,14 @@ def verify_token(request: Request) -> tuple[bool, str, str]:
     return True, "ok", user
 
 def get_skill(user: str, host: str) -> str:
-    return f"""# 🌐 Antigravity Mesh — Node Orchestrator ({user})
+    return f"""# 🌐 Remote Harness MCP — Node Orchestrator ({user})
 
 Target Node: {user} (shared gateway {PUBLIC_HOST})
 Endpoint: {PUBLIC_BASE_URL}/sse?user={user}&token=<your_token>
 Mode: Secure Cloud Gateway + Reverse Tunnel (one shared domain for every node)
 
 MANDATORY GROUNDING & EXECUTION DIRECTIVES:
-1. You are connected directly to the user's execution node '{user}' via Antigravity Mesh MCP tools.
+1. You are connected directly to the user's execution node '{user}' via Remote Harness MCP tools.
 2. STRICT ZERO-HALLUCINATION POLICY:
    - You DO NOT know local directory structure, file names, or environment state in advance.
    - NEVER invent file paths, guess folder contents, or claim a directory is empty without checking.
@@ -462,7 +469,7 @@ async def health(request: Request):
     is_online = (user in active_tunnels) if user != "anonymous" else False
     return JSONResponse({
         "status": "healthy",
-        "service": "antigravity_mesh_gateway",
+        "service": "remote_harness_mcp_gateway",
         "host": PUBLIC_HOST,
         "target_user": user,
         "node_online": is_online,
@@ -536,7 +543,7 @@ async def api_register(request: Request):
                     # `u` is the loop variable above; `user` does not exist in this
                     # branch, so every re-registration of an already-known MAC
                     # raised NameError and the gateway answered HTTP 500.
-                    "instructions": f"Antigravity Mesh node '{u}'. Direct access to the real remote host over a reverse tunnel. "
+                    "instructions": f"Remote Harness MCP node '{u}'. Direct access to the real remote host over a reverse tunnel. "
                 f"Do not guess paths or outputs: use list_dir/glob_find/grep_search/read_file/bash_exec/"
                 f"system_vitals. Use run_job for slow commands; page output with max_chars+cursor."
                 })
@@ -633,8 +640,8 @@ async def oauth_discovery(request: Request):
             "authorization_servers": [],
             "bearer_methods_supported": ["query", "header"],
             "scopes_supported": [],
-            "resource_documentation": "https://github.com/LevRa7/Computer-use-for-Gemini-App-Web",
-            "resource_name": "Antigravity Mesh",
+            "resource_documentation": "https://github.com/LevRa7/remote-harness-mcp",
+            "resource_name": "Remote Harness MCP",
         },
         headers={
             "Access-Control-Allow-Origin": "*",
@@ -881,13 +888,13 @@ async def messages_endpoint(request: Request):
                 "resources": {"subscribe": False, "listChanged": False}
             },
             "serverInfo": {
-                "name": "antigravity_mesh",
+                "name": "remote_harness_mcp",
                 "version": "1.0.0"
             },
             "instructions": (
                 (
                 (
-                f"Antigravity Mesh node '{user}' - direct access to the real host over a reverse tunnel.\n"
+                f"Remote Harness MCP node '{user}' - direct access to the real host over a reverse tunnel.\n"
                 f"GROUNDING (mandatory): NEVER state a path, file, directory or process you have not seen "
                 f"in a tool result in THIS conversation. Tool output marked [VERIFIED BY TOOL] is real; "
                 f"anything marked [TOOL ERROR] means the path does NOT exist - never repeat it as real. "
@@ -1777,12 +1784,12 @@ async def messages_endpoint(request: Request):
         }
     elif method == "prompts/list":
         resp["result"] = {
-            "prompts": [{"name": "antigravity-orchestrator", "description": f"Orchestrator role for {user}"}]
+            "prompts": [{"name": "rhm-orchestrator", "description": f"Orchestrator role for {user}"}]
         }
     elif method == "prompts/get":
         skill_text = get_skill(user, request.headers.get("host", PUBLIC_HOST))
         resp["result"] = {
-            "description": "Antigravity Orchestrator Persona",
+            "description": "Remote Harness Orchestrator Persona",
             "messages": [{"role": "user", "content": {"type": "text", "text": skill_text}}]
         }
     elif method == "resources/list":

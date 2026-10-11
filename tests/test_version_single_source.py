@@ -82,7 +82,7 @@ def test_every_other_declaration_of_the_version_is_derived():
 def test_the_docs_name_the_current_version():
     """The README's copy/paste examples must match the shipped installer."""
     readme = _read("README.md")
-    mentioned = set(re.findall(r"AntigravityMesh-Setup-(\d+\.\d+\.\d+)\.exe", readme))
+    mentioned = set(re.findall(r"RemoteHarnessMCP-Setup-(\d+\.\d+\.\d+)\.exe", readme))
     assert mentioned, "the README should show the setup executable's name at least once"
     assert mentioned == {version_module.__version__}, (
         "the README advertises %s while the node is %s"

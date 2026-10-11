@@ -30,7 +30,7 @@ from core import version as version_module
 REPO = Path(__file__).resolve().parent.parent
 
 #: The files verify_payload() insists on - a payload without them is not a node.
-REQUIRED_FILES = ("agent.py", "mcp_tools.py", "updater.py", "version.py", "__init__.py")
+REQUIRED_FILES = ("agent.py", "mcp_tools.py", "paths.py", "updater.py", "version.py", "__init__.py")
 
 
 # ---------------------------------------------------------------------------
@@ -253,7 +253,7 @@ def test_prerelease_channel_and_token_precedence(monkeypatch):
 
 def test_release_payload_is_normalised():
     release = updater._release_from_payload({
-        "tag_name": "v0.3.0", "name": "Antigravity Mesh 0.3.0", "body": "notes",
+        "tag_name": "v0.3.0", "name": "Remote Harness MCP 0.3.0", "body": "notes",
         "published_at": "2026-01-01T00:00:00Z", "html_url": "https://example.invalid",
         "prerelease": False, "draft": False,
         "assets": [{"name": "mesh-payload-0.3.0.zip", "browser_download_url": "https://x/y.zip",
@@ -286,7 +286,7 @@ def test_asset_ladder_prefers_the_payload_archive(tmp_path):
 
 def test_asset_ladder_falls_back_to_the_setup_exe_on_windows(tmp_path):
     release = release_dict("0.3.0", tmp_path / "mesh-payload-0.3.0.zip", assets=[
-        asset("AntigravityMesh-Setup-0.3.0.exe", "https://x/AntigravityMesh-Setup-0.3.0.exe", size=10),
+        asset("RemoteHarnessMCP-Setup-0.3.0.exe", "https://x/RemoteHarnessMCP-Setup-0.3.0.exe", size=10),
     ])
     release["tarball_url"] = "https://x/tar.gz"
     chosen = updater.choose_asset(release, platform="win32")
@@ -1009,7 +1009,7 @@ def test_the_repository_wires_every_entry_point():
     assert "update:" in cli
 
     installer = (REPO / "install.ps1").read_text(encoding="utf-8-sig")
-    assert "AntigravityMeshUpdater" in installer
+    assert "RemoteHarnessMCPUpdater" in installer
     assert "ops\\update.ps1" in installer
     assert "core/updater.py" in installer
     assert "core/version.py" in installer
@@ -1042,7 +1042,7 @@ def test_the_ci_workflow_publishes_what_the_updater_reads():
     workflow = (REPO / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
     assert "tools/build-payload-zip.py" in workflow
     assert "mesh-payload-" in workflow
-    assert "AntigravityMesh-Setup-" in workflow
+    assert "RemoteHarnessMCP-Setup-" in workflow
     assert "core/version.py" in workflow, "the tag must be checked against the module version"
     assert "gh release upload" in workflow
 
@@ -1074,7 +1074,7 @@ def test_the_windows_tasks_start_windowless():
     installer = (REPO / "install.ps1").read_text(encoding="utf-8-sig")
     assert installer.count("run-hidden.vbs") >= 4, "bootstrap list plus both tasks"
     assert "wscript.exe" in installer
-    for task in ("AntigravityMeshWatchdog", "AntigravityMeshUpdater"):
+    for task in ("RemoteHarnessMCPWatchdog", "RemoteHarnessMCPUpdater"):
         assert task in installer, "%s must still be registered" % task
     assert "New-ScheduledTaskAction -Execute $watchdogHost" in installer
     assert "New-ScheduledTaskAction -Execute $updaterHost" in installer

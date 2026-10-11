@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-core/server.py - Antigravity Mesh Standalone MCP Server (superset module).
+core/server.py - Remote Harness MCP Standalone MCP Server (superset module).
 
 This module serves two purposes:
 
 1. Typed coordinator vitals helper used by the cloud/tunnel deployment:
-   ``get_coordinator_vitals() -> NodeVitals`` (imported by ``agy_mcp_server.py``
+   ``get_coordinator_vitals() -> NodeVitals`` (imported by ``rhm_mcp_server.py``
    and by the typed integration / resilience tests).
 
 2. A fully self-contained, stdlib-only MCP (Model Context Protocol) HTTP server
@@ -59,7 +59,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
-logger = logging.getLogger("antigravity-mesh.standalone")
+logger = logging.getLogger("remote-harness-mcp.standalone")
 
 # ---------------------------------------------------------------------------
 # Optional local dependencies.
@@ -344,13 +344,13 @@ class _InvalidParams(Exception):
     """Raised internally when a ``tools/call`` argument fails validation."""
 
 
-class AntigravityMeshServer(object):
+class RemoteHarnessMCPServer(object):
     """Standalone MCP server: a registry of tools plus a JSON-RPC dispatcher."""
 
-    name = "antigravity_mesh"
+    name = "remote_harness_mcp"
     version = "1.0.0"
 
-    def __init__(self, name: str = "antigravity_mesh") -> None:
+    def __init__(self, name: str = "remote_harness_mcp") -> None:
         self.name = name
         self.tools: Dict[str, Callable[..., Any]] = {}
         self._specs: Dict[str, Dict[str, Any]] = {
@@ -473,7 +473,7 @@ class AntigravityMeshServer(object):
                     # lives, because a phone node (Termux) is exactly the case where
                     # a model otherwise hand-writes termux-* commands through
                     # bash_exec instead of using the typed tools.
-                    "instructions": ("Standalone Local Antigravity Mesh Server. "
+                    "instructions": ("Standalone Local Remote Harness MCP Server. "
                                      "For the device this node runs on - battery, signal, "
                                      "time, sensors, cameras, microphones, notifications, "
                                      "torch, volume - use device_info / device_control; "
@@ -505,7 +505,7 @@ class AntigravityMeshServer(object):
                 "id": req_id,
                 "result": {
                     "prompts": [
-                        {"name": "antigravity-orchestrator", "description": "Local Standalone Orchestrator"}
+                        {"name": "rhm-orchestrator", "description": "Local Standalone Orchestrator"}
                     ]
                 },
             }
@@ -515,7 +515,7 @@ class AntigravityMeshServer(object):
                 "jsonrpc": "2.0",
                 "id": req_id,
                 "result": {
-                    "description": "Antigravity Orchestrator Persona",
+                    "description": "Remote Harness Orchestrator Persona",
                     "messages": [
                         {
                             "role": "user",
@@ -663,10 +663,10 @@ def configure_tools_from_env() -> None:
     )
 
 
-def create_mcp_server() -> AntigravityMeshServer:
+def create_mcp_server() -> RemoteHarnessMCPServer:
     """Factory used by the HTTP handler and by the test-suite."""
     configure_tools_from_env()
-    return AntigravityMeshServer(name="antigravity_mesh")
+    return RemoteHarnessMCPServer(name="remote_harness_mcp")
 
 
 # ---------------------------------------------------------------------------
@@ -684,14 +684,14 @@ _TOKEN_QUERY_RE = re.compile(r"([?&]token=)[^&\s\"]*", re.IGNORECASE)
 class StandaloneMCPHandler(BaseHTTPRequestHandler):
     """Threaded HTTP handler exposing the MCP endpoints of the standalone server."""
 
-    server_version = "AntigravityMeshStandalone/1.0"
+    server_version = "RemoteHarnessMCPStandalone/1.0"
 
     # Bound slow/stalled clients (e.g. a Content-Length larger than the body it
     # sends) so a single request cannot pin a handler thread forever.
     timeout = 30
 
     # Set by ``run_standalone_server`` (class-level so each request thread sees it).
-    server_mcp: Optional[AntigravityMeshServer] = None
+    server_mcp: Optional[RemoteHarnessMCPServer] = None
     auth_token: str = ""
 
     # -- plumbing ---------------------------------------------------------
@@ -728,7 +728,7 @@ class StandaloneMCPHandler(BaseHTTPRequestHandler):
         self.send_response(401)
         self._cors_headers()
         self.send_header("Content-Type", "application/json")
-        self.send_header("WWW-Authenticate", 'Bearer realm="antigravity-mesh"')
+        self.send_header("WWW-Authenticate", 'Bearer realm="remote-harness-mcp"')
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -911,7 +911,7 @@ def run_standalone_server(host: str = "127.0.0.1", port: int = 8096, token: Opti
     httpd = ThreadingHTTPServer((host, int(port)), StandaloneMCPHandler)
     httpd.daemon_threads = True
     logger.info(
-        "Antigravity Mesh standalone MCP server listening on http://%s:%s/sse (auth: %s)",
+        "Remote Harness MCP standalone MCP server listening on http://%s:%s/sse (auth: %s)",
         host,
         port,
         "enabled" if token else "disabled",
@@ -927,7 +927,7 @@ def run_standalone_server(host: str = "127.0.0.1", port: int = 8096, token: Opti
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         prog="core.server",
-        description="Antigravity Mesh Standalone MCP Server (localhost by default).",
+        description="Remote Harness MCP Standalone MCP Server (localhost by default).",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "SECURITY: --host defaults to 127.0.0.1 on purpose. This server executes\n"

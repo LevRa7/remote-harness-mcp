@@ -1,4 +1,4 @@
-# Project Rules: Antigravity Remote Execution Mesh
+# Project Rules: Remote Harness MCP
 
 ## 🚨 MANDATORY EXECUTION POLICY
 1. **Never use Google Search or Browser to interact with the server API endpoint.**

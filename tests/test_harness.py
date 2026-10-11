@@ -11,7 +11,7 @@ def test_create_agent_config_harness():
     test_id = str(uuid.uuid4())
     # A real temporary directory rather than "/tmp/...", which on Windows is a
     # drive-relative path that writes to D:\tmp.
-    save_dir = tempfile.mkdtemp(prefix="agy-harness-")
+    save_dir = tempfile.mkdtemp(prefix="rhm-harness-")
     cfg = create_agent_config(
         conversation_id=test_id,
         save_dir=save_dir,

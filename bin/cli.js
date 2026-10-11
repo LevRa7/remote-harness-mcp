@@ -23,17 +23,17 @@ const LOCAL_SCRIPTS = {
 // "parameter cannot be found" error.
 const LOCAL_USAGE = {
   doctor: [
-    'usage: gemini-computer-use doctor [-Json] [-ConfigDir <path>] [-TailLines <n>]',
+    'usage: remote-harness-mcp doctor [-Json] [-ConfigDir <path>] [-TailLines <n>]',
     '  read-only node diagnostic: autostart interpreter, heartbeat, log tail, gateway state',
     '  exit code 0 when the node is healthy, 2 otherwise'
   ].join('\n'),
   restart: [
-    'usage: gemini-computer-use restart [-Quiet] [-ConfigDir <path>] [-LogFile <path>] [-GraceSeconds <n>]',
+    'usage: remote-harness-mcp restart [-Quiet] [-ConfigDir <path>] [-LogFile <path>] [-GraceSeconds <n>]',
     '  runs the watchdog once and starts the agent when the node is offline',
     '  exit code 0 when the node is online, 2 when the node is misconfigured, 3 when it is still offline'
   ].join('\n'),
   update: [
-    'usage: gemini-computer-use update [-Check] [-Force] [-Offline] [-NoRestart] [-Json]',
+    'usage: remote-harness-mcp update [-Check] [-Force] [-Offline] [-NoRestart] [-Json]',
     '                                [-InstallDir <path>] [-Python <path>] [-ConfigDir <path>]',
     '  self-update from the newest GitHub release: -Check only reports what the',
     '  newest published version is, without -Check the payload is downloaded, its',
@@ -93,7 +93,7 @@ function runLocalScript(name, rest) {
 function launchRemoteInstaller(args) {
   const rawArgs = args.map(arg => `"${arg.replace(/"/g, '\\"')}"`).join(' ');
 
-  console.log('🚀 Launching Gemini Computer Use installer...');
+  console.log('🚀 Launching Remote Harness MCP installer...');
 
   if (isWindows) {
     const psCmd = rawArgs

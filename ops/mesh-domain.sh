@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-#  Antigravity Mesh - resolve the public domain, once, for every shell script.
+#  Remote Harness MCP - resolve the public domain, once, for every shell script.
 #
 #  Sourced by deploy_gateway.sh and ops/nginx/render-domain.sh. The order below
 #  is the same order core/domain.py implements for the runtime; keeping the shell
@@ -9,7 +9,7 @@
 #
 #    1. MESH_PUBLIC_URL in the environment;
 #    2. MESH_PUBLIC_URL (or the AGY_PUBLIC_BASE_URL alias) in the domain file -
-#       /etc/antigravity-mesh/domain.env by default, MESH_DOMAIN_FILE overrides;
+#       /etc/remote-harness-mcp/domain.env by default, MESH_DOMAIN_FILE overrides;
 #    3. core/domain.py's DEFAULT_PUBLIC_BASE_URL, read from the checkout.
 #
 #  On success exports:
@@ -24,7 +24,7 @@ mesh_resolve_domain() {
     local repo_dir="${1:-.}"
     local value="" candidate_python="" source=""
 
-    MESH_DOMAIN_FILE_RESOLVED="${MESH_DOMAIN_FILE:-/etc/antigravity-mesh/domain.env}"
+    MESH_DOMAIN_FILE_RESOLVED="${MESH_DOMAIN_FILE:-/etc/remote-harness-mcp/domain.env}"
 
     if [ -n "${MESH_PUBLIC_URL:-}" ]; then
         value="$MESH_PUBLIC_URL"

@@ -680,7 +680,7 @@ def test_health_and_mcp_still_answer_through_the_app(tmp_path, monkeypatch):
 
     status, _, body = _asgi("GET", "/health", b"?user=node-one")
     assert status == 200
-    assert json.loads(body)["service"] == "antigravity_mesh_gateway"
+    assert json.loads(body)["service"] == "remote_harness_mcp_gateway"
 
     # An unauthenticated POST /mcp must be answered by the MCP endpoint (401),
     # never by the share catch-all (which would answer 404 "not found").

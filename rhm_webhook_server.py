@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-agy_webhook_server.py - Ultra-fast & Secure micro-webhook server for Antigravity & Bash.
+rhm_webhook_server.py - Ultra-fast & Secure micro-webhook server for Remote Harness & Bash.
 Protected with constant-time token verification, anti-brute-force IP rate limiting,
 and strict access controls so ONLY holders of the secret token can execute commands.
 """
@@ -24,13 +24,16 @@ import subagent_dispatcher
 # command strings and outputs it stores are redacted before they are persisted.
 from core.redact import redact_entry
 
-PORT = int(os.environ.get("AGY_WEBHOOK_PORT", 8095))
-HOST = os.environ.get("AGY_WEBHOOK_HOST", "127.0.0.1")
+# RHM_* is the current spelling; AGY_* stays accepted as the pre-rename alias.
+PORT = int(os.environ.get("RHM_WEBHOOK_PORT") or os.environ.get("AGY_WEBHOOK_PORT", 8095))
+HOST = os.environ.get("RHM_WEBHOOK_HOST") or os.environ.get("AGY_WEBHOOK_HOST", "127.0.0.1")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SECRET_FILE = os.path.join(BASE_DIR, "webhook_secret.txt")
 LOG_FILE = os.path.join(BASE_DIR, "webhook_server.log")
 HISTORY_FILE = os.path.join(BASE_DIR, "webhook_history.json")
-AGY_BIN = "/root/.local/bin/agy"
+#: The Google Antigravity CLI binary this legacy server can execute (external
+#: tool, hence its own name); ``exec_type`` "agy" selects it.
+ANTIGRAVITY_CLI_BIN = "/root/.local/bin/agy"
 MATEBOOK_PASS = os.environ.get("MATEBOOK_PASS", "")  # never hardcode: set in the service environment
 # Workstation address, SSH user and labels are read from the environment ONLY.
 MATEBOOK_IP = os.environ.get("MATEBOOK_IP", "").strip()
@@ -46,7 +49,7 @@ logging.basicConfig(
         logging.StreamHandler(sys.stdout)
     ]
 )
-logger = logging.getLogger("agy-webhook")
+logger = logging.getLogger("rhm-webhook")
 
 def get_or_create_secret() -> str:
     if os.path.exists(SECRET_FILE):
@@ -497,7 +500,7 @@ WEB_UI_HTML = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>AGY Secure Webhook Terminal</title>
+  <title>Remote Harness MCP Secure Webhook Terminal</title>
   <style>
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace; background: #0f172a; color: #f8fafc; margin: 0; padding: 20px; }
     .container { max-width: 900px; margin: 0 auto; }
@@ -518,7 +521,7 @@ WEB_UI_HTML = """<!DOCTYPE html>
 </head>
 <body>
   <div class="container">
-    <h1>🔒 AGY Secure Webhook Console</h1>
+    <h1>🔒 Remote Harness MCP Secure Webhook Console</h1>
     <div class="sub">Latency: ~25-70ms • Authenticated & Protected Remote Execution</div>
     
     <div class="card">
@@ -537,7 +540,7 @@ WEB_UI_HTML = """<!DOCTYPE html>
         <button class="quick-btn" onclick="setCmd('uptime')">uptime</button>
         <button class="quick-btn" onclick="setCmd('free -h')">free -h</button>
         <button class="quick-btn" onclick="setCmd('df -h /')">df -h /</button>
-        <button class="quick-btn" onclick="setCmd('systemctl status agy-webhook')">webhook status</button>
+        <button class="quick-btn" onclick="setCmd('systemctl status rhm-webhook')">webhook status</button>
         <button class="quick-btn" onclick="setCmd('ps aux --sort=-%mem | head -n 15')">top 15 RAM</button>
       </div>
     </div>
@@ -550,7 +553,7 @@ WEB_UI_HTML = """<!DOCTYPE html>
   </div>
 
   <script>
-    const savedToken = localStorage.getItem('agy_token') || new URLSearchParams(window.location.search).get('token') || '';
+    const savedToken = localStorage.getItem('rhm_token') || new URLSearchParams(window.location.search).get('token') || '';
     if (savedToken) document.getElementById('token').value = savedToken;
 
     document.getElementById('cmd').addEventListener('keydown', (e) => {
@@ -566,7 +569,7 @@ WEB_UI_HTML = """<!DOCTYPE html>
       const token = document.getElementById('token').value.trim();
       const cmd = document.getElementById('cmd').value.trim();
       if (!cmd) return;
-      if (token) localStorage.setItem('agy_token', token);
+      if (token) localStorage.setItem('rhm_token', token);
 
       const outEl = document.getElementById('output');
       const metaEl = document.getElementById('meta');
@@ -627,7 +630,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
     def send_cors_headers(self):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Agy-Token, X-Requested-With")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Rhm-Token, X-Agy-Token, X-Requested-With")
         self.send_header("Access-Control-Max-Age", "86400")
 
     def do_OPTIONS(self):
@@ -690,8 +693,8 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 record_successful_attempt(client_ip)
                 return True
 
-        # 2. X-Agy-Token
-        custom_hdr = self.headers.get("X-Agy-Token", "").strip()
+        # 2. X-Rhm-Token (X-Agy-Token is the pre-rename alias)
+        custom_hdr = (self.headers.get("X-Rhm-Token") or self.headers.get("X-Agy-Token") or "").strip()
         if self.verify_token(custom_hdr):
             record_successful_attempt(client_ip)
             return True
@@ -717,7 +720,11 @@ class WebhookHandler(BaseHTTPRequestHandler):
     def parse_request_data(self):
         parsed_url = urlparse(self.path)
         path = parsed_url.path.rstrip("/")
-        if path.startswith("/api/agy"):
+        if path.startswith("/api/rhm"):
+            path = path[len("/api/rhm"):]
+        elif path.startswith("/api/agy"):
+            # Pre-rename route, kept so an existing Google Apps Script relay (whose
+            # endpoint URL is configured by hand) does not break.
             path = path[len("/api/agy"):]
         if not path:
             path = "/"
@@ -913,7 +920,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
     <div class="links">
       <a href="?format=raw" target="_blank">📄 Raw Text</a>
       <a href="?format=json" target="_blank">⚙️ JSON</a>
-      <a href="/api/agy/live" target="_blank">📋 Все задачи</a>
+      <a href="/api/rhm/live" target="_blank">📋 Все задачи</a>
     </div>
   </div>
 
@@ -989,7 +996,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 from exchange_oauth_code import exchange
                 ok = exchange(raw_code)
                 if ok:
-                    self.send_html("<html><body style='background:#121214;color:#10b981;font-family:sans-serif;text-align:center;padding:50px;'><h1>✅ Успешно!</h1><p style='color:#e4e4e7;'>Google OAuth токен успешно получен и сохранен. Фоновый сервис agy-watcher перезапущен с персональной квотой.</p></body></html>")
+                    self.send_html("<html><body style='background:#121214;color:#10b981;font-family:sans-serif;text-align:center;padding:50px;'><h1>✅ Успешно!</h1><p style='color:#e4e4e7;'>Google OAuth токен успешно получен и сохранен. Фоновый сервис rhm-watcher перезапущен с персональной квотой.</p></body></html>")
                 else:
                     self.send_error_json("Exchange failed. Check server logs.", 500)
             except Exception as ex:
@@ -1191,7 +1198,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
             self.send_json({"status": "success", "subagents": tasks})
             return
 
-        elif path in ["/gdrive_copy", "/gdrive_download", "/api/agy/gdrive/copy", "/api/agy/gdrive/download"]:
+        elif path in ["/gdrive_copy", "/gdrive_download", "/api/rhm/gdrive/copy", "/api/rhm/gdrive/download"]:
             file_name_or_id = query_params.get("file", query_params.get("file_name", query_params.get("name", [None])))[0]
             dest_path = query_params.get("dest", query_params.get("dest_path", query_params.get("path", [None])))[0]
             target_node = query_params.get("node", query_params.get("target_node", ["vps"]))[0]
@@ -1199,7 +1206,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 self.send_error_json("Missing 'file' or 'dest' query parameters.")
                 return
             try:
-                from agy_mcp_server import gdrive_copy
+                from rhm_mcp_server import gdrive_copy
                 result_str = gdrive_copy(file_name_or_id, dest_path, target_node)
                 is_err = "Error" in result_str or "STDERR" in result_str
                 self.send_json({
@@ -1391,7 +1398,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
             self.send_json(res)
             return
 
-        elif path in ["/gdrive_copy", "/gdrive_download", "/api/agy/gdrive/copy", "/api/agy/gdrive/download"]:
+        elif path in ["/gdrive_copy", "/gdrive_download", "/api/rhm/gdrive/copy", "/api/rhm/gdrive/download"]:
             file_name_or_id = body_json.get("file") or body_json.get("file_name") or body_json.get("file_id") or body_json.get("name")
             dest_path = body_json.get("dest") or body_json.get("dest_path") or body_json.get("target_path") or body_json.get("path")
             target_node = body_json.get("node") or body_json.get("target_node") or body_json.get("target", "vps")
@@ -1400,7 +1407,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 return
 
             try:
-                from agy_mcp_server import gdrive_copy
+                from rhm_mcp_server import gdrive_copy
                 result_str = gdrive_copy(file_name_or_id, dest_path, target_node)
                 is_err = "Error" in result_str or "STDERR" in result_str
                 self.send_json({
@@ -1439,8 +1446,8 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 out = res.stdout
                 err = res.stderr
                 code = res.returncode
-            elif exec_type == "agy":
-                full_cmd = [AGY_BIN, "-p", cmd, "--dangerously-skip-permissions"]
+            elif exec_type in ("agy", "antigravity"):
+                full_cmd = [ANTIGRAVITY_CLI_BIN, "-p", cmd, "--dangerously-skip-permissions"]
                 res = subprocess.run(
                     full_cmd,
                     cwd=cwd if os.path.exists(cwd) else "/root",
@@ -1482,11 +1489,11 @@ class WebhookHandler(BaseHTTPRequestHandler):
 def run_server():
     server_address = (HOST, PORT)
     httpd = ThreadingHTTPServer(server_address, WebhookHandler)
-    logger.info(f"Starting AGY Webhook Server on http://{HOST}:{PORT}")
+    logger.info(f"Starting Remote Harness MCP webhook server on http://{HOST}:{PORT}")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
-        logger.info("Stopping AGY Webhook Server...")
+        logger.info("Stopping Remote Harness MCP webhook server...")
     finally:
         httpd.server_close()
         logger.info("Server stopped.")

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-subagent_dispatcher.py - Multi-Device Subagent Orchestrator for Antigravity & Web-Gemini.
+subagent_dispatcher.py - Multi-Device Subagent Orchestrator for Remote Harness & Web-Gemini.
 Dispatches subagent tasks to:
 1. VPS Local Subagent (gemini-3.8-flash-high) - for research, logs, monitoring, fast audits.
 2. Workstation Remote Subagent (gemini-3.1-pro-high / claude-sonnet-4-6) - for development, tests, coding.
@@ -32,7 +32,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger("subagent_dispatcher")
 
-AGY_BIN = "/root/.local/bin/agy"
+#: The Google Antigravity CLI binary this dispatcher runs (external tool).
+ANTIGRAVITY_CLI_BIN = "/root/.local/bin/agy"
 # Workstation address, SSH user and password are read from the environment ONLY.
 MATEBOOK_IP = os.environ.get("MATEBOOK_IP", "").strip()
 MATEBOOK_USER = os.environ.get("MATEBOOK_USER", "").strip()
@@ -48,7 +49,7 @@ def run_vps_subagent(prompt: str, model: str = "gemini-3.8-flash-high", timeout:
     logger.info(f"Spawning VPS Researcher Subagent [{model}]: {prompt[:80]}...")
 
     cmd = [
-        AGY_BIN,
+        ANTIGRAVITY_CLI_BIN,
         "-p", prompt,
         "--model", model,
         "--agent", "research",
@@ -280,7 +281,7 @@ def spawn_subagent_task(target: str, prompt: str, role: str = "auto", model: str
         "target": actual_target,
         "role": actual_role,
         "model": actual_model,
-        "poll_url": f"/api/agy/subagent/status?id={task_id}"
+        "poll_url": f"/api/rhm/subagent/status?id={task_id}"
     }
 
 def get_subagent_status(task_id: str) -> dict:

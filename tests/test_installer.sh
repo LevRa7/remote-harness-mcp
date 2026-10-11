@@ -172,11 +172,11 @@ echo "$TERMUX_OUT" | grep -q 'Android phone/tablet (Termux)' || {
 # also what core/domain.py resolves there.
 TERMUX_DOMAIN_LINE=$(echo "$TERMUX_OUT" | grep '^\[DRY-RUN\] Domain file:')
 case "$TERMUX_DOMAIN_LINE" in
-    *.config/antigravity-mesh/domain.env) ;;
+    *.config/remote-harness-mcp/domain.env) ;;
     *) echo "[FAIL] a phone must use the per-user domain file: $TERMUX_DOMAIN_LINE"; exit 1 ;;
 esac
 case "$TERMUX_DOMAIN_LINE" in
-    */etc/antigravity-mesh/*) echo "[FAIL] a phone cannot write to /etc: $TERMUX_DOMAIN_LINE"; exit 1 ;;
+    */etc/remote-harness-mcp/*) echo "[FAIL] a phone cannot write to /etc: $TERMUX_DOMAIN_LINE"; exit 1 ;;
 esac
 echo "$TERMUX_OUT" | grep -q 'Systemd service' && {
     echo "[FAIL] no systemd unit is installed on Android"
@@ -197,11 +197,11 @@ if grep -q 'run_privileged pkg' "$INSTALLER"; then
     echo "[FAIL] pkg must never go through run_privileged (no sudo on Android)"
     exit 1
 fi
-grep -q 'configure_termux_node "agy-agent" "core.agent"' "$INSTALLER" || {
+grep -q 'configure_termux_node "rhm-agent" "core.agent"' "$INSTALLER" || {
     echo "[FAIL] the tunnel node must use the Termux autostart helper"
     exit 1
 }
-grep -q 'configure_termux_node "agy-standalone" "core.server"' "$INSTALLER" || {
+grep -q 'configure_termux_node "rhm-standalone" "core.server"' "$INSTALLER" || {
     echo "[FAIL] the standalone server must use the Termux autostart helper"
     exit 1
 }
@@ -347,7 +347,7 @@ for fn in normalise_host strip_bom domain_file_value module_default_domain write
     }
 done
 FN_DIR="$(mktemp -d)"
-DEFAULT_DOMAIN_DIR="$FN_DIR/.config/antigravity-mesh"
+DEFAULT_DOMAIN_DIR="$FN_DIR/.config/remote-harness-mcp"
 DEFAULT_DOMAIN_FILE="$DEFAULT_DOMAIN_DIR/domain.env"
 DOMAIN_PLACEHOLDER="__MESH_DOMAIN__"
 IS_TERMUX=false

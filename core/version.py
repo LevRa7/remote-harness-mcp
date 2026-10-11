@@ -25,7 +25,7 @@ __version__ = "0.4.4"
 #: The repository that publishes the releases this node updates itself from.
 #: Declared here as well so a checkout says where it came from; ``package.json``
 #: carries the same slug under ``repository.url`` and a test pins the agreement.
-REPO_SLUG = "LevRa7/Computer-use-for-Gemini-App-Web"
+REPO_SLUG = "LevRa7/remote-harness-mcp"
 
 #: Anchored pattern for the only accepted spelling, used by the single-source test.
 VERSION_PATTERN = r"^\d+\.\d+\.\d+(?:-[0-9A-Za-z.\-]+)?$"

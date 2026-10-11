@@ -67,7 +67,7 @@ def test_known_credential_formats_are_redacted():
 def test_ordinary_commands_are_untouched():
     for command in (
         "ls -la && df -h",
-        "systemctl status agy-webhook.service",
+        "systemctl status rhm-webhook.service",
         "python3 -m pytest tests --report token_uri=https://oauth2.googleapis.com/token",
         "grep -c 'failed' /var/log/auth.log",
     ):

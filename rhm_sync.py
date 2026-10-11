@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-agy_sync.py - Authoritative Server Facts Collector & Google Drive Synchronizer.
+rhm_sync.py - Authoritative Server Facts Collector & Google Drive Synchronizer.
 Periodically audits the local server and Tailscale network, updates local cache,
 and synchronizes server_facts.json and server_profile.md to Google Drive.
 Guarantees that stored data is 100% consistent with the actual state of the server.
@@ -29,7 +29,7 @@ BASE_DIR = Path(__file__).resolve().parent
 TOKEN_FILE = BASE_DIR / "token.json"
 FACTS_FILE = BASE_DIR / "server_facts.json"
 PROFILE_FILE = BASE_DIR / "server_profile.md"
-LOG_FILE = BASE_DIR / "agy_sync.log"
+LOG_FILE = BASE_DIR / "rhm_sync.log"
 
 # Public infrastructure identifiers are read from the environment ONLY.
 # Set GATEWAY_HOST_IP (gateway public IP), GATEWAY_HOSTNAME, MESH_PUBLIC_URL /
@@ -67,7 +67,7 @@ logging.basicConfig(
         logging.StreamHandler(sys.stdout)
     ]
 )
-logger = logging.getLogger("agy_sync")
+logger = logging.getLogger("rhm_sync")
 
 AGY_BIN = "/root/.local/bin/agy"
 DRIVE_API_BASE = "https://www.googleapis.com/drive/v3"
@@ -175,9 +175,9 @@ def collect_server_facts() -> dict:
     key_services = [
         "omniroute.service",
         "nginx.service",
-        "agy-webhook.service",
-        "agy-watcher.service",
-        "agy-mcp.service",
+        "rhm-webhook.service",
+        "rhm-watcher.service",
+        "rhm-mcp.service",
         "mariadb.service",
         "docker.service",
         "containerd.service",

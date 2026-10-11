@@ -3,7 +3,7 @@ import warnings
 warnings.filterwarnings("ignore")
 
 """
-agy_watcher.py - Real-time task executor supporting direct Bash commands and Antigravity CLI.
+rhm_watcher.py - Real-time task executor supporting direct Bash commands and Antigravity CLI.
 Updates tasks in Google Drive in real-time with Markdown status indicators:
   ### ⏳ Выполняется: (running command)
   ### ✅ Выполнено: (completed commands and terminal output)
@@ -34,7 +34,7 @@ from core import domain
 from core.redact import redact_entry
 
 BASE_DIR = Path(__file__).resolve().parent
-LOG_FILE = BASE_DIR / "agy_watcher.log"
+LOG_FILE = BASE_DIR / "rhm_watcher.log"
 METRICS_FILE = BASE_DIR / "task_metrics.json"
 HISTORY_LOG_FILE = BASE_DIR / "task_history.log"
 
@@ -47,7 +47,7 @@ logging.basicConfig(
         logging.StreamHandler(sys.stdout)
     ]
 )
-logger = logging.getLogger("agy_watcher")
+logger = logging.getLogger("rhm_watcher")
 
 RUNNING = True
 
@@ -103,7 +103,7 @@ def record_task_metrics(metric: dict):
     except Exception as e:
         logger.warning(f"Failed to update task_metrics.json: {e}")
 
-def find_agy_binary() -> str:
+def find_rhm_binary() -> str:
     which_path = shutil.which("agy")
     if which_path:
         return which_path
@@ -290,9 +290,9 @@ def execute_shell_commands(
     combined_output = "\n\n".join(all_outputs)
     return overall_exit_code, combined_output, total_duration, completed_entries
 
-def execute_agy_prompt(
+def execute_rhm_prompt(
     prompt: str,
-    agy_bin: str,
+    rhm_bin: str,
     task: dict,
     data: dict,
     file_id: str,
@@ -323,7 +323,7 @@ def execute_agy_prompt(
             pass
 
     cmd = [
-        agy_bin,
+        rhm_bin,
         "-p", prompt,
         "--output-format", "stream-json",
         "--dangerously-skip-permissions"
@@ -408,7 +408,7 @@ def execute_agy_prompt(
         task["log"] = f"### ❌ Ошибка:\n🔗 Live лог: {live_url}\n```\n{err}\n```"
         return -1, str(err), total_duration
 
-def process_single_task(task: dict, data: dict, file_id: str, agy_bin: str, client: GDriveClient):
+def process_single_task(task: dict, data: dict, file_id: str, rhm_bin: str, client: GDriveClient):
     t_start = time.time()
     task_id = task.get("id", f"task_{int(t_start)}")
     logger.info(f"=== Processing task [{task_id}] ===")
@@ -426,7 +426,7 @@ def process_single_task(task: dict, data: dict, file_id: str, agy_bin: str, clie
             "environment); live log links use the project default %s.",
             domain.domain_file(), public_base_url,
         )
-    live_url = f"{public_base_url}/api/agy/live/{task_id}"
+    live_url = f"{public_base_url}/api/rhm/live/{task_id}"
 
     created_at_str = task.get("created_at")
     queue_latency = None
@@ -521,9 +521,9 @@ def process_single_task(task: dict, data: dict, file_id: str, agy_bin: str, clie
     else:
         prompt = task.get("prompt") or task.get("command", "")
         logger.info(f"Executing as agy prompt: {prompt}")
-        retcode, output, duration = execute_agy_prompt(
+        retcode, output, duration = execute_rhm_prompt(
             prompt=prompt,
-            agy_bin=agy_bin,
+            rhm_bin=rhm_bin,
             task=task,
             data=data,
             file_id=file_id,
@@ -660,7 +660,7 @@ def expire_stale_tasks(tasks: list, data: dict, file_id: str, client: GDriveClie
             logger.warning(f"Failed to update queue after expiring stale tasks: {e}")
     return modified
 
-def run_loop(client: GDriveClient, agy_bin: str, check_interval: int, fixed_file_id: str = None):
+def run_loop(client: GDriveClient, rhm_bin: str, check_interval: int, fixed_file_id: str = None):
     logger.info(f"Starting Task Watcher. Monitoring folder: {GEMINI_REMOTE_FOLDER_ID} (interval: {check_interval}s)")
     last_heartbeat = 0
 
@@ -696,7 +696,7 @@ def run_loop(client: GDriveClient, agy_bin: str, check_interval: int, fixed_file
                         if not RUNNING:
                             break
                         if is_pending_task(task):
-                            process_single_task(task, data, fid, agy_bin, client)
+                            process_single_task(task, data, fid, rhm_bin, client)
                             processed_any = True
             except Exception as err:
                 logger.error(f"Error during queue check for {fid}: {err}")
@@ -720,20 +720,20 @@ def run_loop(client: GDriveClient, agy_bin: str, check_interval: int, fixed_file
         time.sleep(sleep_time)
 
 def main():
-    parser = argparse.ArgumentParser(description="Real-time Antigravity Task Watcher")
+    parser = argparse.ArgumentParser(description="Real-time Remote Harness Task Watcher")
     parser.add_argument("--interval", type=int, default=7, help="Poll interval in seconds (default: 7)")
     parser.add_argument("--file-id", type=str, default=None, help="Google Drive File ID (optional, auto-discovers if omitted)")
     args = parser.parse_args()
 
     base_dir = Path(__file__).resolve().parent
-    agy_bin = find_agy_binary()
+    rhm_bin = find_rhm_binary()
 
     client = GDriveClient(base_dir)
     if not client.authenticate():
         logger.error("Authentication failed.")
         sys.exit(1)
 
-    run_loop(client, agy_bin, args.interval, fixed_file_id=args.file_id)
+    run_loop(client, rhm_bin, args.interval, fixed_file_id=args.file_id)
 
 if __name__ == "__main__":
     main()

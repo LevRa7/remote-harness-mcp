@@ -24,7 +24,7 @@ import sys
 
 import pytest
 
-from core import agent, domain
+from core import agent, domain, paths
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 INSTALLER = os.path.join(REPO, "install.sh")
@@ -73,12 +73,16 @@ def test_the_domain_file_follows_the_platform(monkeypatch, tmp_path):
     """Linux keeps host-level configuration in /etc; a phone cannot have one."""
     home = str(tmp_path)
     monkeypatch.setattr(domain.os.path, "expanduser", lambda _: home)
-    per_user = os.path.join(home, ".config", "antigravity-mesh", "domain.env")
+    per_user = os.path.join(home, ".config", "remote-harness-mcp", "domain.env")
 
     if os.name == "nt":
         assert domain.default_domain_file() == per_user
     else:
-        assert domain.default_domain_file() == "/etc/antigravity-mesh/domain.env"
+        # On Linux the host-level directory is the answer. It is the current name,
+        # or the pre-rename one when that is the only one present on the host.
+        expected_dir = paths.etc_dir()
+        assert expected_dir in ("/etc/%s" % paths.APP_NAME, "/etc/%s" % paths.LEGACY_APP_NAME)
+        assert domain.default_domain_file() == os.path.join(expected_dir, "domain.env")
 
     # On the phone the per-user path is the answer on every host, which is what
     # install.sh resolves as well: the installer and the node must not disagree
@@ -183,7 +187,7 @@ def test_a_simulated_phone_takes_the_termux_branch(tmp_path):
     domain_line = next(line for line in output.splitlines()
                        if line.startswith("[DRY-RUN] Domain file:"))
     domain_path = domain_line.split(":", 1)[1].strip().replace("\\", "/")
-    assert domain_path.endswith(".config/antigravity-mesh/domain.env")
+    assert domain_path.endswith(".config/remote-harness-mcp/domain.env")
     assert not domain_path.startswith("/etc")
     assert os.path.basename(str(tmp_path)) in domain_path
     # No systemd unit is installed on a phone, so the installer must not report one.
@@ -211,8 +215,8 @@ def test_the_termux_packages_never_go_through_sudo():
     assert "pkg install -y python python-pip python-ensurepip-wheels curl ca-certificates" in text
     assert "run_privileged pkg" not in text
     # The Android autostart is runit plus the Termux:Boot app, not a unit file.
-    assert 'configure_termux_node "agy-agent" "core.agent"' in text
-    assert 'configure_termux_node "agy-standalone" "core.server"' in text
+    assert 'configure_termux_node "rhm-agent" "core.agent"' in text
+    assert 'configure_termux_node "rhm-standalone" "core.server"' in text
     assert '"$HOME/.termux/boot/${name}.sh"' in text
     assert "termux-wake-lock" in text
 
@@ -337,7 +341,7 @@ def test_a_full_termux_install_lays_out_runit_and_the_boot_entry(fake_phone):
     assert "runit (termux-services) supervises the node" in output
     assert "Termux (Android): what to check on the phone" in output
 
-    config_dir = fake_phone["home"] / ".config" / "antigravity-mesh"
+    config_dir = fake_phone["home"] / ".config" / "remote-harness-mcp"
     agent_env = config_dir / "agent.env"
     assert agent_env.is_file()
     env_text = agent_env.read_text(encoding="utf-8")
@@ -346,7 +350,7 @@ def test_a_full_termux_install_lays_out_runit_and_the_boot_entry(fake_phone):
     assert "MESH_GATEWAY=mesh.example.com" in env_text
 
     # The launcher: absolute interpreter, the node module, the stored environment.
-    launcher = config_dir / "agy-agent.sh"
+    launcher = config_dir / "rhm-agent.sh"
     launcher_text = launcher.read_text(encoding="utf-8")
     assert launcher_text.startswith("#!/")
     assert "core.agent" in launcher_text
@@ -355,17 +359,17 @@ def test_a_full_termux_install_lays_out_runit_and_the_boot_entry(fake_phone):
     assert os.access(launcher, os.X_OK)
 
     # The Termux:Boot entry: wake lock, then the supervisor.
-    boot = fake_phone["home"] / ".termux" / "boot" / "agy-agent.sh"
+    boot = fake_phone["home"] / ".termux" / "boot" / "rhm-agent.sh"
     boot_text = boot.read_text(encoding="utf-8")
     assert "termux-wake-lock" in boot_text
-    assert 'sv up "agy-agent"' in boot_text
-    assert "agy-agent.sh" in boot_text, "the boot entry must start the launcher"
+    assert 'sv up "rhm-agent"' in boot_text
+    assert "rhm-agent.sh" in boot_text, "the boot entry must start the launcher"
     assert os.access(boot, os.X_OK)
 
     # The runit service and its logger.
-    service = fake_phone["prefix"] / "var" / "service" / "agy-agent"
+    service = fake_phone["prefix"] / "var" / "service" / "rhm-agent"
     run_text = (service / "run").read_text(encoding="utf-8")
-    assert "agy-agent.sh" in run_text
+    assert "rhm-agent.sh" in run_text
     assert os.access(service / "run", os.X_OK)
     # runit refuses to supervise a service without log/run, so one must exist -
     # the svlogger symlink on a normal phone, the equivalent script elsewhere.
@@ -404,9 +408,9 @@ def test_the_fallbacks_are_used_when_termux_has_no_runit(fake_phone):
     assert "termux-services is not installed" in result.stdout
 
     # The boot entry still falls back to the launcher itself.
-    boot = fake_phone["home"] / ".termux" / "boot" / "agy-agent.sh"
-    assert "agy-agent.boot.log" in boot.read_text(encoding="utf-8")
-    assert not (fake_phone["prefix"] / "var" / "service" / "agy-agent").exists()
+    boot = fake_phone["home"] / ".termux" / "boot" / "rhm-agent.sh"
+    assert "rhm-agent.boot.log" in boot.read_text(encoding="utf-8")
+    assert not (fake_phone["prefix"] / "var" / "service" / "rhm-agent").exists()
 
 
 @needs_bash
@@ -416,7 +420,7 @@ def test_standalone_on_a_phone_gets_its_own_service_and_arguments(fake_phone):
     result = _install_on(fake_phone, "--mode=standalone", "--port=8096", "--token=tok-standalone")
     assert result.returncode == 0, result.stdout + result.stderr
 
-    launcher = fake_phone["home"] / ".config" / "antigravity-mesh" / "agy-standalone.sh"
+    launcher = fake_phone["home"] / ".config" / "remote-harness-mcp" / "rhm-standalone.sh"
     launcher_text = launcher.read_text(encoding="utf-8")
     # The module and its arguments, and never the tunnel module.
     assert "-m core.server --host 127.0.0.1 --port=8096" in launcher_text
@@ -424,12 +428,12 @@ def test_standalone_on_a_phone_gets_its_own_service_and_arguments(fake_phone):
     # --token is honoured through the 0600 env file, not baked into the launcher.
     assert "standalone.env" in launcher_text
     assert "tok-standalone" not in launcher_text
-    assert (fake_phone["home"] / ".config" / "antigravity-mesh" / "standalone.env").exists()
+    assert (fake_phone["home"] / ".config" / "remote-harness-mcp" / "standalone.env").exists()
 
     # The service and the boot entry follow the service name.
-    assert (fake_phone["prefix"] / "var" / "service" / "agy-standalone" / "run").is_file()
-    assert (fake_phone["home"] / ".termux" / "boot" / "agy-standalone.sh").is_file()
-    assert not (fake_phone["prefix"] / "var" / "service" / "agy-agent").exists()
+    assert (fake_phone["prefix"] / "var" / "service" / "rhm-standalone" / "run").is_file()
+    assert (fake_phone["home"] / ".termux" / "boot" / "rhm-standalone.sh").is_file()
+    assert not (fake_phone["prefix"] / "var" / "service" / "rhm-agent").exists()
 
     # The local URL is reachable only inside the phone, and the installer says so.
     assert "http://localhost:8096/sse" in result.stdout
@@ -460,8 +464,8 @@ def test_an_unresolvable_gateway_is_reported_before_anything_is_written(fake_pho
     assert "cannot resolve the gateway name" in output
     assert "Tailscale" in output, "the message must name the usual cause"
     # Nothing was created - no code, no config, no launcher, no service.
-    assert not (fake_phone["home"] / ".gemini-computer-use").exists()
-    assert not (fake_phone["home"] / ".config" / "antigravity-mesh").exists()
+    assert not (fake_phone["home"] / ".remote-harness-mcp").exists()
+    assert not (fake_phone["home"] / ".config" / "remote-harness-mcp").exists()
     assert not (fake_phone["prefix"] / "var" / "service").exists()
 
 
@@ -477,7 +481,7 @@ def test_a_bootstrap_that_downloads_nothing_stops_before_writing_anything(fake_p
 
     assert result.returncode != 0
     assert "Could not download the node code" in output
-    assert not (fake_phone["home"] / ".config" / "antigravity-mesh").exists()
+    assert not (fake_phone["home"] / ".config" / "remote-harness-mcp").exists()
 
 
 @needs_bash

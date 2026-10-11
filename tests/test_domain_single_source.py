@@ -33,7 +33,7 @@ NO_LITERAL_FILES = (
     "ops/mesh-domain.sh",
     "ops/nginx/render-domain.sh",
     "ops/nginx/mesh-domain.vhost.template",
-    "ops/nginx/antigravity-mesh-mcp.conf",
+    "ops/nginx/remote-harness-mcp.conf",
 )
 
 PLACEHOLDER_FILES = (

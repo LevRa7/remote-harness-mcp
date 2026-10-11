@@ -3,7 +3,7 @@
 - **Дата:** 2026-09-06
 - **Спецификация:** [`spec_antigravity_sdk_integration.md`](file:///root/.gemini/antigravity-cli/brain/7d76670c-1b5e-4b9f-a56f-d8ae0bb5bcf6/spec_antigravity_sdk_integration.md)
 - **Методология:** Superpowers Subagent-Driven TDD (Red -> Verify Red -> Green -> Verify Green -> Commit)
-- **Целевое рабочее пространство:** `/root/agy-gdrive-runner` (Coordinator) и синхронизация в `~/MyProjects/antigravity-mesh` (<workstation-host>)
+- **Целевое рабочее пространство:** `/root/agy-gdrive-runner` (Coordinator) и синхронизация в `~/MyProjects/remote-harness-mcp` (<workstation-host>)
 
 ---
 
@@ -58,7 +58,7 @@
 
 ### Шаги реализации:
 1. **Шаг 1 (Red):** Написать тест `tests/test_hooks.py`:
-   - Тест 1: `test_pre_tool_call_blocks_drive_queues()` — попытка вызвать инструмент с `antigravity_tasks.json` должна возвращать `HookResult(allow=False)`.
+   - Тест 1: `test_pre_tool_call_blocks_drive_queues()` — попытка вызвать инструмент с `rhm_tasks.json` должна возвращать `HookResult(allow=False)`.
    - Тест 2: `test_pre_tool_call_blocks_dangerous_rm()` — попытка вызвать команду с `rm -rf /` должна отклоняться.
    - Тест 3: `test_on_tool_error_halts_execution()` — передача исключения или ненулевого кода возврата возвращает чёткую системную директиву остановки `[HARD ERROR HALT]`.
    - Тест 4: `test_post_tool_call_logs_telemetry()` — успешный вызов инструмента регистрирует запись в лог с точной длительностью.
@@ -123,7 +123,7 @@
 1. **Шаг 1 (Red):** Написать тест `tests/test_policies.py`:
    - Проверка разрешения безопасных команд (`git status`, `systemctl status`, `uptime`).
    - Проверка перевода деструктивных команд (`reboot`, `systemctl stop`, `rm`) в режим подтверждения `ask_user`.
-   - Проверка ограничения путей файловых операций пределами рабочих директорий (`/root/agy-gdrive-runner`, `~/MyProjects/antigravity-mesh`).
+   - Проверка ограничения путей файловых операций пределами рабочих директорий (`/root/agy-gdrive-runner`, `~/MyProjects/remote-harness-mcp`).
 2. **Шаг 2 (Verify Red):**
    ```bash
    pytest tests/test_policies.py -v
@@ -206,10 +206,10 @@
 
 ## Task 7: FastMCP Server Typed Integration
 
-**Цель:** Интегрировать схемы Pydantic из `core/schemas.py` в инструменты FastMCP-сервера (`core/server.py` и `agy_mcp_server.py`), чтобы вызовы `system_vitals`, `<node>_vitals` и `<node>_exec` возвращали строго типизированный JSON.
+**Цель:** Интегрировать схемы Pydantic из `core/schemas.py` в инструменты FastMCP-сервера (`core/server.py` и `rhm_mcp_server.py`), чтобы вызовы `system_vitals`, `<node>_vitals` и `<node>_exec` возвращали строго типизированный JSON.
 
 - **Файлы:**
-  - Модифицировать: `agy_mcp_server.py` (или `core/server.py`)
+  - Модифицировать: `rhm_mcp_server.py` (или `core/server.py`)
   - Создать: `tests/test_mcp_typed_integration.py`
 
 ### Шаги реализации:
@@ -240,8 +240,8 @@
 **Цель:** Выполнить сквозное тестирование полного конвейера (схемы + хуки + триггеры + сервер), зафиксировать изменения в Git и синхронизировать рабочий каталог на целевом ноутбуке <workstation-host>.
 
 - **Файлы:**
-  - Создать: `tests/test_e2e_antigravity_mesh.py`
-  - Целевой репозиторий: `~/MyProjects/antigravity-mesh`
+  - Создать: `tests/test_e2e_remote_harness_mcp.py`
+  - Целевой репозиторий: `~/MyProjects/remote-harness-mcp`
 
 ### Шаги реализации:
 1. **Шаг 1:** Запуск полного тестового набора:
@@ -249,10 +249,10 @@
    pytest tests/ -v
    # Критерий успеха: Все тесты (Task 1 - Task 7) зелёные, 0 ошибок.
    ```
-2. **Шаг 2:** Проверка перезапуска и статуса `agy-mcp.service`:
+2. **Шаг 2:** Проверка перезапуска и статуса `rhm-mcp.service`:
    ```bash
-   systemctl restart agy-mcp.service
-   systemctl is-active agy-mcp.service
+   systemctl restart rhm-mcp.service
+   systemctl is-active rhm-mcp.service
    # Ожидаемый результат: active
    ```
 3. **Шаг 3:** Синхронизация с <workstation-host> через Git:

@@ -1,7 +1,7 @@
 # ==============================================================================
-#  Antigravity Mesh - build the single-file Windows setup executable
+#  Remote Harness MCP - build the single-file Windows setup executable
 #
-#  Produces dist\AntigravityMesh-Setup-<version>.exe: a compiled launcher with the
+#  Produces dist\RemoteHarnessMCP-Setup-<version>.exe: a compiled launcher with the
 #  whole node payload embedded, so one downloadable file installs a node.
 #
 #  It uses only what Windows already has - the in-box C# compiler from .NET
@@ -48,7 +48,7 @@ function Write-Step {
     Write-Host ("  " + $Text)
 }
 
-Write-Host 'Antigravity Mesh - building the setup executable'
+Write-Host 'Remote Harness MCP - building the setup executable'
 Write-Host ''
 
 # --- 1. version, from the one place that declares it --------------------------
@@ -129,9 +129,9 @@ try {
         'using System.Reflection;',
         'using System.Runtime.InteropServices;',
         '',
-        '[assembly: AssemblyTitle("Antigravity Mesh Setup")]',
-        '[assembly: AssemblyProduct("Antigravity Mesh")]',
-        '[assembly: AssemblyDescription("Visual installer for an Antigravity Mesh node")]',
+        '[assembly: AssemblyTitle("Remote Harness MCP Setup")]',
+        '[assembly: AssemblyProduct("Remote Harness MCP")]',
+        '[assembly: AssemblyDescription("Visual installer for an Remote Harness MCP node")]',
         '[assembly: AssemblyCompany("LevRa7")]',
         '[assembly: AssemblyCopyright("MIT License")]',
         ('[assembly: AssemblyVersion("' + $version + '.0")]'),
@@ -199,7 +199,7 @@ try {
     if (-not (Test-Path -LiteralPath $OutputDir)) {
         [void](New-Item -ItemType Directory -Path $OutputDir -Force)
     }
-    $exeName = 'AntigravityMesh-Setup-' + $version + '.exe'
+    $exeName = 'RemoteHarnessMCP-Setup-' + $version + '.exe'
     $exePath = Join-Path $OutputDir $exeName
     if (Test-Path -LiteralPath $exePath) { Remove-Item -LiteralPath $exePath -Force }
 
@@ -247,7 +247,7 @@ try {
     Write-Step ('.\' + $exeName + ' -SelfTest')
     Write-Host ''
     Write-Host 'Publish it as a release asset with:'
-    Write-Step ('gh release upload v' + $version + ' "' + $exePath + '" --repo LevRa7/Computer-use-for-Gemini-App-Web --clobber')
+    Write-Step ('gh release upload v' + $version + ' "' + $exePath + '" --repo LevRa7/remote-harness-mcp --clobber')
 }
 finally {
     if (Test-Path -LiteralPath $stage) {

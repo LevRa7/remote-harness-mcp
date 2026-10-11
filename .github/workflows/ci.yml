@@ -51,8 +51,8 @@ jobs:
           python -m pip install --upgrade pip
           # What the suite imports directly: pydantic for core/schemas.py and
           # core/code_cache.py, uvicorn and starlette for the gateway tests and for
-          # agy_mcp_server, websockets for the agent, requests and httpx for the
-          # MCP helper tests, mcp for agy_mcp_server. Every one of these comes from
+          # rhm_mcp_server, websockets for the agent, requests and httpx for the
+          # MCP helper tests, mcp for rhm_mcp_server. Every one of these comes from
           # PyPI, and the first CI run proved that a missing one is not a skip but
           # a collection error.
           python -m pip install pytest pytest-asyncio pydantic uvicorn starlette websockets requests httpx mcp
@@ -130,7 +130,7 @@ jobs:
       - name: Self-test the executable
         shell: pwsh
         run: |
-          $exe = @(Get-ChildItem dist/AntigravityMesh-Setup-*.exe | Select-Object -First 1)
+          $exe = @(Get-ChildItem dist/RemoteHarnessMCP-Setup-*.exe | Select-Object -First 1)
           if ($exe.Count -eq 0) { throw "the build produced no executable" }
           $path = $exe[0].FullName
 
@@ -167,7 +167,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: setup-exe
-          path: dist/AntigravityMesh-Setup-*
+          path: dist/RemoteHarnessMCP-Setup-*
           if-no-files-found: error
 
   # This repository is public, so a credential that reaches it is a published

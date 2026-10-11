@@ -1,6 +1,6 @@
 # Визуальный установщик для Windows
 
-Настольный мастер установки Antigravity Mesh: то же, что делает консольный
+Настольный мастер установки Remote Harness MCP: то же, что делает консольный
 `install.ps1`, но с окном, выбором варианта установки, переключением языка и
 готовой ссылкой MCP в конце.
 
@@ -50,24 +50,24 @@ powershell -NoProfile -ExecutionPolicy Bypass -Sta -File .\install-gui.ps1
 ### Готовый .exe
 
 Если клонировать репозиторий не хочется, в релизе лежит один собранный файл —
-`AntigravityMesh-Setup-<версия>.exe`:
+`RemoteHarnessMCP-Setup-<версия>.exe`:
 
 ```powershell
-.\AntigravityMesh-Setup-0.2.6.exe            # открыть мастер
-.\AntigravityMesh-Setup-0.2.6.exe -Lang ru   # начать на русском
-.\AntigravityMesh-Setup-0.2.6.exe -SelfTest  # самопроверка без окна, печатает JSON
-.\AntigravityMesh-Setup-0.2.6.exe --where    # куда распаковывается и почему
-.\AntigravityMesh-Setup-0.2.6.exe --unpack   # распаковать груз и выйти
-.\AntigravityMesh-Setup-0.2.6.exe --help     # краткая справка
+.\RemoteHarnessMCP-Setup-0.2.6.exe            # открыть мастер
+.\RemoteHarnessMCP-Setup-0.2.6.exe -Lang ru   # начать на русском
+.\RemoteHarnessMCP-Setup-0.2.6.exe -SelfTest  # самопроверка без окна, печатает JSON
+.\RemoteHarnessMCP-Setup-0.2.6.exe --where    # куда распаковывается и почему
+.\RemoteHarnessMCP-Setup-0.2.6.exe --unpack   # распаковать груз и выйти
+.\RemoteHarnessMCP-Setup-0.2.6.exe --help     # краткая справка
 
 # установка без окна: печатает вывод установщика и строку MESH_URL=<ссылка>
-.\AntigravityMesh-Setup-0.2.6.exe -RunInstall -InstallMode quick
-.\AntigravityMesh-Setup-0.2.6.exe -RunInstall -InstallMode custom -InstallUser node-1 -InstallGateway mesh.example.com
+.\RemoteHarnessMCP-Setup-0.2.6.exe -RunInstall -InstallMode quick
+.\RemoteHarnessMCP-Setup-0.2.6.exe -RunInstall -InstallMode custom -InstallUser node-1 -InstallGateway mesh.example.com
 ```
 
 Это лаунчер, а не переписанный мастер: внутрь упакован один zip с мастером,
 `install.ps1`, `core/` и `install.sh`. При запуске он распаковывает их в
-`%LOCALAPPDATA%\AntigravityMesh\setup\<версия>` и запускает `install-gui.ps1` оттуда —
+`%LOCALAPPDATA%\RemoteHarnessMCP\setup\<версия>` и запускает `install-gui.ps1` оттуда —
 поэтому логика установки остаётся ровно одна, и режим SSH получает свои `core/` и
 `install.sh`.
 
@@ -76,7 +76,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Sta -File .\install-gui.ps1
   работает старый код, и все исправления остаются невидимыми. Проверяется тестом
   `test_setup_exe_refreshes_a_stale_payload`.
 * Папку распаковки можно задать переменной `MESH_SETUP_DIR`.
-* Если `%LOCALAPPDATA%\AntigravityMesh` недоступна для записи, лаунчер **проверяет
+* Если `%LOCALAPPDATA%\RemoteHarnessMCP` недоступна для записи, лаунчер **проверяет
   кандидатов настоящей записью** и переходит к следующему: сначала `%TEMP%`, затем
   папка рядом с самим файлом. Причина отказа каждой папки видна в `--where`.
   Проверка не лишняя: `Directory.CreateDirectory` для уже существующей папки
@@ -144,7 +144,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Sta -File .\install-gui.ps1
 ![Параметры SSH](images/gui-options-ssh-ru.png)
 
 Мастер выполняет ту же последовательность, что и ветка `--ssh` в `install.sh`:
-создаёт `~/antigravity-mesh/{core,skills}`, копирует `core/*.py`, `install.sh` и
+создаёт `~/remote-harness-mcp/{core,skills}`, копирует `core/*.py`, `install.sh` и
 `skills/*`, затем запускает на удалённом хосте
 `bash install.sh --quick --lang=<язык>`.
 

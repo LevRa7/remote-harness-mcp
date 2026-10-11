@@ -86,6 +86,8 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from core import paths
+
 #: Host mechanics, *not* the scenario decision: these say what this interpreter
 #: runs on (which code page a child writes, whether a console window would flash),
 #: while :func:`scenario` says which collector path to take.
@@ -1787,11 +1789,11 @@ def capture_dir() -> str:
     if scenario() == "termux":
         shared = os.path.expanduser("~/storage/dcim")
         if os.path.isdir(shared):
-            return os.path.join(shared, "antigravity-mesh")
+            return os.path.join(shared, "remote-harness-mcp")
         shared = os.path.expanduser("~/storage/shared")
         if os.path.isdir(shared):
-            return os.path.join(shared, "AntigravityMesh")
-    return os.path.join(os.path.expanduser("~"), ".cache", "antigravity-mesh", "captures")
+            return os.path.join(shared, "RemoteHarnessMCP")
+    return paths.cache_path("captures")
 
 
 def _storage_fields(root: str) -> Dict[str, Any]:

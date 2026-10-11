@@ -1,5 +1,5 @@
 # ==============================================================================
-#  Antigravity Mesh - run the pytest suite on Windows
+#  Remote Harness MCP - run the pytest suite on Windows
 #
 #  A plain "python -m pytest" is not enough on Windows:
 #

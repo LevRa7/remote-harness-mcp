@@ -65,11 +65,12 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 #: The public domain is owned by core/domain.py, exactly as it is for the gateway,
 #: the tunnel node and core/mcp_tools.py: this module must not keep a fallback
 #: chain of its own, or the link a share hands out could name a host the node is
-#: not tunneled to. core.domain imports nothing but the standard library, so
-#: importing it here keeps this module stdlib-only too.
+#: not tunneled to. core.domain and core.paths import nothing but the standard
+#: library, so importing them here keeps this module stdlib-only too.
 from core import domain
+from core import paths
 
-logger = logging.getLogger("antigravity-mesh.web_share")
+logger = logging.getLogger("remote-harness-mcp.web_share")
 
 #: Bytes of entropy in a share secret -> 16 hex characters in the URL.
 SECRET_BYTES = 8
@@ -144,9 +145,7 @@ def _env_int(name: str, default: int, low: int = 1, high: int = 1 << 40) -> int:
 
 
 def _web_dir() -> str:
-    raw = _CONFIG.get("web_dir") or os.environ.get("MESH_WEB_DIR") or os.path.join(
-        "~", ".cache", "antigravity-mesh", "web"
-    )
+    raw = _CONFIG.get("web_dir") or os.environ.get("MESH_WEB_DIR") or paths.cache_path("web")
     return os.path.realpath(os.path.expanduser(str(raw)))
 
 
@@ -355,7 +354,7 @@ class _ShareHandler(SimpleHTTPRequestHandler):
     share root, otherwise the request is answered with a plain 404.
     """
 
-    server_version = "AntigravityMeshShare/1.0"
+    server_version = "RemoteHarnessMCPShare/1.0"
     protocol_version = "HTTP/1.1"
 
     def __init__(self, *args: Any, directory: Optional[str] = None,
@@ -519,7 +518,7 @@ def handle_http_request(args: Dict[str, Any]) -> Dict[str, Any]:
         url += "?" + query
 
     request = Request(url, method=method, headers={
-        "User-Agent": "antigravity-mesh-gateway/1.0",
+        "User-Agent": "remote-harness-mcp-gateway/1.0",
         "Accept": "*/*",
     })
     response = None

@@ -53,7 +53,7 @@ every step that differs on Android:
 | :--- | :--- |
 | Packages | `pkg install python python-pip curl ca-certificates` — the Debian names (`python3-pip`, `python3-venv`) do not exist in Termux, and there is no `sudo` to escalate with. |
 | Node name | The **device model** (`Pixel 7 Pro` → `pixel7pro`). Android answers `localhost` to `gethostname(2)` for *every* device, and the gateway keeps one tunnel per name — two phones would evict each other. |
-| Domain file | `~/.config/antigravity-mesh/domain.env` instead of `/etc/antigravity-mesh/domain.env`: a phone has no `/etc` and no root. |
+| Domain file | `~/.config/remote-harness-mcp/domain.env` instead of `/etc/remote-harness-mcp/domain.env`: a phone has no `/etc` and no root. |
 | Autostart | A **runit** service (`termux-services`) plus a **Termux:Boot** script — there is no systemd and no launchd. |
 | Clipboard | `termux-clipboard-set`, so the MCP link can be pasted straight into the Gemini app. |
 
@@ -75,7 +75,7 @@ Three Android behaviours kill background processes. All three have to be handled
 and only the first two are outside the installer's reach:
 
 1. **Termux:Boot** — install the app and **open it once**. Android then allows it to
-   run at boot, and it executes `~/.termux/boot/agy-agent.sh`.
+   run at boot, and it executes `~/.termux/boot/rhm-agent.sh`.
 2. **Battery optimisation** — set Termux (and Termux:Boot) to *Unrestricted*:
    `Android Settings → Apps → Termux → Battery → Unrestricted`. On many OEM builds
    there is also an "autostart" or "protected apps" list that has to include Termux.
@@ -86,7 +86,7 @@ Verify:
 
 ```bash
 termux-wake-lock          # only needed manually if the boot script never ran
-sv status agy-agent       # runit: "run: agy-agent: (pid 12345) 12s"
+sv status rhm-agent       # runit: "run: rhm-agent: (pid 12345) 12s"
 ```
 
 ---
@@ -116,11 +116,11 @@ termux-clipboard-set 'https://<shared-domain>/sse?user=<node-name>&token=<secret
 With `termux-services` (installed by the installer when `pkg` allows it):
 
 ```bash
-sv status agy-agent                     # is it running?
-sv restart agy-agent                    # restart now
-sv down agy-agent                       # stop until the next boot or `sv up`
-sv up agy-agent                         # start again
-tail -f $PREFIX/var/log/sv/agy-agent/current
+sv status rhm-agent                     # is it running?
+sv restart rhm-agent                    # restart now
+sv down rhm-agent                       # stop until the next boot or `sv up`
+sv up rhm-agent                         # start again
+tail -f $PREFIX/var/log/sv/rhm-agent/current
 ```
 
 Without `termux-services` (a phone that refused the package — old mirror, no
@@ -128,8 +128,8 @@ network): the node still runs and still autostarts at boot, but nothing restarts
 after a crash.
 
 ```bash
-~/.config/antigravity-mesh/agy-agent.sh          # run in the foreground
-tail -f ~/.config/antigravity-mesh/agy-agent.log # the detached run's log
+~/.config/remote-harness-mcp/rhm-agent.sh          # run in the foreground
+tail -f ~/.config/remote-harness-mcp/rhm-agent.log # the detached run's log
 pkill -f core.agent                              # stop it
 pkg install termux-services                      # then re-run the installer
 ```
@@ -143,14 +143,14 @@ few seconds. `MESH_UPDATE_AUTO=0` switches that to "report only" — see
 
 | Path | Purpose |
 | :--- | :--- |
-| `~/.config/antigravity-mesh/agent.env` | Gateway, node name and token (`chmod 600`). |
-| `~/.config/antigravity-mesh/domain.env` | The shared domain, written by the installer as `MESH_PUBLIC_URL=https://<domain>` so the phone's public share links, its tunnel and the gateway name the same host. The built-in default is never written (`--dry-run` says `not written (the built-in default is a fallback, not a configuration)`), and `MESH_DOMAIN_FILE` is a path override that belongs in the node's own configuration, not in the installer run (its parent directory is created). |
-| `~/.config/antigravity-mesh/agy-agent.sh` | Launcher (absolute paths only: runit and Termux:Boot start it with a minimal environment). |
-| `~/.termux/boot/agy-agent.sh` | Termux:Boot entry: wake lock + supervisor. |
-| `$PREFIX/var/service/agy-agent/run` | runit service (`Restart=always` equivalent). |
-| `$PREFIX/var/log/sv/agy-agent/current` | runit log. |
-| `~/.config/antigravity-mesh/agy-agent.log` | Log of the unsupervised fallback. |
-| `~/.gemini-computer-use/` | Node code, when installed from `curl` rather than a clone. |
+| `~/.config/remote-harness-mcp/agent.env` | Gateway, node name and token (`chmod 600`). |
+| `~/.config/remote-harness-mcp/domain.env` | The shared domain, written by the installer as `MESH_PUBLIC_URL=https://<domain>` so the phone's public share links, its tunnel and the gateway name the same host. The built-in default is never written (`--dry-run` says `not written (the built-in default is a fallback, not a configuration)`), and `MESH_DOMAIN_FILE` is a path override that belongs in the node's own configuration, not in the installer run (its parent directory is created). |
+| `~/.config/remote-harness-mcp/rhm-agent.sh` | Launcher (absolute paths only: runit and Termux:Boot start it with a minimal environment). |
+| `~/.termux/boot/rhm-agent.sh` | Termux:Boot entry: wake lock + supervisor. |
+| `$PREFIX/var/service/rhm-agent/run` | runit service (`Restart=always` equivalent). |
+| `$PREFIX/var/log/sv/rhm-agent/current` | runit log. |
+| `~/.config/remote-harness-mcp/rhm-agent.log` | Log of the unsupervised fallback. |
+| `~/.remote-harness-mcp/` | Node code, when installed from `curl` rather than a clone. |
 
 ---
 
@@ -165,7 +165,7 @@ other device, and not the Gemini app on a different phone, can reach it. It is
 useful for a local MCP client running inside Termux. To drive the phone from
 Gemini, use the default tunnel mode.
 
-The service is called `agy-standalone` in every command above.
+The service is called `rhm-standalone` in every command above.
 
 ---
 
@@ -188,25 +188,25 @@ The service is called `agy-standalone` in every command above.
 | Symptom | Fix |
 | :--- | :--- |
 | `curl: (6) Could not resolve host` while installing | The gateway name is not visible to this phone — see [Private gateway](#private-gateway-tailscale--vpn). The installer says so and stops before writing anything. |
-| Gemini says the node is offline | `sv status agy-agent`; `tail -50 $PREFIX/var/log/sv/agy-agent/current`. Re-run the installer if `agent.env` is missing. |
+| Gemini says the node is offline | `sv status rhm-agent`; `tail -50 $PREFIX/var/log/sv/rhm-agent/current`. Re-run the installer if `agent.env` is missing. |
 | The node dies with the screen off | Battery optimisation is still on, or the wake lock is missing: install Termux:API, open it once, re-run the installer, then `termux-wake-lock`. |
-| It did not come back after a reboot | Termux:Boot is not installed, or never opened; check that `~/.termux/boot/agy-agent.sh` exists and is executable (`chmod 700`). |
+| It did not come back after a reboot | Termux:Boot is not installed, or never opened; check that `~/.termux/boot/rhm-agent.sh` exists and is executable (`chmod 700`). |
 | `pkg install` fails with 404s | The package index is stale: `pkg update -y`, then re-run the installer. |
 | `websockets` could not be installed | `pkg install -y python-pip python-ensurepip-wheels`, then re-run. |
 | Node name collides with another node | The gateway suffixes it automatically (`pixel7pro-1234`); for a fixed name use `--user=`. |
-| Out of space | Termux data lives in the app's private storage: `pkg clean`, remove old jobs under `~/.cache/antigravity-mesh/`, or uninstall unused packages. |
+| Out of space | Termux data lives in the app's private storage: `pkg clean`, remove old jobs under `~/.cache/remote-harness-mcp/`, or uninstall unused packages. |
 | Architecture | `aarch64` (most phones) and `armv7l` are both supported. `uv` is deliberately not used on Android: its builds link against glibc, which Android's bionic libc is not. |
-| Share links name the built-in default instead of your domain | The phone was installed before the installer wrote the domain file: re-run the installer, or write the one line by hand: `mkdir -p ~/.config/antigravity-mesh && echo 'MESH_PUBLIC_URL=https://<domain>' > ~/.config/antigravity-mesh/domain.env`. Existing share links keep working; new ones use the configured domain. If the built-in default *is* your configured domain, no file is written — that is by design, not a failure. |
+| Share links name the built-in default instead of your domain | The phone was installed before the installer wrote the domain file: re-run the installer, or write the one line by hand: `mkdir -p ~/.config/remote-harness-mcp && echo 'MESH_PUBLIC_URL=https://<domain>' > ~/.config/remote-harness-mcp/domain.env`. Existing share links keep working; new ones use the configured domain. If the built-in default *is* your configured domain, no file is written — that is by design, not a failure. |
 
 ---
 
 ### 8. Uninstall
 
 ```bash
-sv down agy-agent && sv-disable agy-agent
-rm -rf $PREFIX/var/service/agy-agent
-rm -f  ~/.termux/boot/agy-agent.sh
-rm -rf ~/.config/antigravity-mesh ~/.gemini-computer-use
+sv down rhm-agent && sv-disable rhm-agent
+rm -rf $PREFIX/var/service/rhm-agent
+rm -f  ~/.termux/boot/rhm-agent.sh
+rm -rf ~/.config/remote-harness-mcp ~/.remote-harness-mcp
 ```
 
 Removing the node does not revoke its token on the gateway: the name and token
@@ -241,14 +241,14 @@ pkg install -y curl
 curl -fsS https://<private-gateway>/health    # must print the gateway's JSON
 # the installer itself must also come from somewhere reachable — a clone is simplest:
 pkg install -y git
-git clone https://github.com/LevRa7/Computer-use-for-Gemini-App-Web.git
-cd Computer-use-for-Gemini-App-Web
+git clone https://github.com/LevRa7/remote-harness-mcp.git
+cd remote-harness-mcp
 ./install.sh --quick --domain=<private-gateway>
 ```
 
 `--domain=` (or `MESH_PUBLIC_URL=https://<private-gateway>`) is what tells both the
 installer and the node which gateway to use; it is stored in `agent.env` and — as the
-shared domain — in the phone's domain file, `~/.config/antigravity-mesh/domain.env`.
+shared domain — in the phone's domain file, `~/.config/remote-harness-mcp/domain.env`.
 
 **2. Give the gateway a publicly resolvable name** (an `A` record at the registrar
 for a real domain). Then the one-line install works from any phone on any network,
@@ -325,7 +325,7 @@ Apps > Termux:API > Permissions"), and the collected fixes also appear in the
 | :--- | :--- | :--- |
 | `MESH_DEVICE` | `auto` | `auto` keeps the branch answering everywhere (a phone-only action explains itself elsewhere), `0` switches it off, `1` forces it on. |
 | `MESH_DEVICE_ACTIONS` | empty | Comma-separated allowlist of action names for the three action tools; empty means every action the build implements. |
-| `MESH_DEVICE_CAPTURE_DIR` | shared storage after `termux-setup-storage`, otherwise `~/.cache/antigravity-mesh/captures` | Where photos and recordings are written. |
+| `MESH_DEVICE_CAPTURE_DIR` | shared storage after `termux-setup-storage`, otherwise `~/.cache/remote-harness-mcp/captures` | Where photos and recordings are written. |
 | `MESH_DEVICE_PIM` | `0` | `1` enables SMS, the call log, contacts and placing a call. |
 | `MESH_DEVICE_QUICK` | `0` | `1` keeps `system_info` instant by skipping network, cameras, microphones and sensors. |
 | `MESH_READ_ONLY` | `0` | `1` refuses every `device_control` and `device_capture` action and blocks `sms_send` and `call`. |
@@ -334,9 +334,9 @@ Apps > Termux:API > Permissions"), and the collected fixes also appear in the
 
 `camera_photo` and `mic_record_start` write into the node's capture directory, and a
 `path` argument overrides the file. That directory is `MESH_DEVICE_CAPTURE_DIR` when
-the operator set it; on a phone it is `~/storage/dcim/antigravity-mesh` when DCIM is
-reachable, else `~/storage/shared/AntigravityMesh`; and otherwise
-`~/.cache/antigravity-mesh/captures`, which is what a phone that never ran
+the operator set it; on a phone it is `~/storage/dcim/remote-harness-mcp` when DCIM is
+reachable, else `~/storage/shared/RemoteHarnessMCP`; and otherwise
+`~/.cache/remote-harness-mcp/captures`, which is what a phone that never ran
 `termux-setup-storage` gets. `~/storage/*` exists only after `termux-setup-storage`
 has been run and the storage permission granted — before that the node deliberately
 stays in its own cache rather than writing to a path it cannot reach. A capture is
@@ -372,7 +372,7 @@ report in which several sections timed out carries one `hint` (or `device_hint` 
 | A call hangs and comes back as a `timeout` | Android froze the Termux:API app (battery optimisation). Open the app once and set battery optimisation to *Unrestricted* for Termux and Termux:API. |
 | A recording stops as soon as you leave the app | On Android 11+ `termux-microphone-record` runs inside the Termux:API app: keep it in the foreground while recording, or pass `seconds` so the recording ends by itself. |
 | `usb_access` returns a descriptor but no data | Deliberate: the node asks Android for permission and hands back the file descriptor; reading and writing the device is left to a script the operator runs. |
-| The node is gone and Termux is **not running at all** (`ps -A` shows no `com.termux`) | Android can kill the whole Termux app — memory pressure, a system update, a force-stop while changing permissions. Neither the runit service nor Termux:Boot covers that: they cover a reboot. **Open Termux once**: its login shell starts the supervisor again (`sv status agy-agent`), and the node reconnects by itself. On a phone with no `termux-services` nothing supervises the node, so it stays down until the launcher in `~/.config/antigravity-mesh/` is run again — worth installing `pkg install termux-services` on such a phone. |
+| The node is gone and Termux is **not running at all** (`ps -A` shows no `com.termux`) | Android can kill the whole Termux app — memory pressure, a system update, a force-stop while changing permissions. Neither the runit service nor Termux:Boot covers that: they cover a reboot. **Open Termux once**: its login shell starts the supervisor again (`sv status rhm-agent`), and the node reconnects by itself. On a phone with no `termux-services` nothing supervises the node, so it stays down until the launcher in `~/.config/remote-harness-mcp/` is run again — worth installing `pkg install termux-services` on such a phone. |
 
 ---
 
@@ -414,7 +414,7 @@ curl -fsSL https://racknerd-5a24bf9.merino-carob.ts.net/install.sh | bash
 | :--- | :--- |
 | Пакеты | `pkg install python python-pip curl ca-certificates`: в Termux нет имён `python3-pip`/`python3-venv`, и нет `sudo`. |
 | Имя узла | Берётся **модель устройства** (`Pixel 7 Pro` → `pixel7pro`): Android отвечает `localhost` на `gethostname(2)` у всех устройств, а шлюз держит один туннель на имя — два телефона выбивали бы друг друга. |
-| Файл домена | `~/.config/antigravity-mesh/domain.env` вместо `/etc/antigravity-mesh/domain.env`. |
+| Файл домена | `~/.config/remote-harness-mcp/domain.env` вместо `/etc/remote-harness-mcp/domain.env`. |
 | Автозапуск | Служба **runit** (`termux-services`) плюс скрипт **Termux:Boot** — systemd и launchd на телефоне нет. |
 | Буфер обмена | `termux-clipboard-set`, чтобы сразу вставить ссылку в приложение Gemini. |
 
@@ -440,7 +440,7 @@ MESH_PUBLIC_URL=https://mesh.example.com bash install.sh --quick
 Проверка:
 
 ```bash
-sv status agy-agent
+sv status rhm-agent
 termux-wake-lock
 ```
 
@@ -465,18 +465,18 @@ termux-clipboard-set 'https://<общий-домен>/sse?user=<имя-узла>
 ### 4. Управление узлом
 
 ```bash
-sv status agy-agent                       # работает ли
-sv restart agy-agent                      # перезапустить
-sv down agy-agent                         # остановить (до перезагрузки или sv up)
-tail -f $PREFIX/var/log/sv/agy-agent/current
+sv status rhm-agent                       # работает ли
+sv restart rhm-agent                      # перезапустить
+sv down rhm-agent                         # остановить (до перезагрузки или sv up)
+tail -f $PREFIX/var/log/sv/rhm-agent/current
 ```
 
 Если `termux-services` не установился (старое зеркало, нет сети), узел всё равно
 работает и поднимается при загрузке, но не перезапускается после сбоя:
 
 ```bash
-~/.config/antigravity-mesh/agy-agent.sh            # запуск на переднем плане
-tail -f ~/.config/antigravity-mesh/agy-agent.log   # лог фонового запуска
+~/.config/remote-harness-mcp/rhm-agent.sh            # запуск на переднем плане
+tail -f ~/.config/remote-harness-mcp/rhm-agent.log   # лог фонового запуска
 pkg install termux-services                        # затем повторите установку
 ```
 
@@ -492,20 +492,20 @@ bash install.sh --mode=standalone --port=8096
 
 Сервер слушает только `127.0.0.1`, то есть доступен лишь внутри этого телефона —
 для локального MCP-клиента в Termux. Чтобы управлять телефоном из Gemini,
-используйте режим туннеля (по умолчанию). Имя службы — `agy-standalone`.
+используйте режим туннеля (по умолчанию). Имя службы — `rhm-standalone`.
 
 ### 6. Файлы, которые создаёт установщик
 
 | Путь | Назначение |
 | :--- | :--- |
-| `~/.config/antigravity-mesh/agent.env` | Шлюз, имя узла, токен (`chmod 600`). |
-| `~/.config/antigravity-mesh/domain.env` | Общий домен: установщик записывает его как `MESH_PUBLIC_URL=https://<домен>`, чтобы публичные ссылки телефона, его туннель и шлюз называли один и тот же хост. Встроенное значение по умолчанию не пишется (`--dry-run` говорит `not written (the built-in default is a fallback, not a configuration)`), а `MESH_DOMAIN_FILE` — переопределение пути из конфигурации самого узла, а не из запуска установщика (каталог файла создаётся). |
-| `~/.config/antigravity-mesh/agy-agent.sh` | Лаунчер (только абсолютные пути). |
-| `~/.termux/boot/agy-agent.sh` | Запись Termux:Boot: блокировка + супервизор. |
-| `$PREFIX/var/service/agy-agent/run` | Служба runit (аналог `Restart=always`). |
-| `$PREFIX/var/log/sv/agy-agent/current` | Лог runit. |
-| `~/.config/antigravity-mesh/agy-agent.log` | Лог запуска без супервизора. |
-| `~/.gemini-computer-use/` | Код узла при установке через `curl`. |
+| `~/.config/remote-harness-mcp/agent.env` | Шлюз, имя узла, токен (`chmod 600`). |
+| `~/.config/remote-harness-mcp/domain.env` | Общий домен: установщик записывает его как `MESH_PUBLIC_URL=https://<домен>`, чтобы публичные ссылки телефона, его туннель и шлюз называли один и тот же хост. Встроенное значение по умолчанию не пишется (`--dry-run` говорит `not written (the built-in default is a fallback, not a configuration)`), а `MESH_DOMAIN_FILE` — переопределение пути из конфигурации самого узла, а не из запуска установщика (каталог файла создаётся). |
+| `~/.config/remote-harness-mcp/rhm-agent.sh` | Лаунчер (только абсолютные пути). |
+| `~/.termux/boot/rhm-agent.sh` | Запись Termux:Boot: блокировка + супервизор. |
+| `$PREFIX/var/service/rhm-agent/run` | Служба runit (аналог `Restart=always`). |
+| `$PREFIX/var/log/sv/rhm-agent/current` | Лог runit. |
+| `~/.config/remote-harness-mcp/rhm-agent.log` | Лог запуска без супервизора. |
+| `~/.remote-harness-mcp/` | Код узла при установке через `curl`. |
 
 ### 7. Что узел может на телефоне
 
@@ -521,24 +521,24 @@ bash install.sh --mode=standalone --port=8096
 | Симптом | Что делать |
 | :--- | :--- |
 | `curl: (6) Could not resolve host` при установке | Имя шлюза не видно с телефона — см. раздел 10 «Приватный шлюз». Установщик теперь пишет это прямо и останавливается до любых записей. |
-| Gemini пишет, что узел offline | `sv status agy-agent`; `tail -50 $PREFIX/var/log/sv/agy-agent/current`; если нет `agent.env` — повторите установку. |
+| Gemini пишет, что узел offline | `sv status rhm-agent`; `tail -50 $PREFIX/var/log/sv/rhm-agent/current`; если нет `agent.env` — повторите установку. |
 | Узел пропадает при выключенном экране | Осталась оптимизация батареи или нет wake lock: установите Termux:API, откройте его, повторите установку и выполните `termux-wake-lock`. |
-| Не поднялся после перезагрузки | Нет Termux:Boot или его не открывали ни разу; проверьте `~/.termux/boot/agy-agent.sh` и `chmod 700` на нём. |
-| Узел пропал, и Termux **не запущен вообще** (`ps -A` не показывает `com.termux`) | Android умеет выгрузить приложение Termux целиком — нехватка памяти, обновление системы, принудительная остановка при смене разрешений. Ни служба runit, ни Termux:Boot этого не покрывают: они рассчитаны на перезагрузку. **Откройте Termux один раз** — его login-shell снова поднимет супервизор (`sv status agy-agent`), и узел переподключится сам. На телефоне без `termux-services` узел никто не сторожит, поэтому он останется лежать, пока вы вручную не запустите лаунчер в `~/.config/antigravity-mesh/`; на таком телефоне стоит выполнить `pkg install termux-services`. |
+| Не поднялся после перезагрузки | Нет Termux:Boot или его не открывали ни разу; проверьте `~/.termux/boot/rhm-agent.sh` и `chmod 700` на нём. |
+| Узел пропал, и Termux **не запущен вообще** (`ps -A` не показывает `com.termux`) | Android умеет выгрузить приложение Termux целиком — нехватка памяти, обновление системы, принудительная остановка при смене разрешений. Ни служба runit, ни Termux:Boot этого не покрывают: они рассчитаны на перезагрузку. **Откройте Termux один раз** — его login-shell снова поднимет супервизор (`sv status rhm-agent`), и узел переподключится сам. На телефоне без `termux-services` узел никто не сторожит, поэтому он останется лежать, пока вы вручную не запустите лаунчер в `~/.config/remote-harness-mcp/`; на таком телефоне стоит выполнить `pkg install termux-services`. |
 | `pkg install` отвечает 404 | Устаревший индекс: `pkg update -y`, затем повторите установку. |
 | Не ставится `websockets` | `pkg install -y python-pip python-ensurepip-wheels`, затем повторите. |
 | Имя узла занято | Шлюз добавит суффикс (`pixel7pro-1234`); для фиксированного имени — `--user=`. |
-| Мало места | Данные Termux лежат в приватном хранилище приложения: `pkg clean`, очистите `~/.cache/antigravity-mesh/`. |
+| Мало места | Данные Termux лежат в приватном хранилище приложения: `pkg clean`, очистите `~/.cache/remote-harness-mcp/`. |
 | Архитектура | Поддерживаются `aarch64` (большинство телефонов) и `armv7l`. `uv` на Android намеренно не используется: его сборки линкуются с glibc, а на Android — bionic. |
-| Ссылки на файлы ведут на встроенный домен вместо вашего | Телефон поставлен до того, как установщик начал писать файл домена: повторите установку или допишите одну строку вручную: `mkdir -p ~/.config/antigravity-mesh && echo 'MESH_PUBLIC_URL=https://<домен>' > ~/.config/antigravity-mesh/domain.env`. Уже выданные ссылки продолжат работать, новые возьмут настроенный домен. Если встроенное значение и есть ваш домен, файл не появится — так и задумано, это не сбой. |
+| Ссылки на файлы ведут на встроенный домен вместо вашего | Телефон поставлен до того, как установщик начал писать файл домена: повторите установку или допишите одну строку вручную: `mkdir -p ~/.config/remote-harness-mcp && echo 'MESH_PUBLIC_URL=https://<домен>' > ~/.config/remote-harness-mcp/domain.env`. Уже выданные ссылки продолжат работать, новые возьмут настроенный домен. Если встроенное значение и есть ваш домен, файл не появится — так и задумано, это не сбой. |
 
 ### 9. Удаление
 
 ```bash
-sv down agy-agent && sv-disable agy-agent
-rm -rf $PREFIX/var/service/agy-agent
-rm -f  ~/.termux/boot/agy-agent.sh
-rm -rf ~/.config/antigravity-mesh ~/.gemini-computer-use
+sv down rhm-agent && sv-disable rhm-agent
+rm -rf $PREFIX/var/service/rhm-agent
+rm -f  ~/.termux/boot/rhm-agent.sh
+rm -rf ~/.config/remote-harness-mcp ~/.remote-harness-mcp
 ```
 
 Удаление узла не отзывает его токен на шлюзе: имя и токен остаются
@@ -572,14 +572,14 @@ pkg install -y curl
 curl -fsS https://<приватный-шлюз>/health    # должен вернуть JSON шлюза
 # сам установщик тоже нужно откуда-то взять — проще всего клоном:
 pkg install -y git
-git clone https://github.com/LevRa7/Computer-use-for-Gemini-App-Web.git
-cd Computer-use-for-Gemini-App-Web
+git clone https://github.com/LevRa7/remote-harness-mcp.git
+cd remote-harness-mcp
 ./install.sh --quick --domain=<приватный-шлюз>
 ```
 
 Именно `--domain=` (или `MESH_PUBLIC_URL=https://<приватный-шлюз>`) сообщает
 установщику и узлу, какой шлюз использовать; значение сохраняется в `agent.env` и —
-как общий домен — в файле домена телефона, `~/.config/antigravity-mesh/domain.env`.
+как общий домен — в файле домена телефона, `~/.config/remote-harness-mcp/domain.env`.
 
 **2. Дать шлюзу публично резолвимое имя** (A-запись у регистратора для настоящего
 домена). Тогда однострочная установка работает с любого телефона в любой сети —
@@ -654,7 +654,7 @@ Permissions»), а собранные подсказки видны в блок�
 | :--- | :--- | :--- |
 | `MESH_DEVICE` | `auto` | `auto` — ветка отвечает везде (действие для телефона объясняется на другой платформе), `0` — выключает её, `1` — включает принудительно. |
 | `MESH_DEVICE_ACTIONS` | пусто | Список разрешённых имён действий через запятую для трёх action-инструментов; пусто — все действия сборки. |
-| `MESH_DEVICE_CAPTURE_DIR` | общее хранилище после `termux-setup-storage`, иначе `~/.cache/antigravity-mesh/captures` | Куда пишутся фото и записи. |
+| `MESH_DEVICE_CAPTURE_DIR` | общее хранилище после `termux-setup-storage`, иначе `~/.cache/remote-harness-mcp/captures` | Куда пишутся фото и записи. |
 | `MESH_DEVICE_PIM` | `0` | `1` включает SMS, журнал вызовов, контакты и звонок. |
 | `MESH_DEVICE_QUICK` | `0` | `1` оставляет `system_info` мгновенным, пропуская сеть, камеры, микрофоны и датчики. |
 | `MESH_READ_ONLY` | `0` | `1` отказывает в каждом действии `device_control` и `device_capture` и блокирует `sms_send` и `call`. |
@@ -663,8 +663,8 @@ Permissions»), а собранные подсказки видны в блок�
 
 `camera_photo` и `mic_record_start` пишут в каталог съёмки узла, а аргумент `path`
 переопределяет файл. Этот каталог — `MESH_DEVICE_CAPTURE_DIR`, если оператор его
-задал; на телефоне — `~/storage/dcim/antigravity-mesh`, когда доступен DCIM, иначе
-`~/storage/shared/AntigravityMesh`; иначе `~/.cache/antigravity-mesh/captures` —
+задал; на телефоне — `~/storage/dcim/remote-harness-mcp`, когда доступен DCIM, иначе
+`~/storage/shared/RemoteHarnessMCP`; иначе `~/.cache/remote-harness-mcp/captures` —
 именно это получит телефон, на котором ни разу не выполняли `termux-setup-storage`.
 Каталог `~/storage/*` появляется только после `termux-setup-storage` и выдачи
 разрешения на хранилище — до этого узел намеренно остаётся в своём кэше, а не пишет

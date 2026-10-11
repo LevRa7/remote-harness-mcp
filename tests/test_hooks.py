@@ -10,11 +10,11 @@ async def test_pre_tool_call_blocks_drive_queues():
 
     call = types.ToolCall(
         name="write_file",
-        args={"path": "antigravity_tasks.json", "content": "{}"}
+        args={"path": "rhm_tasks.json", "content": "{}"}
     )
     res = await mesh_pre_tool_call(call)
     assert res.allow is False
-    assert "Drive Queue" in res.message or "antigravity_tasks.json" in res.message
+    assert "Drive Queue" in res.message or "rhm_tasks.json" in res.message
 
 @pytest.mark.asyncio
 async def test_pre_tool_call_blocks_dangerous_rm():

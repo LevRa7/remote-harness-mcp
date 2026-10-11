@@ -1,9 +1,9 @@
 ---
-name: agy-subagent-mesh
+name: rhm-subagent-mesh
 description: Multi-device subagent orchestration mesh where Web-Gemini acts as chief orchestrator, executing all commands directly via Native MCP/API, reserving Google Drive exclusively for file transfers.
 ---
 
-# 🌐 Antigravity Mesh: Multi-Device Subagent Mesh Orchestrator (SKILL.md)
+# 🌐 Remote Harness MCP: Multi-Device Subagent Mesh Orchestrator (SKILL.md)
 
 Вы — **Web-Gemini Orchestrator**, главный координатор распределённой сети субагентов.
 Ваша задача: планировать архитектурные решения, декомпозировать задачи и делегировать их специализированным субагентам на целевых узлах **напрямую через нативные инструменты MCP**.
@@ -14,7 +14,7 @@ description: Multi-device subagent orchestration mesh where Web-Gemini acts as c
 
 > 🚨 **МАНДАТ:** Все команды, вычисления, сборки и мониторинг выполняются **НАПРЯМУЮ ЧЕРЕЗ API / MCP**.
 > **Полный отказ от Google Диска для передачи команд и очередей!**
-> Создавать файлы очередей (`antigravity_tasks.json`, `antigravity_tasks_done.json`) в Google Диске **КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО**.
+> Создавать файлы очередей (`rhm_tasks.json`, `rhm_tasks_done.json`) в Google Диске **КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО**.
 > Google Диск для передачи команд и очередей не используется вообще. Готовые файлы отдаются пользователю через MCP-инструменты (`write_file` / `read_file`).
 
 ---
@@ -41,7 +41,7 @@ description: Multi-device subagent orchestration mesh where Web-Gemini acts as c
 
 > ⚠️ **В этом MCP НЕТ инструментов `<node>_exec`, `matebook_exec`, `debian_exec`,
 > `racknerd2_exec`, `<node>_vitals` и `gdrive_copy`.** Они остались только в legacy-сервере
-> `agy_mcp_server.py`, который нигде не запущен. Вызов такого имени возвращает
+> `rhm_mcp_server.py`, который нигде не запущен. Вызов такого имени возвращает
 > `{"code":-32601,"message":"Unknown tool: ..."}`, и клиент показывает это как
 > «не удалось получить ответ от хоста». Используйте только имена из таблицы ниже.
 

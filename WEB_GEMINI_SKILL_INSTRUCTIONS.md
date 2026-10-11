@@ -1,9 +1,9 @@
 ---
-name: agy-task-dispatcher
+name: rhm-task-dispatcher
 description: Orchestrates distributed Linux hosts and compute nodes using Native MCP API tools directly, reserving Google Drive exclusively for file delivery.
 ---
 
-# 🌐 Antigravity Mesh: Distributed Node Dispatcher (SKILL.md)
+# 🌐 Remote Harness MCP: Distributed Node Dispatcher (SKILL.md)
 
 Настоящий скилл определяет порядок управления распределённой сетью Linux-узлов напрямую через нативный протокол MCP.
 
@@ -21,7 +21,7 @@ description: Orchestrates distributed Linux hosts and compute nodes using Native
 
 > ⚠️ **В этом MCP НЕТ инструментов `<node>_exec`, `matebook_exec`, `debian_exec`,
 > `racknerd2_exec`, `<node>_vitals` и `gdrive_copy`.** Они остались только в legacy-сервере
-> `agy_mcp_server.py`, который нигде не запущен. Вызов такого имени возвращает
+> `rhm_mcp_server.py`, который нигде не запущен. Вызов такого имени возвращает
 > `{"code":-32601,"message":"Unknown tool: ..."}`, и клиент показывает это как
 > «не удалось получить ответ от хоста». Используйте только имена из таблицы ниже.
 
@@ -44,7 +44,7 @@ description: Orchestrates distributed Linux hosts and compute nodes using Native
 ---
 
 ## 🔒 3. Политика исполнения и шлюз проверки (Hard Error Gate)
-1. **Запрет очередей Google Диска:** Файлы `antigravity_tasks.json` ликвидированы во избежание состояний гонки (race conditions). Команды в Google Диск не пишутся.
+1. **Запрет очередей Google Диска:** Файлы `rhm_tasks.json` ликвидированы во избежание состояний гонки (race conditions). Команды в Google Диск не пишутся.
 2. **Фиксация в мыслях (`<thought>`):** Обязательно логировать: имя инструмента MCP, пути, команду целиком, прочитанные/измененные файлы, целевой узел и время исполнения.
 3. **Ориентация на результат:** Команда считается успешной только при `Exit: 0` и `isError: false`.
 4. **Немедленный останов (Rollback & Halt):** При любой ошибке (`isError: true` или `exit_code != 0`) модель обязана железно остановиться, вернуть исходный текст ошибки и уведомить пользователя.

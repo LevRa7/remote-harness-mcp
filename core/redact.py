@@ -2,7 +2,7 @@
 
 The mesh runs remote commands through ``sshpass``, so a command string can carry
 a password verbatim (``sshpass -p '<password>' ssh ...``). The telemetry writers
-(:mod:`agy_watcher`, :mod:`agy_webhook_server`) store those command strings in
+(:mod:`rhm_watcher`, :mod:`rhm_webhook_server`) store those command strings in
 ``task_metrics.json`` and ``webhook_history.json``, which live next to the code
 and have been committed to a public repository before. Every string headed for
 one of those files therefore goes through :func:`redact_secrets` first.

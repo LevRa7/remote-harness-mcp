@@ -72,7 +72,7 @@ def test_installer_refuses_to_write_an_alias_autostart():
 
 def test_watchdog_task_is_registered_by_the_installer():
     text = _text()
-    assert "AntigravityMeshWatchdog" in text, "the node needs a self-healing scheduled task"
+    assert "RemoteHarnessMCPWatchdog" in text, "the node needs a self-healing scheduled task"
     assert "agent-watchdog.ps1" in text
     assert "Register-ScheduledTask" in text
 
@@ -144,7 +144,7 @@ def test_every_shipping_surface_carries_the_ops_directory():
     with open(os.path.join(REPO, "package.json"), "r", encoding="utf-8") as handle:
         assert '"ops"' in handle.read(), "package.json 'files' must include ops"
 
-    with open(os.path.join(REPO, "ops", "nginx", "antigravity-mesh-mcp.conf"),
+    with open(os.path.join(REPO, "ops", "nginx", "remote-harness-mcp.conf"),
               "r", encoding="utf-8") as handle:
         assert "location /ops/" in handle.read(), "nginx must serve /ops/ for the bootstrap"
 
@@ -169,8 +169,8 @@ def test_cli_answers_help_for_its_local_subcommands():
     with open(os.path.join(REPO, "bin", "cli.js"), "r", encoding="utf-8") as handle:
         cli = handle.read()
 
-    assert "usage: gemini-computer-use doctor" in cli
-    assert "usage: gemini-computer-use restart" in cli
+    assert "usage: remote-harness-mcp doctor" in cli
+    assert "usage: remote-harness-mcp restart" in cli
 
 
 # ---------------------------------------------------------------------------

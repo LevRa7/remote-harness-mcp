@@ -11,6 +11,36 @@ match a published checksum.
 
 ---
 
+## 0. The rename: Antigravity Mesh → Remote Harness MCP
+
+The project, the repository and every file in it were renamed to **Remote Harness
+MCP**. Nothing has to be reinstalled, and nothing that already exists on a node is
+lost: every old name is either still read or is migrated by the installer.
+
+| Before | Now | What happens on an upgrade |
+| :--- | :--- | :--- |
+| `LevRa7/Computer-use-for-Gemini-App-Web` | `LevRa7/remote-harness-mcp` | GitHub redirects the old URL; `REPO_SLUG` in `core/version.py` and `package.json` name the new one. |
+| `agy_mcp_server.py`, `agy_sync.py`, `agy_watcher.py`, `agy_webhook_server.py`, `agy_dispatch.py` | `rhm_*.py` | Module names only; the legacy server is not started by anything. |
+| `~/.config/antigravity-mesh`, `/etc/antigravity-mesh`, `~/.cache/antigravity-mesh` | `…/remote-harness-mcp` | `core/paths.py` uses the new name and keeps using the old directory while it is the only one that exists, so the token, `agent.env`, `domain.env`, job history and update journal stay where they are. |
+| `agy-agent.service`, `com.antigravity.mesh.agent`, `agy-agent` (runit) | `rhm-agent.service`, `com.remoteharness.mcp.agent`, `rhm-agent` | `install.sh` / `install.ps1` stop and remove the old supervisors first, so two agents never share one tunnel. The updater restarts whichever unit the node actually has. |
+| `AntigravityMeshWatchdog` / `AntigravityMeshUpdater` tasks, `agy-agent.vbs` Startup entry | `RemoteHarnessMCPWatchdog` / `RemoteHarnessMCPUpdater`, `rhm-agent.vbs` | Unregistered/removed by `install.ps1`. |
+| `AntigravityMesh-Setup-<version>.exe` | `RemoteHarnessMCP-Setup-<version>.exe` | The updater accepts both names; the payload asset `mesh-payload-<version>.zip` never changed. |
+| npm package `gemini-computer-use` | `remote-harness-mcp` | The CLI keeps the `gemini-computer-use` command as an alias in `package.json`. |
+| `AGY_PUBLIC_BASE_URL` | `MESH_PUBLIC_URL` | Still read as a documented legacy alias (`core/domain.py`). `AGY_WEBHOOK_PORT` / `AGY_WEBHOOK_HOST` likewise, with `RHM_*` preferred. |
+| Webhook route `/api/agy`, header `X-Agy-Token`, Apps Script properties `AGY_ENDPOINT_BASE` / `AGY_SECRET_TOKEN` | `/api/rhm`, `X-Rhm-Token`, `RHM_*` | The legacy route, header and property names are still accepted. |
+| Registry `/etc/antigravity-mesh/registry.json` | `/etc/remote-harness-mcp/registry.json` | `gateway.py` keeps using the old file while it is the only one, so registered nodes are not lost. |
+| Gateway `/opt/antigravity-mesh`, `agy-gateway.service`, `/var/www/antigravity-mesh` | `/opt/remote-harness-mcp`, `rhm-gateway.service`, `/var/www/remote-harness-mcp` | `deploy_gateway.sh` deploys to the pre-rename layout while it is the only one on the host; `MESH_GATEWAY_APP_DIR` / `MESH_GATEWAY_SERVICE` / `MESH_GATEWAY_WWW_DIR` override. |
+| Coordinator workspace `/root/agy-gdrive-runner` | — | Deliberately unchanged: it is a deployment path on an existing host, and it stays in `ALLOWED_WORKSPACES` (`MESH_COORDINATOR_WORKSPACE` overrides). |
+
+The words *mesh* and *MESH_\** were deliberately kept: they name the topology
+(the subagent mesh, `mesh_status`, `MESH_WORKSPACE`, …), not the project.
+
+The Google **Antigravity SDK** and the **Antigravity CLI** are external products
+this project integrates with: their names are not the project's and were left
+alone (`google.antigravity`, `~/.gemini/antigravity-cli`, `/root/.local/bin/agy`).
+
+---
+
 ## 1. The moving parts
 
 | Piece | What it does |
@@ -19,8 +49,8 @@ match a published checksum.
 | `core/agent.py` | Starts a background thread (`mesh-updater`) that checks every `MESH_UPDATE_CHECK_INTERVAL`, records the answer in `agent.heartbeat`, and stops the process when a new version is installed so the helper can start it. |
 | `mesh_update` (MCP tool) | Lets Gemini report state (`action=status`), look for a release (`action=check`) or install one (`action=apply`). |
 | `ops/update.ps1` | The Windows wrapper: finds the interpreter the node is pinned to and the payload directory from the Startup launcher, then runs the updater. Refuses the Microsoft Store alias. |
-| `bin/cli.js update` | `gemini-computer-use update [-Check] [-Force] [-Json] …` — the same thing from the CLI. |
-| `AntigravityMeshUpdater` (Scheduled Task) | Runs `ops/update.ps1 -Quiet` once a day at 03:30, so a machine nobody logs into still moves forward. Registered by `install.ps1`. |
+| `bin/cli.js update` | `remote-harness-mcp update [-Check] [-Force] [-Json] …` — the same thing from the CLI. |
+| `RemoteHarnessMCPUpdater` (Scheduled Task) | Runs `ops/update.ps1 -Quiet` once a day at 03:30, so a machine nobody logs into still moves forward. Registered by `install.ps1`. |
 | `ops/windows/run-hidden.vbs` | Starts a node script with no console window at all; both scheduled tasks go through it. A task has no console of its own, so `powershell.exe` would be given a new one and Windows draws it before honouring `-WindowStyle Hidden` — a black window every five minutes. `wscript.exe` is a GUI host, and `WshShell.Run …, 0` hands the child `SW_HIDE`, so nothing is ever drawn. |
 | `.github/workflows/release.yml` | Turns a pushed tag into a release with the assets a node needs. |
 
@@ -43,7 +73,7 @@ git tag v0.3.1 && git push origin v0.3.1
 
 1. **verifies** that the tag, `core/version.py` and `package.json` agree, and runs
    the updater and version test suites;
-2. **builds** `AntigravityMesh-Setup-<version>.exe` with the in-box C# compiler and
+2. **builds** `RemoteHarnessMCP-Setup-<version>.exe` with the in-box C# compiler and
    self-tests it (`--version`, `--unpack`);
 3. **builds** `mesh-payload-<version>.zip` — the archive the updater installs —
    with `tools/build-payload-zip.py`, plus its `.sha256`;
@@ -65,7 +95,7 @@ For a release, the updater chooses the first asset that exists:
 
 1. `mesh-payload-<version>.zip` — verified against `mesh-payload-<version>.zip.sha256`
    (or the asset's `digest`). **This is the normal path, on every platform.**
-2. `AntigravityMesh-Setup-<version>.exe` — Windows only, verified against
+2. `RemoteHarnessMCP-Setup-<version>.exe` — Windows only, verified against
    `<name>.exe.sha256`, then unpacked with `--unpack` and installed from there.
 3. the release source archive (`tarball_url`) — **only** when
    `MESH_UPDATE_ALLOW_UNVERIFIED=1`, because GitHub publishes no checksum for it.
@@ -93,9 +123,9 @@ check ──▶ download to <tmp>/….part ──▶ SHA-256 match?
 ```
 
 * **Backup.** Everything replaced is first moved to
-  `~/.config/antigravity-mesh/backups/<old-version>-<timestamp>/`. The newest three
+  `~/.config/remote-harness-mcp/backups/<old-version>-<timestamp>/`. The newest three
   are kept (`MESH_UPDATE_KEEP_BACKUPS`).
-* **Journal.** `~/.config/antigravity-mesh/update.journal.json` is written *before*
+* **Journal.** `~/.config/remote-harness-mcp/update.journal.json` is written *before*
   the swap. If the process is killed mid-swap, the next agent start calls
   `recover_pending()`: a journal left at `applying` restores the backup, one at
   `swapped` only finishes the bookkeeping. The worst case is "still on the old
@@ -125,13 +155,13 @@ The restart itself goes through whatever already exists:
 * **Windows** — the watchdog task's script, `ops/windows/agent-watchdog.ps1`, with a
   short grace period; verified through the heartbeat, with a direct
   `python -m core.agent` start as the last resort.
-* **Linux (systemd)** — `systemctl --user restart agy-agent.service` when that unit
+* **Linux (systemd)** — `systemctl --user restart rhm-agent.service` when that unit
   exists (`Restart=always` covers it either way).
-* **macOS (launchd)** — `launchctl kickstart -k gui/<uid>/com.antigravity.mesh.agent`.
+* **macOS (launchd)** — `launchctl kickstart -k gui/<uid>/com.remoteharness.mcp.agent`.
 * Everything else — `python -u -m core.agent`, detached, output appended to
   `agent.log`.
 
-The result of every step lands in `~/.config/antigravity-mesh/update.log` and, in
+The result of every step lands in `~/.config/remote-harness-mcp/update.log` and, in
 short form, in `agent.heartbeat` under `update` — which is what `ops/doctor.ps1`
 prints.
 
@@ -148,7 +178,7 @@ Every key is read from the environment, and therefore also from `agent.env`:
 | `MESH_UPDATE_CHECK_INTERVAL` | `21600` | Seconds between checks (minimum 300). |
 | `MESH_UPDATE_CHANNEL` | `stable` | `prerelease` also considers pre-releases. |
 | `MESH_UPDATE_TOKEN` | – | GitHub token. Raises the API limit from 60 to 5000 requests/hour. `GITHUB_TOKEN` and `GH_TOKEN` are honoured too. |
-| `MESH_UPDATE_REPO` | `LevRa7/Computer-use-for-Gemini-App-Web` | Where releases come from. |
+| `MESH_UPDATE_REPO` | `LevRa7/remote-harness-mcp` | Where releases come from. |
 | `MESH_UPDATE_DIR` | the directory holding `core/` | Install directory. |
 | `MESH_UPDATE_RESTART` | `1` | Restart the agent after installing. |
 | `MESH_UPDATE_ALLOW_UNVERIFIED` | `0` | Accept a payload with no published checksum. Leave it off. |
@@ -165,13 +195,13 @@ agent that owns it does.
 
 ```powershell
 # Windows: is a newer release published?
-gemini-computer-use update -Check
-gemini-computer-use update -Check -Json          # machine-readable
+remote-harness-mcp update -Check
+remote-harness-mcp update -Check -Json          # machine-readable
 
 # install it now (downloads, verifies, swaps, restarts)
-gemini-computer-use update
-gemini-computer-use update -Force                # ignore the check interval
-gemini-computer-use update -NoRestart            # swap without restarting
+remote-harness-mcp update
+remote-harness-mcp update -Force                # ignore the check interval
+remote-harness-mcp update -NoRestart            # swap without restarting
 ```
 
 ```bash
@@ -201,7 +231,7 @@ Every applied update leaves a backup:
 
 ```powershell
 # Windows
-dir "$env:USERPROFILE\.config\antigravity-mesh\backups"
+dir "$env:USERPROFILE\.config\remote-harness-mcp\backups"
 # the payload of the previous version is <backup>\core, <backup>\skills, <backup>\ops
 ```
 
@@ -225,10 +255,10 @@ from the journal automatically.
 | `no published SHA-256 for …; refusing` | The release has no `mesh-payload-*.zip.sha256`. Re-run the release workflow, or attach the checksum by hand. |
 | `no releases found in … (HTTP 404)` | Nothing is published yet, or `MESH_UPDATE_REPO` points at the wrong repository. |
 | `the payload is incomplete: missing …` | The asset is not a node payload. Check that it was built by `tools/build-payload-zip.py`. |
-| The node updates but runs the old version | The agent was not restarted: look for "restart helper" lines in `update.log`, and check that the scheduled task `AntigravityMeshUpdater` exists (`schtasks /Query /TN AntigravityMeshUpdater`). |
+| The node updates but runs the old version | The agent was not restarted: look for "restart helper" lines in `update.log`, and check that the scheduled task `RemoteHarnessMCPUpdater` exists (`schtasks /Query /TN RemoteHarnessMCPUpdater`). |
 | A node never updates although a release exists | `core/version.py` is the compared number. A release whose tag is older than the installed version is reported as "up to date" — that is correct, not a bug. |
 | An update is found but not installed | `MESH_UPDATE_AUTO=0`. |
-| Everything else | `ops/doctor.ps1` prints the node version and the last update answer from the heartbeat; `~/.config/antigravity-mesh/update.log` has the full history. |
+| Everything else | `ops/doctor.ps1` prints the node version and the last update answer from the heartbeat; `~/.config/remote-harness-mcp/update.log` has the full history. |
 
 ---
 

@@ -22,7 +22,7 @@ that flash is the most noticeable thing this project does on a desktop.
 `wscript.exe` is a GUI host and never allocates a console, and
 `WshShell.Run command, 0, False` hands the child `SW_HIDE` in its `STARTUPINFO` —
 the window is hidden from the first moment, so nothing is ever painted. That is the
-same mechanism as the logon launcher (`antigravity-agent.vbs`), which is why a node
+same mechanism as the logon launcher (`rhm-agent.vbs`), which is why a node
 starts without a window either. Output goes to
 `<ConfigDir>\<script name>.out.log`, because a window that never appears also never
 shows an error.
@@ -47,11 +47,11 @@ within seconds.
 
 ## `agent-watchdog.ps1` - single-shot supervisor
 
-Run every 5 minutes by the Scheduled Task **`AntigravityMeshWatchdog`**.
+Run every 5 minutes by the Scheduled Task **`RemoteHarnessMCPWatchdog`**.
 
 | Parameter | Default | Meaning |
 | :--- | :--- | :--- |
-| `-ConfigDir` | `%USERPROFILE%\.config\antigravity-mesh` | where `agent.env`, `agent.log`, `agent.heartbeat` live |
+| `-ConfigDir` | `%USERPROFILE%\.config\remote-harness-mcp` | where `agent.env`, `agent.log`, `agent.heartbeat` live |
 | `-LogFile` | `<ConfigDir>\watchdog.log` | the watchdog's own journal |
 | `-GraceSeconds` | `60` | a heartbeat younger than this counts as alive |
 | `-Quiet` | off | log only, no console output |
@@ -87,13 +87,13 @@ and never logged - it is masked as `****`.
 
 | Parameter | Default | Meaning |
 | :--- | :--- | :--- |
-| `-ConfigDir` | `%USERPROFILE%\.config\antigravity-mesh` | same directory as above |
+| `-ConfigDir` | `%USERPROFILE%\.config\remote-harness-mcp` | same directory as above |
 | `-Json` | off | print exactly one JSON object and nothing else |
 | `-TailLines` | `20` | how many `agent.log` lines to show |
 
 It reports the interpreter from the `.vbs` (with `--version` and an
 `import websockets` probe, and whether it is the Store alias), the `.vbs` path and
-content with the token masked, the state of `AntigravityMeshWatchdog`, `agent.env`
+content with the token masked, the state of `RemoteHarnessMCPWatchdog`, `agent.env`
 with the token masked, the heartbeat JSON and its age, the last `-TailLines` lines
 of `agent.log` with `torn-line: true` when the file does not end in a newline, the
 gateway `/health` JSON, and whether a verified `core.agent` process is running
@@ -116,19 +116,19 @@ written to disk.
 .\ops\windows\agent-watchdog.ps1 -Quiet
 
 # through the CLI (same scripts, found next to bin/cli.js)
-npx gemini-computer-use doctor
-npx gemini-computer-use doctor --json
-npx gemini-computer-use restart
+npx remote-harness-mcp doctor
+npx remote-harness-mcp doctor --json
+npx remote-harness-mcp restart
 
 # the scheduled task
-Get-ScheduledTask -TaskName AntigravityMeshWatchdog
-Get-ScheduledTaskInfo -TaskName AntigravityMeshWatchdog
-Start-ScheduledTask -TaskName AntigravityMeshWatchdog
+Get-ScheduledTask -TaskName RemoteHarnessMCPWatchdog
+Get-ScheduledTaskInfo -TaskName RemoteHarnessMCPWatchdog
+Start-ScheduledTask -TaskName RemoteHarnessMCPWatchdog
 ```
 
 ## What the installer must register
 
-Task name: **`AntigravityMeshWatchdog`**.
+Task name: **`RemoteHarnessMCPWatchdog`**.
 
 * **Action**: `wscript.exe`
 * **Arguments**: `"<payload>\ops\windows\run-hidden.vbs" "ops\windows\agent-watchdog.ps1" -Quiet`
@@ -156,9 +156,9 @@ $settings   = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
                 -DontStopIfGoingOnBatteries -StartWhenAvailable `
                 -MultipleInstances IgnoreNew `
                 -ExecutionTimeLimit (New-TimeSpan -Minutes 10)
-Register-ScheduledTask -TaskName 'AntigravityMeshWatchdog' -Action $action `
+Register-ScheduledTask -TaskName 'RemoteHarnessMCPWatchdog' -Action $action `
   -Trigger @($atLogon, $repeat) -Settings $settings -Force `
-  -Description 'Antigravity Mesh: keep the node agent running (every 5 minutes).'
+  -Description 'Remote Harness MCP: keep the node agent running (every 5 minutes).'
 ```
 
 The `ops\` directory must travel with the payload: it has to be listed in
@@ -167,8 +167,8 @@ whatever `deploy_gateway.sh` stages for the node bootstrap.
 
 ## `../update.ps1` - single-shot self-update
 
-Run once a day by the Scheduled Task **`AntigravityMeshUpdater`**, and by hand as
-`gemini-computer-use update [-Check]`.
+Run once a day by the Scheduled Task **`RemoteHarnessMCPUpdater`**, and by hand as
+`remote-harness-mcp update [-Check]`.
 
 | Parameter | Default | Meaning |
 | :--- | :--- | :--- |
@@ -179,7 +179,7 @@ Run once a day by the Scheduled Task **`AntigravityMeshUpdater`**, and by hand a
 | `-Json` | off | print the updater's JSON answer verbatim |
 | `-InstallDir` | from the Startup `.vbs` | payload directory |
 | `-Python` | from the Startup `.vbs` | interpreter to run the updater with |
-| `-ConfigDir` | `%USERPROFILE%\.config\antigravity-mesh` | where `agent.env` and `agent.heartbeat` live |
+| `-ConfigDir` | `%USERPROFILE%\.config\remote-harness-mcp` | where `agent.env` and `agent.heartbeat` live |
 | `-LogFile` | `<ConfigDir>\update-task.log` | this script's own journal |
 | `-Quiet` | off | log only, no console output |
 
@@ -198,7 +198,7 @@ and starts a helper that brings the agent back. See
 | `3` | the update failed: network, checksum mismatch, unusable payload |
 | `4` | the update was installed and the node is restarting |
 
-Register it as **`AntigravityMeshUpdater`**: action `wscript.exe` (through
+Register it as **`RemoteHarnessMCPUpdater`**: action `wscript.exe` (through
 `run-hidden.vbs`, so the daily run never shows a window), arguments
 `"<payload>\ops\windows\run-hidden.vbs" "ops\update.ps1" -Quiet`, working directory
 the payload directory, trigger daily (the installer uses 03:30), settings
@@ -229,11 +229,11 @@ at 03:30 updates at the next opportunity).
 
 ## `agent-watchdog.ps1`
 
-Запускается каждые 5 минут заданием планировщика **`AntigravityMeshWatchdog`**.
+Запускается каждые 5 минут заданием планировщика **`RemoteHarnessMCPWatchdog`**.
 
 | Параметр | Значение по умолчанию | Смысл |
 | :--- | :--- | :--- |
-| `-ConfigDir` | `%USERPROFILE%\.config\antigravity-mesh` | где лежат `agent.env`, `agent.log`, `agent.heartbeat` |
+| `-ConfigDir` | `%USERPROFILE%\.config\remote-harness-mcp` | где лежат `agent.env`, `agent.log`, `agent.heartbeat` |
 | `-LogFile` | `<ConfigDir>\watchdog.log` | собственный журнал сторожа |
 | `-GraceSeconds` | `60` | heartbeat моложе этого возраста считается живым |
 | `-Quiet` | выключен | только журнал, без вывода в консоль |
@@ -259,13 +259,13 @@ at 03:30 updates at the next opportunity).
 
 | Параметр | Значение по умолчанию | Смысл |
 | :--- | :--- | :--- |
-| `-ConfigDir` | `%USERPROFILE%\.config\antigravity-mesh` | тот же каталог |
+| `-ConfigDir` | `%USERPROFILE%\.config\remote-harness-mcp` | тот же каталог |
 | `-Json` | выключен | вывести ровно один JSON-объект и ничего больше |
 | `-TailLines` | `20` | сколько последних строк `agent.log` показать |
 
 Доктор показывает интерпретатор из `.vbs` (плюс `--version` и проверку
 `import websockets`, плюс признак алиаса Store), путь и содержимое `.vbs` с
-замаскированным токеном, состояние задания `AntigravityMeshWatchdog`, `agent.env`
+замаскированным токеном, состояние задания `RemoteHarnessMCPWatchdog`, `agent.env`
 с замаскированным токеном, JSON сердцебиения и его возраст, последние строки
 `agent.log` с флагом `torn-line: true` (файл не заканчивается переводом строки),
 JSON ответа `/health` и наличие подтверждённого процесса агента.
@@ -280,13 +280,13 @@ JSON ответа `/health` и наличие подтверждённого п�
 .\ops\doctor.ps1 -Json
 .\ops\windows\agent-watchdog.ps1
 .\ops\windows\agent-watchdog.ps1 -Quiet
-npx gemini-computer-use doctor
-npx gemini-computer-use restart
-Get-ScheduledTaskInfo -TaskName AntigravityMeshWatchdog
-Start-ScheduledTask -TaskName AntigravityMeshWatchdog
+npx remote-harness-mcp doctor
+npx remote-harness-mcp restart
+Get-ScheduledTaskInfo -TaskName RemoteHarnessMCPWatchdog
+Start-ScheduledTask -TaskName RemoteHarnessMCPWatchdog
 ```
 
-Установщик регистрирует задание **`AntigravityMeshWatchdog`**: действие
+Установщик регистрирует задание **`RemoteHarnessMCPWatchdog`**: действие
 `powershell.exe` с аргументами
 `-NoProfile -ExecutionPolicy Bypass -File "<payload>\ops\windows\agent-watchdog.ps1" -Quiet`,
 рабочий каталог - каталог payload (там, где лежит `core\`), триггеры - при входе

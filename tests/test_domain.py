@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from core import domain
+from core import domain, paths
 
 #: Variables the resolver reads, plus the ones :func:`core.agent._load_settings`
 #: exports while it runs. Every test starts with all of them cleared.
@@ -32,7 +32,7 @@ def isolated_domain(tmp_path, monkeypatch):
     """No environment and no configuration file: each test starts from zero.
 
     ``MESH_DOMAIN_FILE`` is pointed at a path that does not exist so a real
-    ``/etc/antigravity-mesh/domain.env`` on the host running the tests cannot change
+    ``/etc/remote-harness-mcp/domain.env`` on the host running the tests cannot change
     the outcome. The keys are restored by hand as well as by monkeypatch, because
     the code under test also *creates* environment entries (an absent key has no
     monkeypatch record to undo).
@@ -91,7 +91,7 @@ def test_explicit_http_is_not_upgraded(monkeypatch):
     assert domain.public_base_url() == "http://mesh.example.com"
 
 
-def test_agy_public_base_url_is_an_alias(monkeypatch):
+def test_rhm_public_base_url_is_an_alias(monkeypatch):
     monkeypatch.setenv("AGY_PUBLIC_BASE_URL", "https://alias.example.com")
     assert domain.public_base_url() == "https://alias.example.com"
 
@@ -131,11 +131,19 @@ def test_domain_file_accepts_the_alias_key(tmp_path, monkeypatch):
 
 
 def test_domain_file_location_is_platform_specific_and_overridable(tmp_path, monkeypatch):
-    default_locations = {domain.default_domain_file()}
-    assert "/etc/antigravity-mesh/domain.env" in default_locations or any(
-        location.endswith(os.path.join(".config", "antigravity-mesh", "domain.env"))
-        for location in default_locations
-    )
+    """The default is the current directory name, or the pre-rename one.
+
+    ``core.paths`` resolves the legacy name only when it is the one that exists on
+    the host, so an upgraded node keeps reading the ``domain.env`` the previous
+    version wrote. Either way the answer must be a real ``<dir>/domain.env``.
+    """
+    location = domain.default_domain_file()
+    if os.name == "nt" or domain.is_termux():
+        assert location == os.path.join(paths.config_dir(), "domain.env")
+    else:
+        assert location == os.path.join(paths.etc_dir(), "domain.env")
+    assert location.endswith(os.path.join(paths.APP_NAME, "domain.env")) or \
+        location.endswith(os.path.join(paths.LEGACY_APP_NAME, "domain.env"))
 
     override = str(tmp_path / "custom.env")
     monkeypatch.setenv("MESH_DOMAIN_FILE", override)
@@ -303,8 +311,8 @@ def test_the_domain_literal_lives_in_exactly_one_module():
         "core/agent.py",
         "core/mcp_tools.py",
         "core/server.py",
-        "agy_sync.py",
-        "agy_watcher.py",
+        "rhm_sync.py",
+        "rhm_watcher.py",
     )
     offenders = [
         name

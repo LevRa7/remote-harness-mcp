@@ -72,7 +72,7 @@ def print_help_instructions():
     print("   - В 'Test users' обязательно добавьте ваш email (<your-email>)")
     print("5. Перейдите в 'Credentials' -> '+ CREATE CREDENTIALS' -> 'OAuth client ID':")
     print("   - Application type: Desktop app (или Web application с Redirect URI http://localhost:8085/)")
-    print("   - Name: agy-drive-runner")
+    print("   - Name: rhm-drive-runner")
     print("6. Скачайте JSON файл и сохраните его как:")
     print(f"   {CREDENTIALS_FILE}")
     print()
@@ -80,7 +80,7 @@ def print_help_instructions():
     print("1. В Google Cloud Console -> Credentials -> '+ CREATE CREDENTIALS' -> Service Account.")
     print("2. Создайте ключ (Keys -> Add key -> Create new key -> JSON).")
     print(f"3. Сохраните его как: {SERVICE_ACCOUNT_FILE}")
-    print("4. Откройте Google Диск и поделитесь файлом antigravity_tasks.json")
+    print("4. Откройте Google Диск и поделитесь файлом rhm_tasks.json")
     print("   с email сервисного аккаунта (например: xxx@xxx.iam.gserviceaccount.com).")
     print("=" * 70)
 
@@ -190,7 +190,7 @@ def verify_and_report(client: GDriveClient):
         pending = sum(1 for t in tasks if t.get("status") == "pending")
         print(f"[+] Из них ожидают выполнения (pending): {pending}")
     else:
-        print(f"[!] Файл очереди не найден по умолчанию. Создаём новый файл antigravity_tasks.json...")
+        print(f"[!] Файл очереди не найден по умолчанию. Создаём новый файл rhm_tasks.json...")
         new_id = client.create_queue_file()
         print(f"[+] Файл успешно создан! File ID: {new_id}")
 

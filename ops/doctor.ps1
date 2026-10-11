@@ -1,5 +1,5 @@
 # ==============================================================================
-#  Antigravity Mesh - Windows node doctor (read-only diagnostic)
+#  Remote Harness MCP - Windows node doctor (read-only diagnostic)
 #
 #  Answers "why is this node offline?" without changing anything on the machine:
 #  it only reads files, probes the pinned interpreter, asks the task scheduler and
@@ -17,7 +17,7 @@
 #    * the interpreter taken from the Startup .vbs, its --version, an
 #      "import websockets" probe, and whether it is the Store alias;
 #    * the .vbs path and its content, with the token masked as ****;
-#    * the Scheduled Task "AntigravityMeshWatchdog" (state, action, last run,
+#    * the Scheduled Task "RemoteHarnessMCPWatchdog" (state, action, last run,
 #      last result) whenever the ScheduledTasks cmdlets are available;
 #    * agent.env with the token masked;
 #    * the heartbeat JSON and its age in seconds;
@@ -41,7 +41,7 @@
 #  Usage:
 #     .\doctor.ps1
 #     .\doctor.ps1 -Json
-#     .\doctor.ps1 -ConfigDir "$env:USERPROFILE\.config\antigravity-mesh" -TailLines 50
+#     .\doctor.ps1 -ConfigDir "$env:USERPROFILE\.config\remote-harness-mcp" -TailLines 50
 # ==============================================================================
 [CmdletBinding()]
 param(
@@ -53,7 +53,7 @@ param(
 $ErrorActionPreference = 'Continue'
 
 $AsJson = [bool]$Json
-$TaskName = 'AntigravityMeshWatchdog'
+$TaskName = 'RemoteHarnessMCPWatchdog'
 # The watchdog treats a heartbeat as fresh within its -GraceSeconds (60 s by
 # default) and runs every 5 minutes. The doctor has no -GraceSeconds parameter, so
 # it is deliberately more generous: a heartbeat younger than this proves the agent
@@ -436,7 +436,13 @@ if ([string]::IsNullOrWhiteSpace($ConfigDir)) {
     $profileDir = $env:USERPROFILE
     if ([string]::IsNullOrWhiteSpace($profileDir)) { $profileDir = [Environment]::GetFolderPath('UserProfile') }
     if ([string]::IsNullOrWhiteSpace($profileDir)) { $profileDir = (Get-Location).Path }
-    $ConfigDir = Join-Path $profileDir '.config\antigravity-mesh'
+    $ConfigDir = Join-Path $profileDir '.config\remote-harness-mcp'
+    # An upgraded node keeps the configuration directory its token already lives
+    # in (the project shipped as "Antigravity Mesh").
+    $legacyConfigDir = Join-Path $profileDir '.config\antigravity-mesh'
+    if (-not (Test-Path -LiteralPath $ConfigDir) -and (Test-Path -LiteralPath $legacyConfigDir)) {
+        $ConfigDir = $legacyConfigDir
+    }
 }
 $envFile = Join-Path $ConfigDir 'agent.env'
 $settings = Get-EnvMap $envFile
@@ -462,8 +468,8 @@ $envMasked = Hide-Secret -Text $envRaw -Secret $token
 # --- launcher -----------------------------------------------------------------
 $startupDir = [Environment]::GetFolderPath('Startup')
 $vbsPath = ''
-if ([string]::IsNullOrWhiteSpace($startupDir)) { $vbsPath = 'antigravity-agent.vbs (the Startup folder could not be resolved)' }
-else { $vbsPath = Join-Path $startupDir 'antigravity-agent.vbs' }
+if ([string]::IsNullOrWhiteSpace($startupDir)) { $vbsPath = 'rhm-agent.vbs (the Startup folder could not be resolved)' }
+else { $vbsPath = Join-Path $startupDir 'rhm-agent.vbs' }
 $launcher = Get-LauncherInfo $vbsPath
 $interpreter = $launcher.Interpreter
 $storeAlias = [bool]($interpreter -and ($interpreter -match '(?i)\\WindowsApps\\'))
@@ -643,7 +649,7 @@ if ($AsJson) {
         foreach ($line in $Lines) { Add-Out ('    ' + $line) }
     }
 
-    Add-Out 'Antigravity Mesh doctor (read-only)'
+    Add-Out 'Remote Harness MCP doctor (read-only)'
     Add-Out '================================='
     Add-Field 'generated_at' $report.generated_at
     Add-Field 'config_dir' $ConfigDir

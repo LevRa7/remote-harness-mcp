@@ -849,7 +849,7 @@ CONTROL_CASES = [
     ("toast", {"action": "toast", "text": "hello world"},
      "termux-toast", ["hello world"], 15.0, "json"),
     ("notify-default-title", {"action": "notify", "text": "body"},
-     "termux-notification", ["--title", "Antigravity Mesh", "--content", "body"], 10.0, "json"),
+     "termux-notification", ["--title", "Remote Harness MCP", "--content", "body"], 10.0, "json"),
     ("notify-titled-id", {"action": "notify", "title": "T", "text": "body", "id": "7"},
      "termux-notification", ["--title", "T", "--content", "body", "--id", "7"], 10.0, "json"),
     ("notify-list", {"action": "notify_list"}, "termux-notification-list", [], 10.0, "json"),
@@ -879,7 +879,7 @@ CONTROL_CASES = [
     ("wallpaper-url", {"action": "wallpaper", "url": "https://example.com/p.jpg"},
      "termux-wallpaper", ["-u", "https://example.com/p.jpg"], 20.0, "json"),
     ("dialog-defaults", {"action": "dialog"},
-     "termux-dialog", ["text", "-t", "Antigravity Mesh", "-i", ""], 35.0, "json"),
+     "termux-dialog", ["text", "-t", "Remote Harness MCP", "-i", ""], 35.0, "json"),
     ("dialog-custom", {"action": "dialog", "title": "T", "text": "body", "timeout_sec": 10},
      "termux-dialog", ["text", "-t", "T", "-i", "body"], 15.0, "json"),
 ]
@@ -940,7 +940,7 @@ def test_text_arguments_stay_one_argv_element(device_tools, text):
 
     mcp_tools.call_tool("device_control", {"action": "notify", "text": text})
     assert device_tools.termux.calls[-1] == (
-        "termux-notification", ["--title", "Antigravity Mesh", "--content", text], 10.0, "json")
+        "termux-notification", ["--title", "Remote Harness MCP", "--content", text], 10.0, "json")
 
     mcp_tools.call_tool("device_messages", {"action": "sms_send", "number": "+15551234567",
                                             "text": text})

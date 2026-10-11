@@ -23,10 +23,17 @@ def _platform_root(posix_root: str) -> str:
 # home directory. Point MESH_COORDINATOR_WORKSPACE / MESH_WORKSPACE at the real
 # deployment paths in the service environment. The documented defaults are the
 # Linux deployment paths; on Windows the same roots live under the user profile.
+#: Roots used before the rename: a deployment that still lives in one of them keeps
+#: being writable, so upgrading the code does not lock the node out of its own tree.
+LEGACY_WORKSPACES = [
+    _platform_root("/root/antigravity-mesh"),
+    _platform_root("/root/agy-gdrive-runner"),
+]
+
 ALLOWED_WORKSPACES = [
     os.environ.get("MESH_COORDINATOR_WORKSPACE") or _platform_root("/root/agy-gdrive-runner"),
-    os.environ.get("MESH_WORKSPACE") or _platform_root("/root/antigravity-mesh"),
-]
+    os.environ.get("MESH_WORKSPACE") or _platform_root("/root/remote-harness-mcp"),
+] + LEGACY_WORKSPACES
 
 SAFE_COMMAND_PREFIXES = [
     "git status",

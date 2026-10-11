@@ -85,13 +85,13 @@ token = {json.dumps(rclone_token_payload)}
     except Exception as e:
         print(f"[!] Warning: failed to update rclone.conf: {e}")
 
-    # Restart agy-watcher.service
-    print("[*] Restarting agy-watcher.service...")
+    # Restart rhm-watcher.service
+    print("[*] Restarting rhm-watcher.service...")
     try:
-        subprocess.run(["systemctl", "restart", "agy-watcher"], check=True)
-        print("[+] agy-watcher.service restarted successfully.")
+        subprocess.run(["systemctl", "restart", "rhm-watcher"], check=True)
+        print("[+] rhm-watcher.service restarted successfully.")
     except Exception as e:
-        print(f"[!] Warning: failed to restart agy-watcher: {e}")
+        print(f"[!] Warning: failed to restart rhm-watcher: {e}")
 
     # Test reading queue with new token
     try:

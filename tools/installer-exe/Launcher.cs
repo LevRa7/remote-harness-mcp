@@ -1,10 +1,10 @@
 // =============================================================================
-//  Antigravity Mesh - single-file Windows setup launcher
+//  Remote Harness MCP - single-file Windows setup launcher
 // =============================================================================
 //
 //  This is the compiled installer: it carries the whole node payload inside
 //  itself (the WinForms wizard, install.ps1, core/, install.sh, skills/) as one
-//  embedded zip, unpacks it under %LOCALAPPDATA%\AntigravityMesh\setup\<version>
+//  embedded zip, unpacks it under %LOCALAPPDATA%\RemoteHarnessMCP\setup\<version>
 //  and runs the wizard from there.
 //
 //  Why a launcher instead of a compiled wizard: the installation logic lives in
@@ -32,7 +32,7 @@ using System.Windows.Forms;
 
 internal static class Launcher
 {
-    private const string ProductName = "Antigravity Mesh";
+    private const string ProductName = "Remote Harness MCP";
     private const string PayloadResource = "payload.zip";
     private const string EntryScript = "install-gui.ps1";
     private const int AttachParentProcess = -1;
@@ -121,7 +121,7 @@ internal static class Launcher
                       + Environment.NewLine + Environment.NewLine
                       + "Set MESH_SETUP_DIR to unpack somewhere else, for example:"
                       + Environment.NewLine
-                      + "  set MESH_SETUP_DIR=%USERPROFILE%\\AntigravityMesh", ex, canWrite);
+                      + "  set MESH_SETUP_DIR=%USERPROFILE%\\RemoteHarnessMCP", ex, canWrite);
         }
 
         string shell = ResolvePowerShell();
@@ -194,16 +194,16 @@ internal static class Launcher
     {
         return ProductName + " setup " + Version() + Environment.NewLine
              + Environment.NewLine
-             + "  AntigravityMesh-Setup.exe                 open the visual installer" + Environment.NewLine
-             + "  AntigravityMesh-Setup.exe -Lang ru        start in Russian" + Environment.NewLine
-             + "  AntigravityMesh-Setup.exe -Lang en        start in English" + Environment.NewLine
-             + "  AntigravityMesh-Setup.exe -SelfTest       headless self-check, prints JSON" + Environment.NewLine
-             + "  AntigravityMesh-Setup.exe --version       print the version" + Environment.NewLine
-             + "  AntigravityMesh-Setup.exe --where         show where the payload goes" + Environment.NewLine
-             + "  AntigravityMesh-Setup.exe --unpack        unpack the payload and stop" + Environment.NewLine
+             + "  RemoteHarnessMCP-Setup.exe                 open the visual installer" + Environment.NewLine
+             + "  RemoteHarnessMCP-Setup.exe -Lang ru        start in Russian" + Environment.NewLine
+             + "  RemoteHarnessMCP-Setup.exe -Lang en        start in English" + Environment.NewLine
+             + "  RemoteHarnessMCP-Setup.exe -SelfTest       headless self-check, prints JSON" + Environment.NewLine
+             + "  RemoteHarnessMCP-Setup.exe --version       print the version" + Environment.NewLine
+             + "  RemoteHarnessMCP-Setup.exe --where         show where the payload goes" + Environment.NewLine
+             + "  RemoteHarnessMCP-Setup.exe --unpack        unpack the payload and stop" + Environment.NewLine
              + Environment.NewLine
              + "Everything is unpacked under" + Environment.NewLine
-             + "  %LOCALAPPDATA%\\AntigravityMesh\\setup\\<version>" + Environment.NewLine
+             + "  %LOCALAPPDATA%\\RemoteHarnessMCP\\setup\\<version>" + Environment.NewLine
              + "  (override with MESH_SETUP_DIR; a location that cannot be written" + Environment.NewLine
              + "   falls back to %TEMP%, then to the folder holding this file)" + Environment.NewLine;
     }
@@ -240,13 +240,13 @@ internal static class Launcher
         List<string> roots = new List<string>();
         roots.Add(Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "AntigravityMesh", "setup", Version()));
+            "RemoteHarnessMCP", "setup", Version()));
         roots.Add(Path.Combine(
-            Path.GetTempPath(), "AntigravityMesh", "setup", Version()));
+            Path.GetTempPath(), "RemoteHarnessMCP", "setup", Version()));
         // Last resort: beside the executable, for a machine where both are closed.
         string directory = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
         if (string.IsNullOrEmpty(directory)) { directory = Environment.CurrentDirectory; }
-        roots.Add(Path.Combine(directory, "AntigravityMesh-setup-" + Version()));
+        roots.Add(Path.Combine(directory, "RemoteHarnessMCP-setup-" + Version()));
         return roots.ToArray();
     }
 

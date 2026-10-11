@@ -16,9 +16,9 @@
 ### Ключевые активные службы на основном сервере:
 - 🟢 `omniroute.service`: **active**
 - 🟢 `nginx.service`: **active**
-- 🟢 `agy-webhook.service`: **active**
-- 🟢 `agy-watcher.service`: **active**
-- 🟢 `agy-mcp.service`: **active**
+- 🟢 `rhm-webhook.service`: **active**
+- 🟢 `rhm-watcher.service`: **active**
+- 🟢 `rhm-mcp.service`: **active**
 - 🟢 `mariadb.service`: **active**
 - 🟢 `docker.service`: **active**
 - 🟢 `containerd.service`: **active**

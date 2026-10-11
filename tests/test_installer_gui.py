@@ -264,7 +264,7 @@ def setup_exe(tmp_path_factory):
     )
     assert build.returncode == 0, (build.stdout or "") + (build.stderr or "")
 
-    exe = output_dir / ("AntigravityMesh-Setup-%s.exe" % _package_version())
+    exe = output_dir / ("RemoteHarnessMCP-Setup-%s.exe" % _package_version())
     assert exe.exists(), "the build produced no executable; it made %s" % sorted(
         item.name for item in output_dir.iterdir())
     return exe

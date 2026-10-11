@@ -240,7 +240,7 @@ abuse или непройденная проверка контактных да
 
 ```text
 GET https://smart-server.online/health
-{"status":"healthy","service":"antigravity_mesh_gateway","host":"smart-server.online",
+{"status":"healthy","service":"remote_harness_mcp_gateway","host":"smart-server.online",
  "target_user":"anonymous","node_online":false,"active_tunnels_count":0,...}
 
 TLS: CN=smart-server.online, SAN: smart-server.online + *.smart-server.online (в т.ч. matebook16),
@@ -248,8 +248,8 @@ TLS: CN=smart-server.online, SAN: smart-server.online + *.smart-server.online (�
 ```
 
 На сервере (Debian 13, адрес намеренно не приводится — в публичном репозитории он не нужен): служба
-`agy-gateway.service` активна, процесс
-`/usr/bin/python3 /opt/antigravity-mesh/gateway.py` слушает `127.0.0.1:8096`, `nginx -t` проходит,
+`rhm-gateway.service` активна, процесс
+`/usr/bin/python3 /opt/remote-harness-mcp/gateway.py` слушает `127.0.0.1:8096`, `nginx -t` проходит,
 `certbot.timer` работает, сертификат действителен 74 дня. То есть **когда DNS вернётся, всё
 заработает без вмешательства в сервер**.
 
@@ -276,7 +276,7 @@ Content-Type: text/plain; charset=utf-8
 Причина в конфиге: `add_header Content-Type ...` не заменяет тип, а **добавляет** второй
 заголовок к тому, что `alias` уже выставил по расширению. Клиент, который берёт первый
 заголовок, считает скрипт двоичными данными, и `Invoke-WebRequest` отдаёт `iex` массив байт
-вместо текста. Исправлено в `ops/nginx/antigravity-mesh-mcp.conf` на `default_type text/plain;`
+вместо текста. Исправлено в `ops/nginx/remote-harness-mcp.conf` на `default_type text/plain;`
 (для `/install.sh`, `/install.ps1`, `/core/` и `/skills/`) — но это изменение нужно применить и
 на сервере.
 
@@ -338,8 +338,8 @@ app_data_dir
 ```text
 INFO:  Reusing existing node registration 'matebook16' for MAC 94:08:53:46:8c:88
 INFO:  "POST /api/register HTTP/1.1" 500 Internal Server Error
-  File "/opt/antigravity-mesh/gateway.py", line 432, in api_register
-    "instructions": f"Antigravity Mesh node '{user}'. ..."
+  File "/opt/remote-harness-mcp/gateway.py", line 432, in api_register
+    "instructions": f"Remote Harness MCP node '{user}'. ..."
 NameError: name 'user' is not defined. Did you mean: 'super'?
 ```
 
@@ -352,8 +352,8 @@ NameError: name 'user' is not defined. Did you mean: 'super'?
 перезапущена. Проверка той самой ветки: `HTTP 200`, `username = matebook16`, `reused = True`.
 
 ```text
-бэкап   : /root/backups/antigravity-mesh/gateway.py.pre-user-fix-20261006-162552
-откат   : cp -a <бэкап> /opt/antigravity-mesh/gateway.py && chown agy:agy /opt/antigravity-mesh/gateway.py && systemctl restart agy-gateway
+бэкап   : /root/backups/remote-harness-mcp/gateway.py.pre-user-fix-20261006-162552
+откат   : cp -a <бэкап> /opt/remote-harness-mcp/gateway.py && chown agy:agy /opt/remote-harness-mcp/gateway.py && systemctl restart rhm-gateway
 ```
 
 ### 7.2. Установка выполнена, цепочка проверена целиком
@@ -369,9 +369,9 @@ GET /health?user=matebook16 -> node_online=true, active_tunnels_count=1
 
 ```text
 initialize   -> 200, протокол 2025-06-18, сессия выдана,
-                в тексте инструкций: "Antigravity Mesh node 'matebook16'"
+                в тексте инструкций: "Remote Harness MCP node 'matebook16'"
 tools/call   -> bash_exec на этой Windows-машине:
-                hello-from-the-gemini-path / 5.1.26100.8737 / D:\MyProjects\Antigravity-mash
+                hello-from-the-gemini-path / 5.1.26100.8737 / D:\MyProjects\remote-harness-mcp
 system_vitals-> cpu_load 13.3, ram_total_mb 15724.1, disk_total_gb 120.0
 ```
 
@@ -384,7 +384,7 @@ system_vitals-> cpu_load 13.3, ram_total_mb 15724.1, disk_total_gb 120.0
 `C:\Windows\System32\drivers\etc\hosts`:
 
 ```text
-<gateway-ip> smart-server.online  # Antigravity Mesh gateway - TEMPORARY: domain is on registry server hold
+<gateway-ip> smart-server.online  # Remote Harness MCP gateway - TEMPORARY: domain is on registry server hold
 ```
 
 Без неё агент не может разрешить имя шлюза и туннель не поднимется. Убрать — удалить эту строку.
@@ -431,7 +431,7 @@ system_vitals-> cpu_load 13.3, ram_total_mb 15724.1, disk_total_gb 120.0
 2. **Выложить исправленные установщики на шлюз.** Отдаваемая копия `/install.ps1` (19108 байт,
    от 5 октября) по-прежнему содержит ошибку разбора, поэтому `irm … | iex` для новых
    пользователей не работает. Нужен деплой `install.ps1`, `install.sh` и `core/*` в
-   `/var/www/antigravity-mesh`.
+   `/var/www/remote-harness-mcp`.
 3. **Заменить сниппет nginx** (`default_type` вместо `add_header Content-Type`) и перезагрузить
    nginx — иначе на `/install.ps1` уходит два заголовка `Content-Type`.
 4. `gateway.py` в репозитории теперь совпадает по исправлению с живым шлюзом; отдельного деплоя

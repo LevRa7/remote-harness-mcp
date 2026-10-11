@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""core/mcp_tools.py - shared Antigravity Mesh tool implementation.
+"""core/mcp_tools.py - shared Remote Harness MCP tool implementation.
 
 This module is the single place that contains tool *logic*.  Both consumers
 (the asyncio tunnel node ``core/agent.py`` and the standalone HTTP server
@@ -47,6 +47,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 #: keeping a fallback chain of its own. Standard library only, so importing it here
 #: costs nothing and cannot fail for a missing third-party package.
 from core import domain
+from core import paths
 from core import updater
 from core import version as version_module
 
@@ -208,7 +209,9 @@ def _shell_argv(command: str) -> List[str]:
 # ---------------------------------------------------------------------------
 
 _DEFAULT_MAX_OUTPUT_CHARS = 50000
-_DEFAULT_JOBS_DIR = os.path.join("~", ".cache", "antigravity-mesh", "jobs")
+#: Resolved through :mod:`core.paths`, so an upgraded node keeps the job history
+#: written under the pre-rename cache directory.
+_DEFAULT_JOBS_DIR = paths.cache_path("jobs")
 
 #: bash_exec never blocks a transport thread for longer than this.
 MAX_TIMEOUT_SEC = 120
@@ -718,9 +721,9 @@ def _load_orchestration_skill() -> str:
     except Exception:
         pass
     return (
-        "# Antigravity Mesh Orchestrator Skill (Standalone)\n"
-        "Mode: Local Standalone Server (antigravity_mesh).\n"
-        "All commands execute directly on this host through the Antigravity Mesh MCP tools.\n"
+        "# Remote Harness MCP Orchestrator Skill (Standalone)\n"
+        "Mode: Local Standalone Server (remote_harness_mcp).\n"
+        "All commands execute directly on this host through the Remote Harness MCP tools.\n"
         "Rules:\n"
         "1. Never ask the user to run commands manually; use bash_exec.\n"
         "2. Verify exit codes and stdout/stderr before continuing.\n"
@@ -1482,7 +1485,7 @@ def _tool_device_control(args: Dict[str, Any]) -> Dict[str, Any]:
         body = _require_arg(args, "text", action)
         if body is None:
             return _missing_arg(action, "text", "the notification body")
-        argv: List[Any] = ["--title", str(args.get("title") or "Antigravity Mesh"),
+        argv: List[Any] = ["--title", str(args.get("title") or "Remote Harness MCP"),
                            "--content", str(body)]
         if args.get("id") is not None:
             argv += ["--id", str(args.get("id"))]
@@ -1568,7 +1571,7 @@ def _tool_device_control(args: Dict[str, Any]) -> Dict[str, Any]:
         # The dialog blocks until the user answers on the phone, so it carries its
         # own timeout and the result says when nothing came back in time.
         seconds = _clamp_int(args.get("timeout_sec"), 5, 120, 30)
-        argv = ["text", "-t", str(args.get("title") or "Antigravity Mesh"),
+        argv = ["text", "-t", str(args.get("title") or "Remote Harness MCP"),
                 "-i", str(args.get("text") or "")]
         result = _termux_action(action, "termux-dialog", argv, timeout=float(seconds) + 5.0)
         result["note"] = ("a dialog waits for the person holding the phone; nothing is "
@@ -3058,7 +3061,7 @@ TOOLS: List[Dict[str, Any]] = [
     {
         "name": "get_orchestration_skill",
         "title": "Get Orchestration Skill",
-        "description": "Load the current Antigravity orchestration skill and rules.",
+        "description": "Load the current Remote Harness orchestration skill and rules.",
         "inputSchema": _schema({}),
     },
     {

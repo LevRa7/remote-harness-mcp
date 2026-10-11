@@ -4,7 +4,7 @@ Two files, and neither holds a domain literal:
 
 | File | Role |
 | :--- | :--- |
-| `antigravity-mesh-mcp.conf` | the snippet included from the gateway server block: installers, node bootstrap payload, public file shares, MCP endpoints |
+| `remote-harness-mcp.conf` | the snippet included from the gateway server block: installers, node bootstrap payload, public file shares, MCP endpoints |
 | `mesh-domain.vhost.template` | the HTTPS vhost for the gateway, with `__MESH_DOMAIN__` and `__MESH_CERT_NAME__` placeholders |
 | `render-domain.sh` | renders the template from the one place the domain is declared |
 
@@ -15,7 +15,7 @@ as `core/domain.py` does at runtime:
 
 1. `MESH_PUBLIC_URL` in the environment;
 2. `MESH_PUBLIC_URL` (or the `AGY_PUBLIC_BASE_URL` alias) in the domain file —
-   `/etc/antigravity-mesh/domain.env` by default, `MESH_DOMAIN_FILE` overrides it;
+   `/etc/remote-harness-mcp/domain.env` by default, `MESH_DOMAIN_FILE` overrides it;
 3. `core/domain.py`'s `DEFAULT_PUBLIC_BASE_URL`, the single declaration of the
    project default.
 
@@ -32,7 +32,7 @@ ops/nginx/render-domain.sh --apply         # install into /etc/nginx
 ```
 
 `--apply` backs up the current vhost and snippet into
-`/root/backups/antigravity-mesh/nginx-<timestamp>/`, runs `nginx -t`, and only then
+`/root/backups/remote-harness-mcp/nginx-<timestamp>/`, runs `nginx -t`, and only then
 reloads; on a failed test nothing is reloaded and the rollback command is printed.
 
 `--check` is the way to prove the live host still matches the repository: with the
@@ -42,8 +42,8 @@ domain configured correctly it renders byte-identically to
 ## Switching the domain
 
 1. Put the new value in the one place — `MESH_PUBLIC_URL` in
-   `/etc/antigravity-mesh/domain.env` (node hosts:
-   `%USERPROFILE%\.config\antigravity-mesh\domain.env`).
+   `/etc/remote-harness-mcp/domain.env` (node hosts:
+   `%USERPROFILE%\.config\remote-harness-mcp\domain.env`).
 2. Issue the certificate for the new name (certbot, or `tailscale cert` when the
    name is a Tailscale node name).
 3. `ops/nginx/render-domain.sh --apply`.

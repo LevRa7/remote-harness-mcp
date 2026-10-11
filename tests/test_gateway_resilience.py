@@ -238,7 +238,7 @@ def test_health_reports_last_tunnel_seen_and_tunnel_events(monkeypatch):
     data = json.loads(response.body)
 
     assert response.status_code == 200
-    assert data["service"] == "antigravity_mesh_gateway"
+    assert data["service"] == "remote_harness_mcp_gateway"
     assert "last_tunnel_seen" in data
     assert "tunnel_events" in data
     assert isinstance(data["tunnel_events"], list)

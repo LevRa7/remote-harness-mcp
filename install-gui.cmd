@@ -1,6 +1,6 @@
 @echo off
 rem ============================================================================
-rem  Antigravity Mesh - launcher for the visual installer (install-gui.ps1)
+rem  Remote Harness MCP - launcher for the visual installer (install-gui.ps1)
 rem
 rem  Double-click this file, or run it from a terminal. It only picks the
 rem  interpreter and keeps the window open when something goes wrong; all the

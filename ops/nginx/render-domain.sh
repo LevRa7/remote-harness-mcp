@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-#  Antigravity Mesh - render the nginx configuration for the public domain.
+#  Remote Harness MCP - render the nginx configuration for the public domain.
 #
 #  The domain comes from the one place ops/mesh-domain.sh resolves it from:
 #  MESH_PUBLIC_URL, then the domain file, then core/domain.py's single default.
@@ -23,7 +23,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 TEMPLATE="$SCRIPT_DIR/mesh-domain.vhost.template"
-SNIPPET="$SCRIPT_DIR/antigravity-mesh-mcp.conf"
+SNIPPET="$SCRIPT_DIR/remote-harness-mcp.conf"
 
 # shellcheck source=../mesh-domain.sh
 . "$REPO_DIR/ops/mesh-domain.sh"
@@ -50,7 +50,7 @@ while [ $# -gt 0 ]; do
 done
 
 mesh_resolve_domain "$REPO_DIR" \
-    || die "Cannot determine the public domain: export MESH_PUBLIC_URL, write MESH_PUBLIC_URL into ${MESH_DOMAIN_FILE:-/etc/antigravity-mesh/domain.env}, or run from a checkout that has core/domain.py"
+    || die "Cannot determine the public domain: export MESH_PUBLIC_URL, write MESH_PUBLIC_URL into ${MESH_DOMAIN_FILE:-/etc/remote-harness-mcp/domain.env}, or run from a checkout that has core/domain.py"
 
 CERT_NAME="${MESH_CERT_NAME:-$MESH_DOMAIN_HOST}"
 NGINX_DIR="${MESH_NGINX_DIR:-/etc/nginx}"
@@ -88,10 +88,10 @@ fi
 if [ "$APPLY" = true ]; then
     command -v nginx >/dev/null 2>&1 || die "nginx is not installed here; use --out to render elsewhere"
     TS="$(date +%Y%m%d-%H%M%S)"
-    backup_dir="/root/backups/antigravity-mesh/nginx-$TS"
+    backup_dir="/root/backups/remote-harness-mcp/nginx-$TS"
     mkdir -p "$backup_dir"
     vhost_target="$NGINX_DIR/sites-available/$MESH_DOMAIN_HOST"
-    snippet_target="$NGINX_DIR/snippets/antigravity-mesh-mcp.conf"
+    snippet_target="$NGINX_DIR/snippets/remote-harness-mcp.conf"
 
     [ -f "$vhost_target" ] && cp -a "$vhost_target" "$backup_dir/" || true
     [ -f "$snippet_target" ] && cp -a "$snippet_target" "$backup_dir/" || true
@@ -116,8 +116,8 @@ fi
 # Default: render next to the caller, so nothing on the host changes.
 OUT_DIR="${OUT_DIR:-$PWD/rendered}"
 render "$OUT_DIR/$MESH_DOMAIN_HOST"
-install -m 644 "$SNIPPET" "$OUT_DIR/antigravity-mesh-mcp.conf"
+install -m 644 "$SNIPPET" "$OUT_DIR/remote-harness-mcp.conf"
 ok "rendered into $OUT_DIR"
 echo "  vhost   : $OUT_DIR/$MESH_DOMAIN_HOST"
-echo "  snippet : $OUT_DIR/antigravity-mesh-mcp.conf"
+echo "  snippet : $OUT_DIR/remote-harness-mcp.conf"
 echo "  apply   : $0 --apply"

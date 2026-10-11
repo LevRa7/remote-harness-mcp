@@ -9,7 +9,7 @@ from core.hooks import mesh_pre_tool_call, mesh_on_tool_error
 from core.policies import evaluate_policies
 
 @pytest.mark.asyncio
-async def test_end_to_end_antigravity_mesh_pipeline():
+async def test_end_to_end_remote_harness_mcp_pipeline():
     # 1. Harness configuration
     conv_id = str(uuid.uuid4())
     config = create_agent_config(conversation_id=conv_id)
@@ -31,7 +31,7 @@ async def test_end_to_end_antigravity_mesh_pipeline():
     # 4. Lifecycle hook: Zero Drive Queue enforcement
     queue_call = types.ToolCall(
         name="write_file",
-        args={"path": "antigravity_tasks.json", "content": "{}"}
+        args={"path": "rhm_tasks.json", "content": "{}"}
     )
     hook_res = await mesh_pre_tool_call(queue_call)
     assert hook_res.allow is False

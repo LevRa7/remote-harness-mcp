@@ -1,4 +1,4 @@
-"""Tests for the shared Antigravity Mesh tool implementation (core/mcp_tools.py).
+"""Tests for the shared Remote Harness MCP tool implementation (core/mcp_tools.py).
 
 The tests configure the module against a temporary workspace/jobs directory so
 nothing leaks into the real ``~/.cache`` or the repository.
@@ -50,7 +50,7 @@ def isolated_tools(tmp_path):
     yield
     mcp_tools.configure(
         workspace=os.getcwd(),
-        jobs_dir=os.path.expanduser("~/.cache/antigravity-mesh/jobs"),
+        jobs_dir=os.path.expanduser("~/.cache/remote-harness-mcp/jobs"),
         read_only=False,
         write_roots=None,
         max_output_chars=12000,
@@ -147,7 +147,7 @@ def test_legacy_tools_still_work():
     vitals = mcp_tools.call_tool("system_vitals", {})
     assert "hostname" in vitals and "ram" in vitals and "disk" in vitals
     skill = mcp_tools.call_tool("get_orchestration_skill", {})
-    assert isinstance(skill, str) and "Antigravity" in skill
+    assert isinstance(skill, str) and "Remote Harness" in skill
     listing = mcp_tools.call_tool("list_dir", {})
     assert listing["exit_code"] == 0
     assert "Directory:" in listing["stdout"]
@@ -632,7 +632,7 @@ def test_server_exposes_all_tools_and_jsonrpc_list():
     from core.server import create_mcp_server
 
     server = create_mcp_server()
-    assert server.name == "antigravity_mesh"
+    assert server.name == "remote_harness_mcp"
     for name in ("bash_exec", "system_vitals", "get_orchestration_skill", "write_file", "job_list"):
         assert name in server.tools
 

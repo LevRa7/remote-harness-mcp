@@ -21,7 +21,7 @@ async def mesh_pre_tool_call(data: types.ToolCall) -> types.HookResult:
     args_str = json.dumps(args)
 
     # 1. Block Google Drive Task Queues
-    if "antigravity_tasks.json" in args_str or "antigravity_queue" in args_str:
+    if "rhm_tasks.json" in args_str or "rhm_queue" in args_str:
         return types.HookResult(
             allow=False,
             message="Zero Drive Queue Policy Violation: Task queues on Google Drive are permanently disabled."

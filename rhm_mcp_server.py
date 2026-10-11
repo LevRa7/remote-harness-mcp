@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-agy_mcp_server.py - Universal Model Context Protocol (MCP) Server for Antigravity & Gemini Web Spark.
+rhm_mcp_server.py - Universal Model Context Protocol (MCP) Server for Remote Harness & Gemini Web Spark.
 Supports:
   1. Standard SSE transport (GET /sse -> event-stream, POST /messages -> session messages)
   2. Streamable HTTP / Direct JSON-RPC (POST /sse, POST /mcp, POST /)
@@ -51,7 +51,7 @@ DEBIAN_PASS = os.environ.get("DEBIAN_PASS", "")
 RACKNERD2_PASS = os.environ.get("RACKNERD2_PASS", "")
 
 logging.basicConfig(level=logging.INFO, format="[%(asctime)s] [%(levelname)s] %(message)s")
-logger = logging.getLogger("agy_mcp")
+logger = logging.getLogger("rhm_mcp")
 
 # Tool functions
 def racknerd2_exec(command: str) -> str:
@@ -340,7 +340,7 @@ def gdrive_copy(file_name_or_id: str, dest_path: str, target_node: str = "vps") 
 
 def get_orchestration_skill() -> str:
     """Returns the complete up-to-date orchestration SKILL.md and rules for managing nodes via MCP."""
-    skill_path = Path(__file__).resolve().parent / ".agents" / "skills" / "agy-task-dispatcher" / "SKILL.md"
+    skill_path = Path(__file__).resolve().parent / ".agents" / "skills" / "rhm-task-dispatcher" / "SKILL.md"
     if not skill_path.exists():
         skill_path = Path(__file__).resolve().parent / "WEB_GEMINI_SKILL_INSTRUCTIONS.md"
     if skill_path.exists():
@@ -478,8 +478,8 @@ TOOLS_DEFINITIONS = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "file_name_or_id": {"type": "string", "description": "The file name on Google Drive (e.g. 'antigravity_mesh_spec.md') or Google Drive file ID."},
-                "dest_path": {"type": "string", "description": "Destination file path on the target host (e.g. '~/MyProjects/antigravity-mesh/antigravity_mesh_spec.md')."},
+                "file_name_or_id": {"type": "string", "description": "The file name on Google Drive (e.g. 'remote_harness_mcp_spec.md') or Google Drive file ID."},
+                "dest_path": {"type": "string", "description": "Destination file path on the target host (e.g. '~/MyProjects/remote-harness-mcp/remote_harness_mcp_spec.md')."},
                 "target_node": {"type": "string", "description": "Target destination host: 'vps' (default), 'matebook', or 'debian'.", "default": "vps"}
             },
             "required": ["file_name_or_id", "dest_path"]
@@ -510,7 +510,7 @@ TOOLS_DEFINITIONS = [
 
 # Set up standard MCPServer instance for SSE
 mcp_sdk = MCPServer(
-    name="antigravity_mesh",
+    name="remote_harness_mcp",
     instructions=get_orchestration_skill()
 )
 
@@ -551,14 +551,14 @@ def process_jsonrpc(data: dict) -> tuple[int, dict]:
                     "prompts": {"listChanged": True}
                 },
                 "serverInfo": {
-                    "name": "antigravity_mesh",
+                    "name": "remote_harness_mcp",
                     "version": "1.0.0",
                     "capabilities": {
                         "tools": {"listChanged": True},
                         "prompts": {"listChanged": True}
                     }
                 },
-                "instructions": "Antigravity Mesh Orchestrator. All execution commands must go directly through native MCP tools (bash_exec, debian_exec, matebook_exec, racknerd2_exec). Google Drive queue is disabled. Dynamic topology via server_facts.json."
+                "instructions": "Remote Harness MCP Orchestrator. All execution commands must go directly through native MCP tools (bash_exec, debian_exec, matebook_exec, racknerd2_exec). Google Drive queue is disabled. Dynamic topology via server_facts.json."
             }
         }
     elif method == "notifications/initialized":
@@ -645,13 +645,13 @@ def process_jsonrpc(data: dict) -> tuple[int, dict]:
                 "resources": [
                     {
                         "uri": "resource://skills/core.md",
-                        "name": "Antigravity Mesh Core Rules",
+                        "name": "Remote Harness MCP Core Rules",
                         "description": "Essential execution policy and core rules (CORE.md)",
                         "mimeType": "text/markdown"
                     },
                     {
                         "uri": "resource://skills/dispatcher.md",
-                        "name": "Antigravity Mesh Dispatcher Skill",
+                        "name": "Remote Harness MCP Dispatcher Skill",
                         "description": "Complete orchestration skill instructions for all nodes (SKILL.md)",
                         "mimeType": "text/markdown"
                     },
@@ -674,7 +674,7 @@ def process_jsonrpc(data: dict) -> tuple[int, dict]:
             content = p.read_text(encoding="utf-8") if p.exists() else ""
             mime = "text/markdown"
         elif uri == "resource://skills/dispatcher.md":
-            p = base_dir / ".agents" / "skills" / "agy-task-dispatcher" / "SKILL.md"
+            p = base_dir / ".agents" / "skills" / "rhm-task-dispatcher" / "SKILL.md"
             if not p.exists():
                 p = base_dir / "WEB_GEMINI_SKILL_INSTRUCTIONS.md"
             content = p.read_text(encoding="utf-8") if p.exists() else ""
@@ -710,7 +710,7 @@ def process_jsonrpc(data: dict) -> tuple[int, dict]:
                 "prompts": [
                     {
                         "name": "orchestrator",
-                        "description": "System instructions and rules for the Antigravity Mesh Orchestrator (SKILL.md)",
+                        "description": "System instructions and rules for the Remote Harness MCP Orchestrator (SKILL.md)",
                         "arguments": []
                     }
                 ]
@@ -723,7 +723,7 @@ def process_jsonrpc(data: dict) -> tuple[int, dict]:
                 "jsonrpc": "2.0",
                 "id": req_id,
                 "result": {
-                    "description": "Antigravity Mesh Orchestrator Skill",
+                    "description": "Remote Harness MCP Orchestrator Skill",
                     "messages": [
                         {
                             "role": "user",
@@ -797,7 +797,7 @@ async def unified_mcp_handler(request: Request):
             "result": {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {"tools": {"listChanged": True}},
-                "serverInfo": {"name": "antigravity_mesh", "version": "1.0.0"}
+                "serverInfo": {"name": "remote_harness_mcp", "version": "1.0.0"}
             }
         }, headers={**MCP_CORS_HEADERS, "Content-Type": "application/json"})
 
@@ -809,7 +809,7 @@ async def unified_mcp_handler(request: Request):
     # Standard browser / GET probe
     return JSONResponse({
         "status": "ok",
-        "service": "antigravity_mesh",
+        "service": "remote_harness_mcp",
         "protocolVersion": "2024-11-05",
         "endpoints": {
             "sse": "/sse",
@@ -829,7 +829,7 @@ async def oauth_metadata_handler(request: Request):
     )
 
 routes = [
-    Route("/health", lambda r: JSONResponse({"status": "ok", "service": "antigravity-mcp-server"})),
+    Route("/health", lambda r: JSONResponse({"status": "ok", "service": "rhm-mcp-server"})),
     Route("/.well-known/oauth-protected-resource", oauth_metadata_handler, methods=["GET", "HEAD", "OPTIONS"]),
     Route("/.well-known/oauth-protected-resource/{rest:path}", oauth_metadata_handler, methods=["GET", "HEAD", "OPTIONS"]),
     Route("/sse", unified_mcp_handler, methods=["GET", "POST", "HEAD", "OPTIONS"]),
@@ -853,5 +853,5 @@ app = Starlette(routes=routes, middleware=middleware)
 
 if __name__ == "__main__":
     port = int(os.environ.get("MCP_PORT", 8096))
-    logger.info(f"Starting Universal Antigravity MCP Server on port {port}...")
+    logger.info(f"Starting Universal Remote Harness MCP Server on port {port}...")
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")

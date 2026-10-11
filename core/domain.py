@@ -9,7 +9,7 @@ building its own chain of fallbacks:
 * :mod:`core.agent` (the host a node dials for its tunnel),
 * :mod:`core.web_share` (links published for shared files),
 * :mod:`core.mcp_tools` (the ``public_url`` it passes on),
-* :mod:`agy_sync`, :mod:`agy_watcher` (links printed into generated facts/logs).
+* :mod:`rhm_sync`, :mod:`rhm_watcher` (links printed into generated facts/logs).
 
 Resolution order, highest priority first:
 
@@ -20,9 +20,9 @@ Resolution order, highest priority first:
    host-level place to configure this:
 
    ==========  ==========================================================
-   Linux       ``/etc/antigravity-mesh/domain.env``
-   Windows     ``%USERPROFILE%\\.config\\antigravity-mesh\\domain.env``
-   Termux      ``~/.config/antigravity-mesh/domain.env``
+   Linux       ``/etc/remote-harness-mcp/domain.env``
+   Windows     ``%USERPROFILE%\\.config\\remote-harness-mcp\\domain.env``
+   Termux      ``~/.config/remote-harness-mcp/domain.env``
    ==========  ==========================================================
 
    ``domain.env`` is plain ``KEY=VALUE`` and may carry a UTF-8 BOM, because
@@ -33,15 +33,17 @@ Resolution order, highest priority first:
    existed keeps working until its operator moves the value into the domain file;
 6. :data:`DEFAULT_PUBLIC_BASE_URL` - the single default, declared once, here.
 
-Nothing in this module imports another project module, and only the standard
-library is used, so any component may import it - including ``gateway.py`` when it
-is deployed on its own.
+The only project module imported here is :mod:`core.paths` (itself standard
+library only), so any component may import this module - including
+``gateway.py`` when it is deployed on its own.
 """
 
 import os
 import threading
 from typing import Any, Dict, Optional
 from urllib.parse import urlparse
+
+from core import paths
 
 #: The project default. Declared exactly once; every other module asks for it.
 DEFAULT_PUBLIC_BASE_URL = "https://smart-server.online"
@@ -59,7 +61,9 @@ _ENV_KEYS = ("MESH_PUBLIC_URL", "AGY_PUBLIC_BASE_URL")
 _DOMAIN_FILE_ENV = "MESH_DOMAIN_FILE"
 _LEGACY_HOST_ENV = "MESH_GATEWAY"
 
-_CONFIG_DIR_NAME = "antigravity-mesh"
+#: Directory names live in :mod:`core.paths`, which also keeps the pre-rename
+#: directory readable so an upgraded node keeps its ``domain.env``.
+_CONFIG_DIR_NAME = paths.APP_NAME
 
 _LOCK = threading.RLock()
 _INJECTED: Optional[str] = None
@@ -129,8 +133,8 @@ def default_domain_file() -> str:
     lives.
     """
     if os.name == "nt" or is_termux():
-        return os.path.join(os.path.expanduser("~"), ".config", _CONFIG_DIR_NAME, "domain.env")
-    return "/etc/%s/domain.env" % _CONFIG_DIR_NAME
+        return os.path.join(paths.config_dir(), "domain.env")
+    return os.path.join(paths.etc_dir(), "domain.env")
 
 
 def domain_file() -> str:

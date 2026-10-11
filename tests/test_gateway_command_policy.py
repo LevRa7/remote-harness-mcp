@@ -193,7 +193,7 @@ def test_ordinary_commands_are_not_gated(command):
     ("/etc/nginx/nginx.conf", True),
     ("/usr/local/bin/tool", True),
     ("/boot/grub/grub.cfg", True),
-    ("/opt/antigravity-mesh/gateway.py", True),
+    ("/opt/remote-harness-mcp/gateway.py", True),
     (r"D:\MyProjects\app\main.py", False),
     ("/home/user/app/main.py", False),
     ("src/main.py", False),

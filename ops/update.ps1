@@ -1,8 +1,8 @@
 # ==============================================================================
-#  Antigravity Mesh - Windows node updater (single shot)
+#  Remote Harness MCP - Windows node updater (single shot)
 #
-#  Meant to be run by the Scheduled Task "AntigravityMeshUpdater" once a day, and
-#  by hand through "gemini-computer-use update". It answers one question: is a
+#  Meant to be run by the Scheduled Task "RemoteHarnessMCPUpdater" once a day, and
+#  by hand through "remote-harness-mcp update". It answers one question: is a
 #  newer release published, and - unless -Check was given - install it.
 #
 #  WHY A POWERSHELL WRAPPER
@@ -43,7 +43,7 @@
 #    -InstallDir   payload directory override
 #    -Python       interpreter override
 #    -ConfigDir    where agent.env / agent.heartbeat live.
-#                  Default: %USERPROFILE%\.config\antigravity-mesh
+#                  Default: %USERPROFILE%\.config\remote-harness-mcp
 #    -LogFile      this script's journal. Default: <ConfigDir>\update-task.log
 #    -Quiet        write to -LogFile only, print nothing to the console
 #
@@ -143,7 +143,13 @@ if ([string]::IsNullOrWhiteSpace($ConfigDir)) {
     if ([string]::IsNullOrWhiteSpace($profileDir)) {
         Stop-WithConfigError 'cannot resolve the user profile directory; pass -ConfigDir explicitly'
     }
-    $ConfigDir = Join-Path $profileDir '.config\antigravity-mesh'
+    $ConfigDir = Join-Path $profileDir '.config\remote-harness-mcp'
+    # An upgraded node keeps the configuration directory its token already lives
+    # in (the project shipped as "Antigravity Mesh").
+    $legacyConfigDir = Join-Path $profileDir '.config\antigravity-mesh'
+    if (-not (Test-Path -LiteralPath $ConfigDir) -and (Test-Path -LiteralPath $legacyConfigDir)) {
+        $ConfigDir = $legacyConfigDir
+    }
 }
 $ConfigDir = Resolve-FullPath $ConfigDir
 if ([string]::IsNullOrWhiteSpace($LogFile)) { $LogFile = Join-Path $ConfigDir 'update-task.log' }
@@ -165,7 +171,7 @@ $startupDir = [Environment]::GetFolderPath('Startup')
 $vbsPath = ''
 $launcherText = ''
 if (-not [string]::IsNullOrWhiteSpace($startupDir)) {
-    $vbsPath = Join-Path $startupDir 'antigravity-agent.vbs'
+    $vbsPath = Join-Path $startupDir 'rhm-agent.vbs'
     if (Test-Path -LiteralPath $vbsPath -PathType Leaf) {
         try { $launcherText = Read-TextFile $vbsPath } catch { $launcherText = '' }
     }

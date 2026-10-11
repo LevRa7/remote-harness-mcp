@@ -1,11 +1,33 @@
 # Отчёт о проделанной работе, архитектурном аудите и оставшихся задачах
 
 **Дата:** 2026-10-06  
-**Проект:** Computer-use-for-Gemini-App-Web (Antigravity Mesh)
+**Проект:** remote-harness-mcp (Remote Harness MCP)
 
 ---
 
 ## 1. Что было изменено и закоммичено / подготовлено
+
+### 0. Переименование проекта: `Antigravity Mesh` → `Remote Harness MCP`
+- **GitHub:** репозиторий `LevRa7/Computer-use-for-Gemini-App-Web` переименован в `LevRa7/remote-harness-mcp`
+  (старый URL продолжает работать через редирект GitHub), обновлено описание; `core/version.py` (`REPO_SLUG`)
+  и `package.json` (`repository`/`bugs`/`homepage`) указывают на новое имя.
+- **Файлы:** `agy_mcp_server.py`, `agy_sync.py`, `agy_watcher.py`, `agy_webhook_server.py`, `agy_dispatch.py`
+  → `rhm_*.py`; `templates/agy.service.j2` → `rhm.service.j2`; `antigravity_mesh_plan.md` / `_spec.md`
+  → `remote_harness_mcp_*.md`; `ops/nginx/antigravity-mesh-mcp.conf` → `ops/nginx/remote-harness-mcp.conf`;
+  скиллы `.agents/skills/agy-*` → `rhm-*`; e2e-тест переименован вместе с проектом.
+- **Метаданные:** npm-пакет `gemini-computer-use` → `remote-harness-mcp` (команда `gemini-computer-use`
+  оставлена алиасом), установщик `RemoteHarnessMCP-Setup-<version>.exe`, задачи Windows
+  `RemoteHarnessMCPWatchdog` / `RemoteHarnessMCPUpdater`, systemd/launchd `rhm-agent`,
+  `com.remoteharness.mcp.agent`.
+- **Обратная совместимость:** новый `core/paths.py` выбирает новые каталоги (`~/.config/remote-harness-mcp`,
+  `/etc/remote-harness-mcp`, `~/.cache/remote-harness-mcp`), но продолжает использовать старые, если они —
+  единственные на хосте (токен, `agent.env`, `domain.env`, история джобов и журнал обновлений не теряются);
+  `install.sh` / `install.ps1` снимают старые юниты и задачи, апдейтер принимает старое имя setup-ассета и
+  перезапускает legacy-юнит, `gateway.py` читает старый `registry.json`, legacy-вебхук по-прежнему обслуживает
+  `/api/agy` и `X-Agy-Token`, Apps Script читает `AGY_ENDPOINT_BASE` / `AGY_SECRET_TOKEN`, а
+  `AGY_PUBLIC_BASE_URL` остаётся документированным алиасом.
+- **Слово «mesh»** сохранено как технический термин (топология, `mesh_status`, `MESH_*`) — сменилось только имя проекта.
+- Полная таблица «до/после» — в `docs/UPDATES.md`, раздел 0; регрессионные тесты — `tests/test_rename_compat.py`.
 
 ### А. Репозиторий и документация: `README.md` (Закоммичено и запушено в `origin/main` — commit `ea9c2e2`)
 - **Что сделано:** Полностью переписаны русская и английская версии README.
@@ -44,7 +66,7 @@
      - На шлюзе действует правило: новое подключение с тем же именем узла вытесняет предыдущее. Если пользователь случайно запускал два агента одновременно (или служба перезапускалась при висящем процессе), они входили в бесконечный шквал взаимных переподключений («флаппинг»), ломая все текущие запросы.
      - Добавлена кроссплатформенная файловая блокировка процесса (`fcntl` на Linux/macOS, `msvcrt` на Windows). Второй агент терпеливо ждёт освобождения блокировки.
   3. **Бесшовное чтение переменных окружения из конфига:**
-     - Агент теперь умеет читать параметры из `~/.config/antigravity-mesh/agent.env`, даже если они не проброшены в глобальный `os.environ` (актуально для автозапуска Windows через VBS/реестр). Учтена поддержка BOM UTF-8 (PowerShell 5).
+     - Агент теперь умеет читать параметры из `~/.config/remote-harness-mcp/agent.env`, даже если они не проброшены в глобальный `os.environ` (актуально для автозапуска Windows через VBS/реестр). Учтена поддержка BOM UTF-8 (PowerShell 5).
   4. **Интеллектуальная обработка разрывов и 401/403 Unauthorized:**
      - Различает временные разрывы сети (быстрый exponential backoff с джиттером от 1 до 15 сек) и ошибки авторизации `4001 Unauthorized` / `HTTP 403` (таймаут 60 сек, чтобы не перегружать шлюз запросами при неверном токене).
      - Обрабатывает как чистые разрывы, так и тихие зависания сокета (`open_timeout=15`, `ping_interval=10`, `ping_timeout=10`).
@@ -108,7 +130,7 @@
 | Компонент / Платформа | Linux | macOS | Windows | Статус надежности |
 | :--- | :---: | :---: | :---: | :--- |
 | **Установка в 1 строку** | `install.sh` | `install.sh` | `install.ps1` | **Отлично**. Автоопределение типа устройства, Python, venv, генерация токенов. |
-| **Фоновая служба** | `systemd --user` + linger | `launchd` (LaunchAgents plist) | `Startup\antigravity-agent.vbs` | **Отлично**. Переживает перезагрузки системы. |
+| **Фоновая служба** | `systemd --user` + linger | `launchd` (LaunchAgents plist) | `Startup\rhm-agent.vbs` | **Отлично**. Переживает перезагрузки системы. |
 | **Реконнект при обрыве сети** | Авто (1–15 с) | Авто (1–15 с) | Авто (1–15 с) | **Проверено**. Пинги каждые 10 с, автоматический реконнект с экспоненциальным backoff. |
 | **Защита от гонки процессов** | `fcntl.flock` | `fcntl.flock` | `msvcrt.locking` | **Проверено**. Не дает двум процессам бесконечно выбивать друг друга со шлюза. |
 | **Обработка команд** | Bash | Bash / zsh | Git Bash / PowerShell | **Исправлено**. Устранены Windows-падения `signal` и вызовы `os.kill(0)`. |
@@ -135,7 +157,7 @@
 
 | Особенность Android/Termux | Что ломалось | Как исправлено |
 | :--- | :--- | :--- |
-| Нет `/etc`, `/bin`, `/usr` (не FHS), нет root | Подсказка `sudo tee /etc/antigravity-mesh/domain.env` невыполнима; узел искал домен не там | Termux определяется отдельно; файл домена — `~/.config/antigravity-mesh/domain.env` и в установщике, и в `core/domain.py` |
+| Нет `/etc`, `/bin`, `/usr` (не FHS), нет root | Подсказка `sudo tee /etc/remote-harness-mcp/domain.env` невыполнима; узел искал домен не там | Termux определяется отдельно; файл домена — `~/.config/remote-harness-mcp/domain.env` и в установщике, и в `core/domain.py` |
 | Нет `sudo`, пакеты называются иначе (`python`, `python-pip`, `python3` — виртуальное имя) | Ветка `apt-get install python3-pip python3-venv` падала, `run_privileged` не срабатывал | Ветка `pkg install -y python python-pip python-ensurepip-wheels curl ca-certificates`, установщик `pkg` идёт напрямую, без `sudo` |
 | `uv` публикует сборки под glibc | Скачивание `aarch64-unknown-linux-gnu` на bionic → «Exec format error» | На Termux `UV_TARGET` пуст, uv не используется; при неудаче установщик падает закрыто с подсказкой `pkg` |
 | Нет systemd и launchd | Юнит/plist не создавались, автозапуска не было | Служба **runit** (`termux-services`) + скрипт **Termux:Boot**; без `termux-services` — запуск через `nohup` с честным предупреждением |
@@ -172,8 +194,8 @@
    не с шлюза (он не отдаёт статику), а из репозитория, и указать шлюз явно:
    ```bash
    pkg install -y git
-   git clone https://github.com/LevRa7/Computer-use-for-Gemini-App-Web.git
-   cd Computer-use-for-Gemini-App-Web
+   git clone https://github.com/LevRa7/remote-harness-mcp.git
+   cd remote-harness-mcp
    ./install.sh --quick --domain=racknerd-5a24bf9.merino-carob.ts.net
    ```
    Ветку Termux для этого нужно закоммитить и запушить: на `main` сейчас старые
@@ -182,7 +204,7 @@
 ### Файлы
 
 - `install.sh` — определение `IS_TERMUX`, ветка `pkg`, `detect_device()`/`detect_arch()` для Android, `configure_termux_node()`, подсказки `print_termux_hints()`, `require_gateway_dns()` (резолв шлюза).
-- `core/domain.py` — `is_termux()`; `default_domain_file()` → `~/.config/antigravity-mesh/domain.env` на телефоне.
+- `core/domain.py` — `is_termux()`; `default_domain_file()` → `~/.config/remote-harness-mcp/domain.env` на телефоне.
 - `core/agent.py` — `android_device_name()`; `default_node_name()` не берёт `localhost` на Termux.
 - `docs/TERMUX.md` — полная инструкция (установка, Termux:Boot, батарея, логи, удаление, раздел «Приватный шлюз»), EN + RU.
 - `README.md` — раздел «Android (Termux)» в обеих языковых версиях + предупреждение о резолве имени шлюза.
@@ -232,7 +254,7 @@
 | :--- | :--- | :--- |
 | `MESH_DEVICE` | `auto` | `auto` — ветка отвечает на всех платформах (меняется только ответ), `0` — выключает ветку, `1` — включает принудительно. |
 | `MESH_DEVICE_ACTIONS` | пусто | Allowlist имён действий через запятую для трёх action-инструментов; пусто — все действия сборки. |
-| `MESH_DEVICE_CAPTURE_DIR` | общее хранилище телефона после `termux-setup-storage`, иначе `~/.cache/antigravity-mesh/captures` | Куда пишутся фото и записи. |
+| `MESH_DEVICE_CAPTURE_DIR` | общее хранилище телефона после `termux-setup-storage`, иначе `~/.cache/remote-harness-mcp/captures` | Куда пишутся фото и записи. |
 | `MESH_DEVICE_PIM` | `0` | `1` включает SMS, журнал вызовов, контакты и звонок. |
 | `MESH_DEVICE_QUICK` | `0` | `1` оставляет `system_info` мгновенным, пропуская сеть, камеры, микрофоны и датчики. |
 | `MESH_READ_ONLY` | `0` (существующий флаг) | Теперь дополнительно отказывает в каждом действии `device_control`/`device_capture` и блокирует `sms_send` и `call`. |
@@ -276,7 +298,7 @@
 1. **Выдать Termux:API разрешения тапом на телефоне** (`Настройки → Приложения → Termux:API → Разрешения`): местоположение, телефон, камера, микрофон, уведомления, SMS, журнал вызовов, контакты, файлы/фото. — **сделано**: все нужные разрешения выданы (`ACCESS_FINE_LOCATION`, `READ_PHONE_STATE`, `CAMERA`, `RECORD_AUDIO`, `READ_SMS`, `READ_CONTACTS`, `POST_NOTIFICATIONS` — `granted=true`), после чего пересняты **настоящие** ответы: Wi-Fi с реальным SSID и RSSI −65 dBm, соты (зарегистрированная ячейка `dbm −102, level 2, type lte`, оператор `Cellfie`), 4 камеры, 46 датчиков, громкость, TTS, USB, ИК. Через `adb` разрешения выдать не удалось: ColorOS запрещает `pm grant`/`appops set` из shell.
    - Форма отказа сохранена отдельной фикстурой `tests/fixtures/termux/permission-denied.json` (это настоящий ответ телефона до выдачи разрешения): без неё регрессия «отказ = пустой ответ» вернулась бы незаметно, потому что `telephony-cellinfo.json` теперь содержит реальные соты.
 2. Убедиться, что `device_info(section="all")` на телефоне заполняет все блоки, а не отвечает `available: false` (для этого ветку нужно сначала выкатить на телефон: узел `localhost-602` пока работает на релизной сборке).
-3. **Найдена дыра в живучести телефона:** Android выгрузил приложение Termux целиком (в `ps -A` не осталось ни одного процесса), и узел не поднялся сам — ни службы runit, ни `~/.termux/boot`, ни лаунчера в `~/.config/antigravity-mesh/` на этом телефоне нет (пакет `termux-services` не установлен, Termux:Boot не настроен). Узел вернулся только после того, как Termux открыли заново (login-shell поднимает супервизор), а затем апдейтер применил обновление и перезапустил агента. Строка об этом добавлена в `docs/TERMUX.md` (обе половины); на таком телефоне стоит выполнить `pkg install termux-services` и настроить Termux:Boot.
+3. **Найдена дыра в живучести телефона:** Android выгрузил приложение Termux целиком (в `ps -A` не осталось ни одного процесса), и узел не поднялся сам — ни службы runit, ни `~/.termux/boot`, ни лаунчера в `~/.config/remote-harness-mcp/` на этом телефоне нет (пакет `termux-services` не установлен, Termux:Boot не настроен). Узел вернулся только после того, как Termux открыли заново (login-shell поднимает супервизор), а затем апдейтер применил обновление и перезапустил агента. Строка об этом добавлена в `docs/TERMUX.md` (обе половины); на таком телефоне стоит выполнить `pkg install termux-services` и настроить Termux:Boot.
 3. После выката — повторный деплой **развёрнутого** шлюза (`deploy_gateway.sh`): в исходниках `gateway.py` четыре инструмента и их аннотации уже есть, но клиенты Gemini Spark увидят их только после того, как обновится работающий шлюз (та же оговорка, что и в разделе Г).
    - **Найдено при живой проверке:** развёрнутый шлюз печатает `system_info` своим белым списком полей, и блоки устройства в этот список не входили — то есть телеметрия терялась бы даже после передеплоя. Форматтер в `gateway.py` расширен (`_device_report_lines`): батарея, сигнал, локаль/время, ЦП/ОЗУ/термальные зоны, накопитель, камеры/микрофоны/датчики, `capabilities` и подсказка `device_hint`; недоступный блок печатается как `available: false` с причиной и `fix`, а не как ноль. Закрыто двумя тестами в `tests/test_gateway_share_route.py`.
    - ⚠️ **Расхождение, которое нужно решить перед передеплоем:** работающий шлюз объявляет 22 инструмента, включая `system_change` и `system_write`, которых **нет ни в этом чекауте, ни в установленном payload 0.2.6**. Если развернуть шлюз из этого репозитория как есть, эти два инструмента исчезнут из `tools/list` у клиента. Либо деплоить из источника, где они есть (и перенести туда ветку устройства), либо сознательно принять их потерю.
@@ -297,20 +319,20 @@
 
 ### Что именно сделано
 
-1. **`install.sh`** пишет файл домена в обеих ветках установки — standalone и «облачный шлюз/туннель» сразу после `agent.env`. Путь: `/etc/antigravity-mesh/domain.env`, в Termux — `$HOME/.config/antigravity-mesh/domain.env`, в Git Bash — `%USERPROFILE%\.config\antigravity-mesh\domain.env`; переопределяется `MESH_DOMAIN_FILE`, и создаётся каталог именно того файла, который используется (раньше при несуществующем каталоге из `MESH_DOMAIN_FILE` создавался путь по умолчанию, и запись падала).
+1. **`install.sh`** пишет файл домена в обеих ветках установки — standalone и «облачный шлюз/туннель» сразу после `agent.env`. Путь: `/etc/remote-harness-mcp/domain.env`, в Termux — `$HOME/.config/remote-harness-mcp/domain.env`, в Git Bash — `%USERPROFILE%\.config\remote-harness-mcp\domain.env`; переопределяется `MESH_DOMAIN_FILE`, и создаётся каталог именно того файла, который используется (раньше при несуществующем каталоге из `MESH_DOMAIN_FILE` создавался путь по умолчанию, и запись падала).
 2. **`install.ps1`** делает то же на Windows — сразу после записи `agent.env` и до запуска агента.
 3. **Оба нормализуют значение** (схема или завершающий слэш не могут попасть в строку дважды), **не переписывают** файл, если он уже называет тот же хост, и **никогда не пишут** плейсхолдер `__MESH_DOMAIN__` или пустое значение.
 4. **Встроенное значение по умолчанию не записывается:** если разрешённый хост совпадает с `DEFAULT_PUBLIC_BASE_URL` из `core/domain.py`, запись пропускается. Это запасной вариант, а не конфигурация: закреплённый файл домена превратил бы «ничего не настроено» в конфигурацию, а при наличии такого файла `core/domain.py` вовсе перестаёт обращаться к устаревшему `MESH_GATEWAY` — позднейшая правка `agent.env` оператором молча игнорировалась бы. Потерь нет: без файла то же значение и есть последняя ступень резолвера, поэтому ссылки узла и его туннель по-прежнему называют один хост.
 5. **Ветка `--ssh=` передаёт домен цели:** `install.sh` добавляет удалённому установщику `--domain=<домен>`, разрешённый на этой машине, поэтому удалённый хост записывает тот же домен, а не разрешает его заново (копия из репозитория с плейсхолдером в `$PUBLISHED_DOMAIN` иначе ушла бы на встроенное значение).
 6. **Запись не фатальна:** если файл записать нельзя (нет `sudo` для `/etc`, закрытый профиль), установка продолжается, а установщик печатает точную команду для ручного запуска.
 7. **Сухие прогоны** (`install.sh --dry-run`, `install.ps1 -DryRun`) сообщают файл и значение, которое было бы записано, — включая явный пропуск `not written (the built-in default is a fallback, not a configuration)`, — и по-прежнему ничего не меняют на диске.
-8. **На стороне шлюза** поведение не менялось: `deploy_gateway.sh` и раньше писал `/etc/antigravity-mesh/domain.env` на хосте шлюза.
+8. **На стороне шлюза** поведение не менялось: `deploy_gateway.sh` и раньше писал `/etc/remote-harness-mcp/domain.env` на хосте шлюза.
 
 **Оговорка про `MESH_DOMAIN_FILE`.** Это переопределение только **пути**, и оно принадлежит конфигурации узла, а не запуску установщика: узел читает переменную из своего окружения (ключи `MESH_*` из `agent.env` экспортируются при старте `core/agent.py`), поэтому значение, выставленное лишь на время установки, отправит домен в файл, которого узел никогда не прочитает.
 
 ### Уже установленный узел
 
-Достаточно повторного запуска установщика или одной строки вручную: `mkdir -p ~/.config/antigravity-mesh && echo 'MESH_PUBLIC_URL=https://<домен>' > ~/.config/antigravity-mesh/domain.env` (Termux/Windows) либо то же через `sudo tee /etc/antigravity-mesh/domain.env` в Linux. Уже выданные ссылки продолжают работать, новые берут настроенный домен. Если настроенный домен и есть встроенное значение по умолчанию, файла не будет — так и задумано.
+Достаточно повторного запуска установщика или одной строки вручную: `mkdir -p ~/.config/remote-harness-mcp && echo 'MESH_PUBLIC_URL=https://<домен>' > ~/.config/remote-harness-mcp/domain.env` (Termux/Windows) либо то же через `sudo tee /etc/remote-harness-mcp/domain.env` в Linux. Уже выданные ссылки продолжают работать, новые берут настроенный домен. Если настроенный домен и есть встроенное значение по умолчанию, файла не будет — так и задумано.
 
 ### Файлы
 

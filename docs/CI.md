@@ -26,7 +26,7 @@ The tag push is the whole procedure. The workflow:
    `tests/test_version_single_source.py` run, then the payload archive is built and
    uploaded as an artifact.
 2. **`windows`** — `build-installer-exe.ps1` builds
-   `dist/AntigravityMesh-Setup-<version>.exe`, and the executable is **self-tested**:
+   `dist/RemoteHarnessMCP-Setup-<version>.exe`, and the executable is **self-tested**:
    `--version` must print the version and `--unpack` must succeed.
 3. **`release`** — creates (or updates) the release, takes the notes from
    `docs/releases/<tag>.md` when that file exists, and attaches exactly four assets:
@@ -35,8 +35,8 @@ The tag push is the whole procedure. The workflow:
 | :--- | :--- |
 | `mesh-payload-<version>.zip` | every node's updater (`core/updater.py`) — the Linux/updater artifact |
 | `mesh-payload-<version>.zip.sha256` | the checksum the updater verifies before installing |
-| `AntigravityMesh-Setup-<version>.exe` | Windows users (`irm … \| iex` is not needed for them) |
-| `AntigravityMesh-Setup-<version>.exe.sha256` | anyone verifying the download by hand |
+| `RemoteHarnessMCP-Setup-<version>.exe` | Windows users (`irm … \| iex` is not needed for them) |
+| `RemoteHarnessMCP-Setup-<version>.exe.sha256` | anyone verifying the download by hand |
 
 Never upload an asset by hand: the node refuses a payload whose hash does not match
 the published one, and only this workflow computes both from the same tree.
@@ -47,7 +47,7 @@ the published one, and only this workflow computes both from the same tree.
    optional `-rc.N` suffix is allowed.
 2. `package.json` — same version (the npm package and the Python node must never
    ship as two versions), and its `description` mentions the current tool count.
-3. `README.md` — the copy/paste examples naming `AntigravityMesh-Setup-<version>.exe`
+3. `README.md` — the copy/paste examples naming `RemoteHarnessMCP-Setup-<version>.exe`
    (a test fails if they still advertise the previous version).
 4. `docs/releases/v<version>.md` — the release notes (a test requires the file).
 5. Run the gates locally: `python -m pytest -q -p no:cacheprovider tests/test_updater.py
@@ -59,7 +59,7 @@ the published one, and only this workflow computes both from the same tree.
    "the device layer (core/device.py) is missing from this checkout").
 7. Optional pre-flight of the artifacts: `python tools/build-payload-zip.py` and
    `./build-installer-exe.ps1` (both write to `dist/`, which is not committed).
-8. Commit, then `git tag -a v<version> -m "Antigravity Mesh <version>"`, then
+8. Commit, then `git tag -a v<version> -m "Remote Harness MCP <version>"`, then
    `git push origin main refs/tags/v<version>` — CI does the rest.
 
 > [!NOTE]

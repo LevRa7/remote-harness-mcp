@@ -1,9 +1,10 @@
 {
-  "name": "gemini-computer-use",
+  "name": "remote-harness-mcp",
   "version": "0.4.4",
   "description": "Turn your PC, Laptop, Server or Android phone into an autonomous execution node for Google Gemini via native MCP: 26 tools, write/edit/search, background jobs, public file and page sharing, secure reverse tunnel, self-update, and a device branch (battery, signal, sensors, camera, microphone, notifications) for phones and laptops.",
   "main": "bin/cli.js",
   "bin": {
+    "remote-harness-mcp": "bin/cli.js",
     "gemini-computer-use": "bin/cli.js"
   },
   "scripts": {
@@ -38,10 +39,10 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/LevRa7/Computer-use-for-Gemini-App-Web.git"
+    "url": "git+https://github.com/LevRa7/remote-harness-mcp.git"
   },
   "bugs": {
-    "url": "https://github.com/LevRa7/Computer-use-for-Gemini-App-Web/issues"
+    "url": "https://github.com/LevRa7/remote-harness-mcp/issues"
   },
-  "homepage": "https://github.com/LevRa7/Computer-use-for-Gemini-App-Web#readme"
+  "homepage": "https://github.com/LevRa7/remote-harness-mcp#readme"
 }

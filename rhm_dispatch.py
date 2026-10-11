@@ -3,7 +3,7 @@ import warnings
 warnings.filterwarnings("ignore")
 
 """
-agy_dispatch.py - CLI tool to dispatch tasks/commands to Google Drive queue and inspect results.
+rhm_dispatch.py - CLI tool to dispatch tasks/commands to Google Drive queue and inspect results.
 """
 
 import sys
@@ -23,7 +23,7 @@ def get_client_and_file_id(file_id_arg: str = DEFAULT_FILE_ID):
         sys.exit(1)
     file_id = client.find_queue_file_id(file_id_arg)
     if not file_id:
-        print("[-] antigravity_tasks.json not found on Google Drive.")
+        print("[-] rhm_tasks.json not found on Google Drive.")
         sys.exit(1)
     return client, file_id
 
@@ -97,7 +97,7 @@ def cmd_clear(args):
     print(f"[+] Cleared {count} tasks from queue.")
 
 def main():
-    parser = argparse.ArgumentParser(description="Antigravity Task Dispatcher CLI")
+    parser = argparse.ArgumentParser(description="Remote Harness Task Dispatcher CLI")
     parser.add_argument("--file-id", type=str, default=DEFAULT_FILE_ID, help="Google Drive File ID")
     subparsers = parser.add_subparsers(dest="command", required=True)
 

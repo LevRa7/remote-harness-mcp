@@ -1,5 +1,5 @@
 # ==============================================================================
-#  Antigravity Mesh - Windows Visual Installer (WinForms wizard)
+#  Remote Harness MCP - Windows Visual Installer (WinForms wizard)
 # ==============================================================================
 #
 #  WHY THIS FILE IS PURE ASCII
@@ -88,11 +88,15 @@ $ShellInstaller   = Join-Path $ScriptDir 'install.sh'
 $CoreDir          = Join-Path $ScriptDir 'core'
 $SkillsDir        = Join-Path $ScriptDir 'skills'
 
-$ConfigDir     = Join-Path $env:USERPROFILE '.config\antigravity-mesh'
+$ConfigDir     = Join-Path $env:USERPROFILE '.config\remote-harness-mcp'
+# The project was renamed from "Antigravity Mesh": an upgraded node keeps the
+# configuration directory its token already lives in.
+$LegacyConfigDir = Join-Path $env:USERPROFILE '.config\antigravity-mesh'
+if (-not (Test-Path $ConfigDir) -and (Test-Path $LegacyConfigDir)) { $ConfigDir = $LegacyConfigDir }
 $AgentEnvFile  = Join-Path $ConfigDir 'agent.env'
 $AgentLogFile  = Join-Path $ConfigDir 'agent.log'
 $StartupDir    = [Environment]::GetFolderPath('Startup')
-$AutostartFile = Join-Path $StartupDir 'antigravity-agent.vbs'
+$AutostartFile = Join-Path $StartupDir 'rhm-agent.vbs'
 
 $GeminiAppsUrl = 'https://gemini.google.com/spark/apps'
 
@@ -386,7 +390,7 @@ function Get-ScratchDirectory {
     if ($env:TEMP) { [void]$candidates.Add($env:TEMP) }
     [void]$candidates.Add((Join-Path $ScriptDir 'runtime'))
     if ($env:LOCALAPPDATA) {
-        [void]$candidates.Add((Join-Path $env:LOCALAPPDATA 'AntigravityMesh\runtime'))
+        [void]$candidates.Add((Join-Path $env:LOCALAPPDATA 'RemoteHarnessMCP\runtime'))
     }
 
     foreach ($candidate in $candidates) {
@@ -665,7 +669,7 @@ function New-SshSteps {
     $steps = New-Object System.Collections.ArrayList
     $sshOptions = @('-o', 'StrictHostKeyChecking=no', '-o', 'BatchMode=yes')
     $scpOptions = @('-o', 'StrictHostKeyChecking=no', '-o', 'BatchMode=yes')
-    $remoteRoot = '~/antigravity-mesh'
+    $remoteRoot = '~/remote-harness-mcp'
 
     # 1. create the destination tree. ssh joins the trailing arguments with
     #    spaces and hands the result to the remote shell, so ~ expands remotely.
@@ -1094,7 +1098,7 @@ function Build-ResultPage {
         $configGroup = New-GroupBox -Text (Get-UiText -Key 'res_config_group') -X 16 -Y 278 -W 760 -H 110
         $rows = @()
         if ($script:Mode -eq 'ssh') {
-            $rows = @(@((Get-UiText -Key 'res_config_file'), '~/antigravity-mesh (remote)'))
+            $rows = @(@((Get-UiText -Key 'res_config_file'), '~/remote-harness-mcp (remote)'))
         } else {
             $rows = @(
                 @((Get-UiText -Key 'res_config_file'), $AgentEnvFile),
@@ -1648,16 +1652,16 @@ function Invoke-SelfTest {
         '[DRY-RUN] Python      : C:\Python312\python.exe',
         '[DRY-RUN] websockets  : installed',
         '[DRY-RUN] Domain      : mesh.example.test',
-        '[DRY-RUN] Config      : C:\Users\probe\.config\antigravity-mesh',
-        '[DRY-RUN] Autostart   : C:\Users\probe\Startup\antigravity-agent.vbs',
+        '[DRY-RUN] Config      : C:\Users\probe\.config\remote-harness-mcp',
+        '[DRY-RUN] Autostart   : C:\Users\probe\Startup\rhm-agent.vbs',
         '[DRY-RUN] Node        : offline (probe)'
     ) -join "`n"
     $facts = Get-PreflightFacts -Text $dryRunText
     $factsOk = ($facts.Python -eq 'C:\Python312\python.exe') -and
         ($facts.Websockets -eq 'installed') -and
         ($facts.Domain -eq 'mesh.example.test') -and
-        ($facts.Config -eq 'C:\Users\probe\.config\antigravity-mesh') -and
-        ($facts.Autostart -eq 'C:\Users\probe\Startup\antigravity-agent.vbs') -and
+        ($facts.Config -eq 'C:\Users\probe\.config\remote-harness-mcp') -and
+        ($facts.Autostart -eq 'C:\Users\probe\Startup\rhm-agent.vbs') -and
         ($facts.Node -eq 'offline (probe)')
     $legacyText = (($dryRunText -split "`n")[0..4] -join "`n")
     $factsOk = $factsOk -and ((Get-PreflightFacts -Text $legacyText).Node -eq '')
@@ -1803,7 +1807,7 @@ try {
     }
     [Console]::Error.WriteLine($text)
     if (-not $SelfTest) {
-        [void][System.Windows.Forms.MessageBox]::Show($text, 'Antigravity Mesh')
+        [void][System.Windows.Forms.MessageBox]::Show($text, 'Remote Harness MCP')
     }
     exit 1
 }

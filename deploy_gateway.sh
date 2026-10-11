@@ -25,13 +25,13 @@
 #    MESH_GATEWAY_SSH_PASS_FILE  optional password file for sshpass
 #    MESH_GATEWAY_SSH_OPTS       optional extra ssh flags (e.g. "-F /dev/null"
 #                                inside a sandbox that cannot read /etc/ssh)
-#    MESH_GATEWAY_APP_DIR        default /opt/antigravity-mesh
-#    MESH_GATEWAY_WWW_DIR        default /var/www/antigravity-mesh
-#    MESH_GATEWAY_SERVICE        default agy-gateway.service
-#    MESH_GATEWAY_BACKUP_DIR     default /root/backups/antigravity-mesh
+#    MESH_GATEWAY_APP_DIR        default /opt/remote-harness-mcp
+#    MESH_GATEWAY_WWW_DIR        default /var/www/remote-harness-mcp
+#    MESH_GATEWAY_SERVICE        default rhm-gateway.service
+#    MESH_GATEWAY_BACKUP_DIR     default /root/backups/remote-harness-mcp
 #    MESH_PUBLIC_URL             the public domain. When unset it is read from
 #                                MESH_DOMAIN_FILE (default
-#                                /etc/antigravity-mesh/domain.env), and failing
+#                                /etc/remote-harness-mcp/domain.env), and failing
 #                                that from core/domain.py's single default
 # ==============================================================================
 set -euo pipefail
@@ -60,10 +60,10 @@ while [ $# -gt 0 ]; do
     shift
 done
 
-APP_DIR="${MESH_GATEWAY_APP_DIR:-/opt/antigravity-mesh}"
-WWW_DIR="${MESH_GATEWAY_WWW_DIR:-/var/www/antigravity-mesh}"
-SERVICE="${MESH_GATEWAY_SERVICE:-agy-gateway.service}"
-BACKUP_ROOT="${MESH_GATEWAY_BACKUP_DIR:-/root/backups/antigravity-mesh}"
+APP_DIR="${MESH_GATEWAY_APP_DIR:-/opt/remote-harness-mcp}"
+WWW_DIR="${MESH_GATEWAY_WWW_DIR:-/var/www/remote-harness-mcp}"
+SERVICE="${MESH_GATEWAY_SERVICE:-rhm-gateway.service}"
+BACKUP_ROOT="${MESH_GATEWAY_BACKUP_DIR:-/root/backups/remote-harness-mcp}"
 # ------------------------------------------------------------------------------
 # The public domain: ONE source. ops/mesh-domain.sh implements the same order
 # that core/domain.py implements at runtime - MESH_PUBLIC_URL, then the domain
@@ -73,7 +73,7 @@ BACKUP_ROOT="${MESH_GATEWAY_BACKUP_DIR:-/root/backups/antigravity-mesh}"
 # shellcheck source=ops/mesh-domain.sh
 . "$SCRIPT_DIR/ops/mesh-domain.sh"
 mesh_resolve_domain "$SCRIPT_DIR" \
-    || die "Cannot determine the public domain: export MESH_PUBLIC_URL, write MESH_PUBLIC_URL into ${MESH_DOMAIN_FILE:-/etc/antigravity-mesh/domain.env}, or run from a checkout that has core/domain.py"
+    || die "Cannot determine the public domain: export MESH_PUBLIC_URL, write MESH_PUBLIC_URL into ${MESH_DOMAIN_FILE:-/etc/remote-harness-mcp/domain.env}, or run from a checkout that has core/domain.py"
 DOMAIN_FILE="$MESH_DOMAIN_FILE_RESOLVED"
 PUBLIC_URL="$MESH_DOMAIN_URL"
 # The installers take an authority ("mesh.example.com"), not a URL.
@@ -134,7 +134,7 @@ rput() { "${SSH_BASE[@]}" "$SSH_TARGET" "cat > '$2'" < "$1"; }
 TS="$(date +%Y%m%d-%H%M%S)"
 STAGE="/tmp/mesh-deploy-$TS"
 
-info "Deploying Antigravity Mesh gateway"
+info "Deploying Remote Harness MCP gateway"
 echo "  target     : $SSH_TARGET"
 echo "  app dir    : $APP_DIR"
 echo "  www dir    : $WWW_DIR"
@@ -196,6 +196,26 @@ if [ "$DRY_RUN" = true ]; then
 fi
 
 # 1) reachability + layout -----------------------------------------------------
+# The gateway was published as "Antigravity Mesh" and a host that already runs it
+# keeps /opt/antigravity-mesh with agy-gateway.service. Deploy to the layout that
+# is actually there instead of creating a second, empty one; an explicit
+# MESH_GATEWAY_APP_DIR / MESH_GATEWAY_SERVICE / MESH_GATEWAY_WWW_DIR always wins.
+if [ -z "${MESH_GATEWAY_APP_DIR:-}" ] \
+    && rsh "[ -d /opt/antigravity-mesh ] && [ ! -d /opt/remote-harness-mcp ]" >/dev/null 2>&1; then
+    APP_DIR="/opt/antigravity-mesh"
+    warn "using the pre-rename gateway directory $APP_DIR (set MESH_GATEWAY_APP_DIR to override)"
+fi
+if [ -z "${MESH_GATEWAY_WWW_DIR:-}" ] \
+    && rsh "[ -d /var/www/antigravity-mesh ] && [ ! -d /var/www/remote-harness-mcp ]" >/dev/null 2>&1; then
+    WWW_DIR="/var/www/antigravity-mesh"
+    warn "using the pre-rename web root $WWW_DIR (set MESH_GATEWAY_WWW_DIR to override)"
+fi
+if [ -z "${MESH_GATEWAY_SERVICE:-}" ] \
+    && rsh "systemctl cat agy-gateway.service >/dev/null 2>&1 && ! systemctl cat rhm-gateway.service >/dev/null 2>&1" >/dev/null 2>&1; then
+    SERVICE="agy-gateway.service"
+    warn "using the pre-rename gateway service $SERVICE (set MESH_GATEWAY_SERVICE to override)"
+fi
+
 rsh "set -e
 systemctl cat $SERVICE >/dev/null 2>&1 || { echo 'service $SERVICE not found' >&2; exit 1; }
 [ -d $APP_DIR ] || { echo 'missing $APP_DIR' >&2; exit 1; }
@@ -226,7 +246,7 @@ done
 [ -d $APP_DIR/core ] && cp -a $APP_DIR/core $BACKUP_ROOT/$TS/app-core || true
 [ -d $WWW_DIR/skills ] && cp -a $WWW_DIR/skills $BACKUP_ROOT/$TS/skills || true
 [ -d $WWW_DIR/ops ] && cp -a $WWW_DIR/ops $BACKUP_ROOT/$TS/ops || true
-[ -f /etc/antigravity-mesh/gateway.env ] && cp -a /etc/antigravity-mesh/gateway.env $BACKUP_ROOT/$TS/ || true
+[ -f /etc/remote-harness-mcp/gateway.env ] && cp -a /etc/remote-harness-mcp/gateway.env $BACKUP_ROOT/$TS/ || true
 true"
 ok "backup written to $BACKUP_ROOT/$TS"
 
@@ -283,15 +303,15 @@ fi
 # The one place this host configures the domain. core/domain.py reads this file,
 # so the gateway, the served installers and any node here agree on one value.
 rsh "set -e
-mkdir -p /etc/antigravity-mesh
-if [ -f /etc/antigravity-mesh/domain.env ] && ! grep -qx 'MESH_PUBLIC_URL=$PUBLIC_URL' /etc/antigravity-mesh/domain.env; then
-    cp -a /etc/antigravity-mesh/domain.env $BACKUP_ROOT/$TS/domain.env.previous || true
+mkdir -p /etc/remote-harness-mcp
+if [ -f /etc/remote-harness-mcp/domain.env ] && ! grep -qx 'MESH_PUBLIC_URL=$PUBLIC_URL' /etc/remote-harness-mcp/domain.env; then
+    cp -a /etc/remote-harness-mcp/domain.env $BACKUP_ROOT/$TS/domain.env.previous || true
 fi
-printf 'MESH_PUBLIC_URL=%s\n' '$PUBLIC_URL' > /etc/antigravity-mesh/domain.env
-chmod 644 /etc/antigravity-mesh/domain.env
-cat /etc/antigravity-mesh/domain.env"
+printf 'MESH_PUBLIC_URL=%s\n' '$PUBLIC_URL' > /etc/remote-harness-mcp/domain.env
+chmod 644 /etc/remote-harness-mcp/domain.env
+cat /etc/remote-harness-mcp/domain.env"
 
-if rsh "grep -q '^[[:space:]]*MESH_PUBLIC_URL=' /etc/antigravity-mesh/gateway.env 2>/dev/null"; then
+if rsh "grep -q '^[[:space:]]*MESH_PUBLIC_URL=' /etc/remote-harness-mcp/gateway.env 2>/dev/null"; then
     warn "gateway.env also sets MESH_PUBLIC_URL and wins over $DOMAIN_FILE"
     warn "drop that line so the domain file stays the only place (backup: $BACKUP_ROOT/$TS)"
 fi

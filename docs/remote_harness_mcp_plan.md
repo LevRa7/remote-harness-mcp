@@ -1,5 +1,5 @@
 ---
-name: agy-subagent-mesh
+name: rhm-subagent-mesh
 description: Multi-device subagent orchestration mesh where Web-Gemini acts as chief orchestrator, executing all commands directly via Native MCP/API, reserving Google Drive exclusively for file transfers.
 ---
 
@@ -38,7 +38,7 @@ description: Multi-device subagent orchestration mesh where Web-Gemini acts as c
                                     │ (Native MCP API ~100-200 ms)
                                     ▼
                ┌─────────────────────────────────────────┐
-               │         Antigravity Remote Mesh         │
+               │         Remote Harness MCP         │
                │    (VPS Host: <vps-host>)         │
                └──────────┬──────────────┬───────────────┘
                           │              │               │
@@ -60,7 +60,7 @@ description: Multi-device subagent orchestration mesh where Web-Gemini acts as c
 
 ## 🛠️ 4. Нативные инструменты MCP (Gemini Web Spark)
 
-В Gemini подключено приложение **Antigravity Mesh** (`https://<shared-domain>/sse?user=<node-name>&token=<token>` — один общий домен на все узлы):
+В Gemini подключено приложение **Remote Harness MCP** (`https://<shared-domain>/sse?user=<node-name>&token=<token>` — один общий домен на все узлы):
 
 * `bash_exec(command)` — моментальное выполнение команд на VPS (`<vps-host>`).
 * `debian_exec(command)` — ресурсоёмкие вычисления, сборки, бенчмарки на узле **AMD Ryzen 9 5950X / 64GB RAM** (`<compute-ip>`).
@@ -82,7 +82,7 @@ description: Multi-device subagent orchestration mesh where Web-Gemini acts as c
 * Рабочий каталог: `/root/agy-gdrive-runner/`
 * Токен Google OAuth: `/root/agy-gdrive-runner/token.json`
 * Конфигурация rclone: `/root/.config/rclone/rclone.conf`
-* Логи: `/root/agy-gdrive-runner/mcp_requests.log`, `agy_watcher.log`, `agy_sync.log`
+* Логи: `/root/agy-gdrive-runner/mcp_requests.log`, `rhm_watcher.log`, `rhm_sync.log`
 * Эндпоинты (общий домен, узел выбирается `?user=`): `https://<shared-domain>/sse?user=<node-name>&token=<token>`, `https://<shared-domain>/mcp?user=<node-name>&token=<token>`
 
 ### ⚙️ Выполняемые команды (Commands):
@@ -92,9 +92,9 @@ description: Multi-device subagent orchestration mesh where Web-Gemini acts as c
 * Телеметрия: `system_vitals()`, `matebook_vitals()`
 
 ### 📄 Файлы (Files):
-* `agy_mcp_server.py` — нативный MCP сервер
-* `agy_watcher.py` — вотчер очереди Google Drive
-* `agy_sync.py` — синхронизатор фактов хоста с Google Drive
+* `rhm_mcp_server.py` — нативный MCP сервер
+* `rhm_watcher.py` — вотчер очереди Google Drive
+* `rhm_sync.py` — синхронизатор фактов хоста с Google Drive
 * `server_profile.md` — профиль серверов и узлов сети
 * `server_facts.json` — структурированные факты хоста и сети
 
@@ -151,8 +151,8 @@ description: Multi-device subagent orchestration mesh where Web-Gemini acts as c
 >    - Категорически запрещено продолжать цепочку команд, притворяться, что всё прошло успешно, или генерировать симулированный вывод.
 >    - Модель обязана зафиксировать сбой, откатиться к точке отказа, процитировать точный текст ошибки из лога и вернуть управление пользователю.
 > 4. **Строгий регламент очереди и ожидание ответа:**
->    - Демон `agy-watcher` опрашивает очередь каждые **7 секунд**.
+>    - Демон `rhm-watcher` опрашивает очередь каждые **7 секунд**.
 >    - Зависшие задачи автоматически сбрасываются вотчером через **60 секунд** со статусом `failed`, кодом `-1` и ошибкой в логе (`Queue Timeout Error: Task was in state for >60s`).
 >    - **Модель ОБЯЗАНА дожидаться фактического ответа от сервера/лога** (включая сброс через 60 секунд) и **КАТЕГОРИЧЕСКИ НЕ ДОЛЖНА предварительно принимать решения**, гадать о статусе, прерывать ожидание или имитировать выполнение.
 >    - Запрещено висеть до талого, писать «задача ожидает очереди с интервалом в несколько минут» или предлагать пользователю вводить команды вручную.
->    - Запрещено имитировать постановку в очередь, если `antigravity_tasks.json` фактически не был обновлен.
+>    - Запрещено имитировать постановку в очередь, если `rhm_tasks.json` фактически не был обновлен.

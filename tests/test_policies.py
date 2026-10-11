@@ -10,7 +10,7 @@ async def test_policy_allows_safe_commands():
 
     policies = get_mesh_policies()
     
-    for cmd in ["git status", "systemctl status agy-mcp", "uptime"]:
+    for cmd in ["git status", "systemctl status rhm-mcp", "uptime"]:
         call = types.ToolCall(name="run_command", args={"command": cmd})
         res = await evaluate_policies(policies, call)
         assert res.allow is True
@@ -22,7 +22,7 @@ async def test_policy_asks_user_for_destructive_commands():
     mock_handler = AsyncMock(return_value=False)
     policies = get_mesh_policies(ask_user_handler=mock_handler)
 
-    for cmd in ["reboot", "systemctl stop agy-mcp", "rm -f test.txt"]:
+    for cmd in ["reboot", "systemctl stop rhm-mcp", "rm -f test.txt"]:
         call = types.ToolCall(name="run_command", args={"command": cmd})
         res = await evaluate_policies(policies, call)
         assert res.allow is False

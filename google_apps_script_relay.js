@@ -1,5 +1,5 @@
 /**
- * Google Apps Script Universal Webhook Relay for Antigravity & Web-Gemini
+ * Google Apps Script Universal Webhook Relay for Remote Harness & Web-Gemini
  * 
  * 🔒 SECURITY NOTICE:
  * This script contains ZERO hardcoded secrets, tokens, or passwords.
@@ -10,10 +10,11 @@
  * 2. Paste this code into Code.gs and save.
  * 3. Go to "Project Settings" (gear icon on the left) -> "Script Properties".
  * 4. Add the following Script Properties:
- *    - AGY_ENDPOINT_BASE : https://<your-domain>/api/agy
- *    - AGY_SECRET_TOKEN  : <your_secret_token_from_webhook_secret.txt>
+ *    - RHM_ENDPOINT_BASE : https://<your-domain>/api/rhm
+ *    - RHM_SECRET_TOKEN  : <your_secret_token_from_webhook_secret.txt>
+ *    (the pre-rename AGY_ENDPOINT_BASE / AGY_SECRET_TOKEN names are still read)
  * 5. Click "Deploy" -> "New deployment" -> Select type "Web app".
- *    - Description: "AGY Secure Relay"
+ *    - Description: "Remote Harness MCP Secure Relay"
  *    - Execute as: "Me"
  *    - Who has access: "Anyone" (or "Anyone with Google Account")
  * 6. Copy the generated Web App URL:
@@ -23,8 +24,10 @@
 function getConfiguration() {
   var props = PropertiesService.getScriptProperties();
   return {
-    endpointBase: props.getProperty('AGY_ENDPOINT_BASE') || "https://<your-domain>/api/agy",
-    secretToken: props.getProperty('AGY_SECRET_TOKEN') || ""
+    // RHM_* is the current spelling; the AGY_* properties set before the rename
+    // keep working, so an existing deployment needs no edit in Google's console.
+    endpointBase: props.getProperty('RHM_ENDPOINT_BASE') || props.getProperty('AGY_ENDPOINT_BASE') || "https://<your-domain>/api/rhm",
+    secretToken: props.getProperty('RHM_SECRET_TOKEN') || props.getProperty('AGY_SECRET_TOKEN') || ""
   };
 }
 
@@ -41,7 +44,7 @@ function doGet(e) {
   if (!token) {
     return ContentService.createTextOutput(JSON.stringify({
       status: "error",
-      error: "Unauthorized: Missing AGY_SECRET_TOKEN in Script Properties or request parameter."
+      error: "Unauthorized: Missing RHM_SECRET_TOKEN (or the legacy AGY_SECRET_TOKEN) in Script Properties or request parameter."
     }, null, 2)).setMimeType(ContentService.MimeType.JSON);
   }
 
@@ -70,7 +73,7 @@ function doGet(e) {
     method: "get",
     headers: {
       "Authorization": "Bearer " + token,
-      "User-Agent": "GoogleAppsScript-AGY-Relay"
+      "User-Agent": "GoogleAppsScript-RHM-Relay"
     },
     muteHttpExceptions: true
   };
@@ -125,7 +128,7 @@ function doPost(e) {
   if (!token) {
     return ContentService.createTextOutput(JSON.stringify({
       status: "error",
-      error: "Unauthorized: Missing AGY_SECRET_TOKEN in Script Properties or request body."
+      error: "Unauthorized: Missing RHM_SECRET_TOKEN (or the legacy AGY_SECRET_TOKEN) in Script Properties or request body."
     }, null, 2)).setMimeType(ContentService.MimeType.JSON);
   }
 
@@ -141,7 +144,7 @@ function doPost(e) {
     payload: JSON.stringify(body),
     headers: {
       "Authorization": "Bearer " + token,
-      "User-Agent": "GoogleAppsScript-AGY-Relay"
+      "User-Agent": "GoogleAppsScript-RHM-Relay"
     },
     muteHttpExceptions: true
   };

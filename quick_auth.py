@@ -154,21 +154,21 @@ token = {json.dumps(token_json_str)}
     if client.authenticate():
         file_id = client.find_queue_file_id(DEFAULT_FILE_ID)
         if file_id:
-            print(f"[+] УСПЕХ! Найден файл antigravity_tasks.json (File ID: {file_id})")
+            print(f"[+] УСПЕХ! Найден файл rhm_tasks.json (File ID: {file_id})")
             data, _ = client.read_queue(file_id)
             print(f"[+] Всего задач в очереди: {len(data.get('tasks', []))}")
         else:
-            print("[+] Создаём файл antigravity_tasks.json в корне Google Диска...")
+            print("[+] Создаём файл rhm_tasks.json в корне Google Диска...")
             new_id = client.create_queue_file()
             print(f"[+] Файл создан! File ID: {new_id}")
     else:
         print("[-] Ошибка инициализации Google Drive клиента.")
 
-    # 4. Запускаем systemd службу agy-watcher
-    print("[*] Запуск фоновой службы agy-watcher...")
-    subprocess.run(["systemctl", "enable", "--now", "agy-watcher"])
-    status = subprocess.run(["systemctl", "is-active", "agy-watcher"], capture_output=True, text=True)
-    print(f"[+] Статус службы agy-watcher: {status.stdout.strip()}")
+    # 4. Запускаем systemd службу rhm-watcher
+    print("[*] Запуск фоновой службы rhm-watcher...")
+    subprocess.run(["systemctl", "enable", "--now", "rhm-watcher"])
+    status = subprocess.run(["systemctl", "is-active", "rhm-watcher"], capture_output=True, text=True)
+    print(f"[+] Статус службы rhm-watcher: {status.stdout.strip()}")
     print("\n[+] ВСЁ НАСТРОЕНО И ЗАПУЩЕНО В АВТОМАТИЧЕСКОМ РЕЖИМЕ!")
 
 if __name__ == "__main__":

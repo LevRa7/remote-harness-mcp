@@ -2,10 +2,10 @@ import pytest
 from core.schemas import NodeVitals
 
 def test_system_vitals_returns_typed_pydantic_json():
-    # agy_mcp_server imports gdrive_client, which requires the third-party
+    # rhm_mcp_server imports gdrive_client, which requires the third-party
     # 'requests' package; skip cleanly instead of erroring where it is absent.
     pytest.importorskip("requests")
-    from agy_mcp_server import system_vitals
+    from rhm_mcp_server import system_vitals
 
     out = system_vitals()
     # Must be valid JSON adhering strictly to NodeVitals schema

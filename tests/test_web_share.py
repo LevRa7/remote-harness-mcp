@@ -2,7 +2,7 @@
 
 The tools are exercised exactly as the gateway calls them - through
 ``mcp_tools.call_tool`` - against a temporary share directory, so nothing leaks
-into the real ``~/.cache/antigravity-mesh/web`` and no port stays bound.
+into the real ``~/.cache/remote-harness-mcp/web`` and no port stays bound.
 
 Two properties beyond "it works" are pinned here on purpose:
 
@@ -96,7 +96,7 @@ def isolated_shares(tmp_path, monkeypatch):
     domain.reset()
     mcp_tools.configure(
         workspace=os.getcwd(),
-        jobs_dir=os.path.expanduser("~/.cache/antigravity-mesh/jobs"),
+        jobs_dir=os.path.expanduser("~/.cache/remote-harness-mcp/jobs"),
         read_only=False,
         write_roots=None,
         max_output_chars=12000,

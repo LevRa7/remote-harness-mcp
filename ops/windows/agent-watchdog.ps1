@@ -1,7 +1,7 @@
 # ==============================================================================
-#  Antigravity Mesh - Windows agent watchdog (single shot supervisor)
+#  Remote Harness MCP - Windows agent watchdog (single shot supervisor)
 #
-#  Meant to be run every 5 minutes by the Scheduled Task "AntigravityMeshWatchdog".
+#  Meant to be run every 5 minutes by the Scheduled Task "RemoteHarnessMCPWatchdog".
 #  It answers one question: is this node's agent alive, and if it is not, start it
 #  exactly the way the logon launcher would?
 #
@@ -41,7 +41,7 @@
 #
 #  PARAMETERS
 #    -ConfigDir    where agent.env / agent.log / agent.heartbeat live.
-#                  Default: %USERPROFILE%\.config\antigravity-mesh
+#                  Default: %USERPROFILE%\.config\remote-harness-mcp
 #    -LogFile      this script's journal. Default: <ConfigDir>\watchdog.log
 #    -GraceSeconds heartbeat freshness threshold, in seconds, default 60: a
 #                  heartbeat whose ts is older than this is not fresh. The agent
@@ -61,7 +61,7 @@
 #
 #  Usage:
 #     .\agent-watchdog.ps1
-#     .\agent-watchdog.ps1 -ConfigDir "$env:USERPROFILE\.config\antigravity-mesh"
+#     .\agent-watchdog.ps1 -ConfigDir "$env:USERPROFILE\.config\remote-harness-mcp"
 #     .\agent-watchdog.ps1 -GraceSeconds 120
 #     .\agent-watchdog.ps1 -Quiet -LogFile C:\logs\watchdog.log
 # ==============================================================================
@@ -405,7 +405,14 @@ if ([string]::IsNullOrWhiteSpace($ConfigDir)) {
         if (-not $Quiet) { Write-Host 'CONFIG ERROR: cannot resolve the user profile directory; pass -ConfigDir explicitly.' }
         exit 2
     }
-    $ConfigDir = Join-Path $profileDir '.config\antigravity-mesh'
+    $ConfigDir = Join-Path $profileDir '.config\remote-harness-mcp'
+    # An upgraded node keeps the configuration directory its token already lives
+    # in (the project shipped as "Antigravity Mesh"); core/paths.py resolves the
+    # same preference for the node itself.
+    $legacyConfigDir = Join-Path $profileDir '.config\antigravity-mesh'
+    if (-not (Test-Path -LiteralPath $ConfigDir) -and (Test-Path -LiteralPath $legacyConfigDir)) {
+        $ConfigDir = $legacyConfigDir
+    }
 }
 $ConfigDir = Resolve-FullPath $ConfigDir
 if ([string]::IsNullOrWhiteSpace($LogFile)) { $LogFile = Join-Path $ConfigDir 'watchdog.log' }
@@ -424,7 +431,7 @@ try {
 # Overlapping runs (a slow gateway probe plus the next 5-minute tick) must not
 # start two agents. The OS releases the mutex when this process exits, so a
 # crashed run can never wedge the watchdog.
-$mutexName = 'AntigravityMeshWatchdog-' + ($env:USERNAME)
+$mutexName = 'RemoteHarnessMCPWatchdog-' + ($env:USERNAME)
 $mutex = $null
 $acquired = $true
 foreach ($candidate in @(('Global\' + $mutexName), $mutexName)) {
@@ -472,7 +479,7 @@ $startupDir = [Environment]::GetFolderPath('Startup')
 if ([string]::IsNullOrWhiteSpace($startupDir)) {
     Stop-WithConfigError 'cannot resolve the Startup folder ([Environment]::GetFolderPath("Startup") returned nothing)'
 }
-$vbsPath = Join-Path $startupDir 'antigravity-agent.vbs'
+$vbsPath = Join-Path $startupDir 'rhm-agent.vbs'
 if (-not (Test-Path -LiteralPath $vbsPath -PathType Leaf)) {
     Stop-WithConfigError ('the autostart launcher is missing: ' + $vbsPath + ' - this node would not start after a reboot; re-run install.ps1')
 }

@@ -1,5 +1,5 @@
 ﻿# ==============================================================================
-#  Antigravity Mesh - Windows PowerShell Universal Installer
+#  Remote Harness MCP - Windows PowerShell Universal Installer
 # ==============================================================================
 param(
     [switch]$Quick,
@@ -275,7 +275,7 @@ function Install-WebsocketsFor {
     }
 
     # 5. venv: the only fallback that needs no write access to the system Python.
-    $venvDir = "$env:USERPROFILE\.config\antigravity-mesh\venv"
+    $venvDir = "$env:USERPROFILE\.config\remote-harness-mcp\venv"
     $venvPython = "$venvDir\Scripts\python.exe"
     if (-not (Test-Path -LiteralPath $venvPython)) { & $Python -m venv $venvDir 2>&1 | Out-Null }
     if (Test-Path -LiteralPath $venvPython) {
@@ -399,7 +399,7 @@ if ($PyExe) {
 #    2. $env:MESH_PUBLIC_URL;
 #    3. $env:AGY_PUBLIC_BASE_URL (legacy alias, same meaning);
 #    4. the domain file - $env:MESH_DOMAIN_FILE when set, otherwise
-#       %USERPROFILE%\.config\antigravity-mesh\domain.env;
+#       %USERPROFILE%\.config\remote-harness-mcp\domain.env;
 #    5. $PublishedDomain - the domain this copy was published with. The repository
 #       carries the placeholder __MESH_DOMAIN__ there and deploy_gateway.sh
 #       rewrites that line while publishing, so a served copy knows its domain;
@@ -543,7 +543,13 @@ function Write-DomainFile {
     }
 }
 
-$DomainFilePath = if ($env:MESH_DOMAIN_FILE) { $env:MESH_DOMAIN_FILE } else { "$env:USERPROFILE\.config\antigravity-mesh\domain.env" }
+$ConfigDirDefault = "$env:USERPROFILE\.config\remote-harness-mcp"
+# The project was renamed from "Antigravity Mesh": an upgraded node keeps the
+# configuration directory its token and agent.env already live in, exactly as
+# core/paths.py resolves it for the node itself.
+$LegacyConfigDir = "$env:USERPROFILE\.config\antigravity-mesh"
+if (-not (Test-Path $ConfigDirDefault) -and (Test-Path $LegacyConfigDir)) { $ConfigDirDefault = $LegacyConfigDir }
+$DomainFilePath = if ($env:MESH_DOMAIN_FILE) { $env:MESH_DOMAIN_FILE } else { "$ConfigDirDefault\domain.env" }
 $ResolvedDomain = Get-NormalisedHost $Gateway
 if (-not $ResolvedDomain) { $ResolvedDomain = Get-NormalisedHost $env:MESH_PUBLIC_URL }
 if (-not $ResolvedDomain) { $ResolvedDomain = Get-NormalisedHost $env:AGY_PUBLIC_BASE_URL }
@@ -631,8 +637,8 @@ if ($DryRun) {
         Write-Host "[DRY-RUN] Python      : $pyState"
         Write-Host "[DRY-RUN] websockets  : $wsState"
         Write-Host "[DRY-RUN] Домен       : $domainState"
-        Write-Host "[DRY-RUN] Конфиг      : $env:USERPROFILE\.config\antigravity-mesh"
-        Write-Host "[DRY-RUN] Автозапуск  : $([Environment]::GetFolderPath('Startup'))\antigravity-agent.vbs"
+        Write-Host "[DRY-RUN] Конфиг      : $env:USERPROFILE\.config\remote-harness-mcp"
+        Write-Host "[DRY-RUN] Автозапуск  : $([Environment]::GetFolderPath('Startup'))\rhm-agent.vbs"
         Write-Host "[DRY-RUN] Узел        : $nodeState"
         Write-Host "[DRY-RUN] Архитектура : $archState"
         Write-Host "[DRY-RUN] Файл домена : $domainFileState"
@@ -641,8 +647,8 @@ if ($DryRun) {
         Write-Host "[DRY-RUN] Python      : $pyState"
         Write-Host "[DRY-RUN] websockets  : $wsState"
         Write-Host "[DRY-RUN] Domain      : $domainState"
-        Write-Host "[DRY-RUN] Config      : $env:USERPROFILE\.config\antigravity-mesh"
-        Write-Host "[DRY-RUN] Autostart   : $([Environment]::GetFolderPath('Startup'))\antigravity-agent.vbs"
+        Write-Host "[DRY-RUN] Config      : $env:USERPROFILE\.config\remote-harness-mcp"
+        Write-Host "[DRY-RUN] Autostart   : $([Environment]::GetFolderPath('Startup'))\rhm-agent.vbs"
         Write-Host "[DRY-RUN] Node        : $nodeState"
         Write-Host "[DRY-RUN] Arch        : $archState"
         Write-Host "[DRY-RUN] Domain file : $domainFileState"
@@ -786,13 +792,13 @@ if ("$PyExe" -like "*$WindowsAppsMarker*") {
         Write-Host "[OK] websockets is installed ($pyExeOnly)." -ForegroundColor Green
     }
 
-$ConfigDir = "$env:USERPROFILE\.config\antigravity-mesh"
+$ConfigDir = $ConfigDirDefault
 if (!(Test-Path $ConfigDir)) { New-Item -ItemType Directory -Path $ConfigDir -Force | Out-Null }
 
 # Bootstrap project files if piped from irm/iex
 $ScriptDir = if ($MyInvocation.MyCommand -and $MyInvocation.MyCommand.Path) { Split-Path -Parent $MyInvocation.MyCommand.Path } else { $null }
 if (-not $ScriptDir -or -not (Test-Path "$ScriptDir\core\agent.py")) {
-    $BootstrapDir = "$env:USERPROFILE\.gemini-computer-use"
+    $BootstrapDir = "$env:USERPROFILE\.remote-harness-mcp"
     $CoreDir = "$BootstrapDir\core"
     $SkillsDir = "$BootstrapDir\skills"
     # The watchdog, the doctor and the updater are fetched too: the scheduled
@@ -810,6 +816,7 @@ if (-not $ScriptDir -or -not (Test-Path "$ScriptDir\core\agent.py")) {
         "core/mcp_tools.py",
         "core/web_share.py",
         "core/domain.py",
+        "core/paths.py",
         "core/vitals.py",
         "core/updater.py",
         "core/version.py",
@@ -826,7 +833,7 @@ if (-not $ScriptDir -or -not (Test-Path "$ScriptDir\core\agent.py")) {
             Invoke-WebRequest -Uri "https://$Gateway/$f" -OutFile $dest -UseBasicParsing -ErrorAction Stop
         } catch {
             try {
-                Invoke-WebRequest -Uri "https://raw.githubusercontent.com/LevRa7/Computer-use-for-Gemini-App-Web/main/$f" -OutFile $dest -UseBasicParsing
+                Invoke-WebRequest -Uri "https://raw.githubusercontent.com/LevRa7/remote-harness-mcp/main/$f" -OutFile $dest -UseBasicParsing
             } catch {}
         }
     }
@@ -1051,7 +1058,15 @@ $env:MESH_TOKEN = $AssignedToken
         exit 1
     }
     $startupDir = [Environment]::GetFolderPath("Startup")
-    $startupVbs = "$startupDir\antigravity-agent.vbs"
+    $startupVbs = "$startupDir\rhm-agent.vbs"
+    # The pre-rename Startup entry (the project shipped as "Antigravity Mesh")
+    # would keep launching the old agent at every logon: remove it, so only one
+    # agent owns the tunnel and the token.
+    $legacyStartupVbs = "$startupDir\agy-agent.vbs"
+    if (Test-Path -LiteralPath $legacyStartupVbs) {
+        Remove-Item -LiteralPath $legacyStartupVbs -Force -ErrorAction SilentlyContinue
+        Write-Host "[OK] Removed the pre-rename Startup entry agy-agent.vbs." -ForegroundColor Green
+    }
     $pyExeForVbs = $pyExeOnly
     $agentLog = "$ConfigDir\agent.log"
     @"
@@ -1101,6 +1116,20 @@ if (Test-Path -LiteralPath $watchdog) {
         $watchdogArguments = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $watchdog + '" -Quiet'
         $watchdogTaskCommand = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"' + $watchdog + '\" -Quiet'
     }
+    # Retire the pre-rename scheduled tasks. The project shipped as "Antigravity
+    # Mesh"; leaving those tasks registered would keep a second agent and a second
+    # updater running against the same configuration after the rename. Absent tasks
+    # (every fresh machine) are simply skipped.
+    foreach ($legacyTask in @('AntigravityMeshWatchdog', 'AntigravityMeshUpdater')) {
+        $legacyRegistered = $null
+        try { $legacyRegistered = Get-ScheduledTask -TaskName $legacyTask -ErrorAction Stop } catch { $legacyRegistered = $null }
+        if ($legacyRegistered) {
+            try { Unregister-ScheduledTask -TaskName $legacyTask -Confirm:$false -ErrorAction Stop } catch {}
+            Write-Host "[OK] Retired the pre-rename scheduled task $legacyTask." -ForegroundColor Green
+        } else {
+            & schtasks.exe /Delete /TN $legacyTask /F 2>$null | Out-Null
+        }
+    }
     $watchdogRegistered = $false
     $watchdogError = ''
     # schtasks.exe is tried first because it registers a task for the CURRENT user
@@ -1109,7 +1138,7 @@ if (Test-Path -LiteralPath $watchdog) {
     # was measured on the machine this watchdog was built for). The minute schedule
     # repeats indefinitely, so logon is already covered by the Startup entry above
     # and needs no second trigger here.
-    $watchdogError = (& schtasks.exe /Create /TN 'AntigravityMeshWatchdog' /TR $watchdogTaskCommand `
+    $watchdogError = (& schtasks.exe /Create /TN 'RemoteHarnessMCPWatchdog' /TR $watchdogTaskCommand `
         /SC MINUTE /MO 5 /F 2>&1 | Out-String).Trim()
     if ($LASTEXITCODE -eq 0) { $watchdogRegistered = $true }
     if (-not $watchdogRegistered) {
@@ -1125,9 +1154,9 @@ if (Test-Path -LiteralPath $watchdog) {
             )
             $watchdogSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
                 -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 10)
-            Register-ScheduledTask -TaskName 'AntigravityMeshWatchdog' -Action $watchdogAction `
+            Register-ScheduledTask -TaskName 'RemoteHarnessMCPWatchdog' -Action $watchdogAction `
                 -Trigger $watchdogTriggers -Settings $watchdogSettings -Force `
-                -Description 'Restarts the Antigravity Mesh node agent when it dies.' | Out-Null
+                -Description 'Restarts the Remote Harness MCP node agent when it dies.' | Out-Null
             $watchdogRegistered = $true
             $watchdogError = ''
         } catch {
@@ -1137,9 +1166,9 @@ if (Test-Path -LiteralPath $watchdog) {
     }
     if ($watchdogRegistered) {
         if ($Lang -eq "ru") {
-            Write-Host "[OK] Задача-сторож 'AntigravityMeshWatchdog' зарегистрирована (каждые 5 минут)." -ForegroundColor Green
+            Write-Host "[OK] Задача-сторож 'RemoteHarnessMCPWatchdog' зарегистрирована (каждые 5 минут)." -ForegroundColor Green
         } else {
-            Write-Host "[OK] Watchdog task 'AntigravityMeshWatchdog' registered (every 5 minutes)." -ForegroundColor Green
+            Write-Host "[OK] Watchdog task 'RemoteHarnessMCPWatchdog' registered (every 5 minutes)." -ForegroundColor Green
         }
     } else {
         if ($Lang -eq "ru") {
@@ -1181,7 +1210,7 @@ if (Test-Path -LiteralPath $updaterScript) {
     # schtasks.exe first, for the same reason as the watchdog: it needs no write
     # access to the task store, which a normal user does not have on a hardened
     # or domain-joined machine.
-    $updaterError = (& schtasks.exe /Create /TN 'AntigravityMeshUpdater' /TR $updaterTaskCommand `
+    $updaterError = (& schtasks.exe /Create /TN 'RemoteHarnessMCPUpdater' /TR $updaterTaskCommand `
         /SC DAILY /MO 1 /ST 03:30 /F 2>&1 | Out-String).Trim()
     if ($LASTEXITCODE -eq 0) { $updaterRegistered = $true }
     if (-not $updaterRegistered) {
@@ -1190,9 +1219,9 @@ if (Test-Path -LiteralPath $updaterScript) {
             $updaterTriggers = @((New-ScheduledTaskTrigger -Daily -At '03:30'))
             $updaterSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
                 -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 30)
-            Register-ScheduledTask -TaskName 'AntigravityMeshUpdater' -Action $updaterAction `
+            Register-ScheduledTask -TaskName 'RemoteHarnessMCPUpdater' -Action $updaterAction `
                 -Trigger $updaterTriggers -Settings $updaterSettings -Force `
-                -Description 'Updates the Antigravity Mesh node from the newest GitHub release.' | Out-Null
+                -Description 'Updates the Remote Harness MCP node from the newest GitHub release.' | Out-Null
             $updaterRegistered = $true
             $updaterError = ''
         } catch {
@@ -1202,10 +1231,10 @@ if (Test-Path -LiteralPath $updaterScript) {
     }
     if ($updaterRegistered) {
         if ($Lang -eq "ru") {
-            Write-Host "[OK] Задача обновления 'AntigravityMeshUpdater' зарегистрирована (ежедневно в 03:30)." -ForegroundColor Green
+            Write-Host "[OK] Задача обновления 'RemoteHarnessMCPUpdater' зарегистрирована (ежедневно в 03:30)." -ForegroundColor Green
             Write-Host "    Проверить сейчас: powershell -File `"$updaterScript`" -Check" -ForegroundColor DarkGray
         } else {
-            Write-Host "[OK] Update task 'AntigravityMeshUpdater' registered (daily at 03:30)." -ForegroundColor Green
+            Write-Host "[OK] Update task 'RemoteHarnessMCPUpdater' registered (daily at 03:30)." -ForegroundColor Green
             Write-Host "    Check right now: powershell -File `"$updaterScript`" -Check" -ForegroundColor DarkGray
         }
     } else {
@@ -1278,10 +1307,10 @@ if ($NodeOnline) {
     Write-Host "[!] Узел '$AssignedUser' не вышел на связь за 30 с." -ForegroundColor Red
     Write-Host "    Интерпретатор автозапуска: $pyExeOnly" -ForegroundColor Yellow
     Write-Host "    Смотрите хвост $agentLog и запустите .\ops\doctor.ps1" -ForegroundColor Yellow
-    Write-Host "    Задача 'AntigravityMeshWatchdog' повторит попытку через 5 минут." -ForegroundColor Yellow
+    Write-Host "    Задача 'RemoteHarnessMCPWatchdog' повторит попытку через 5 минут." -ForegroundColor Yellow
 } else {
     Write-Host "[!] Node '$AssignedUser' did not come online within 30 s." -ForegroundColor Red
     Write-Host "    Autostart interpreter: $pyExeOnly" -ForegroundColor Yellow
     Write-Host "    Read the tail of $agentLog and run .\ops\doctor.ps1" -ForegroundColor Yellow
-    Write-Host "    The 'AntigravityMeshWatchdog' task retries every 5 minutes." -ForegroundColor Yellow
+    Write-Host "    The 'RemoteHarnessMCPWatchdog' task retries every 5 minutes." -ForegroundColor Yellow
 }

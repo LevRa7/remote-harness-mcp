@@ -1,4 +1,4 @@
-# 📱 Gemini Computer Use — control any PC from Gemini Spark (App & Web)
+# 📱 Remote Harness MCP — control any PC from Gemini Spark (App & Web)
 
 > **An MCP server that turns Google Gemini from a chatbot into a full-fledged mobile agent.**
 > Type a task in the Gemini app on your phone — your PC, laptop or server executes it, and Gemini reports back with real results.
@@ -10,7 +10,7 @@
 ## 💡 The idea
 
 Gemini in a browser or on a phone can talk, but it cannot *do* anything on your computer.
-**Gemini Computer Use** closes that gap. It is a free, open-source **Model Context Protocol (MCP)** server that you connect to **Gemini Spark** ([gemini.google.com/spark/apps](https://gemini.google.com/spark/apps) or the Gemini mobile app) with a single link. After that, Gemini gets hands:
+**Remote Harness MCP** closes that gap. It is a free, open-source **Model Context Protocol (MCP)** server that you connect to **Gemini Spark** ([gemini.google.com/spark/apps](https://gemini.google.com/spark/apps) or the Gemini mobile app) with a single link. After that, Gemini gets hands:
 
 - runs shell commands, builds and tests code, manages git;
 - reads, writes and edits files;
@@ -167,7 +167,7 @@ Read from `agent.env` at startup ([core/agent.py](core/agent.py), applied in [co
 | :--- | :--- | :--- |
 | `MESH_DEVICE` | `auto` | `auto` keeps the branch answering everywhere (only the answer differs per platform), `0` switches the branch off, `1` forces it on. |
 | `MESH_DEVICE_ACTIONS` | empty | Comma-separated allowlist of action names for `device_control`, `device_capture` and `device_messages`; empty means every action the build implements. |
-| `MESH_DEVICE_CAPTURE_DIR` | shared storage on a phone once `termux-setup-storage` has been granted (`~/storage/dcim/antigravity-mesh` or `~/storage/shared/AntigravityMesh`), otherwise `~/.cache/antigravity-mesh/captures` | Where photos and recordings are written. |
+| `MESH_DEVICE_CAPTURE_DIR` | shared storage on a phone once `termux-setup-storage` has been granted (`~/storage/dcim/remote-harness-mcp` or `~/storage/shared/RemoteHarnessMCP`), otherwise `~/.cache/remote-harness-mcp/captures` | Where photos and recordings are written. |
 | `MESH_DEVICE_PIM` | `0` | `1` enables SMS, the call log, contacts and placing a call. |
 | `MESH_DEVICE_QUICK` | `0` | `1` keeps `system_info` instant by skipping network, cameras, microphones and sensors. |
 | `MESH_READ_ONLY` | `0` | `1` refuses every `device_control` and `device_capture` action, and blocks `sms_send` and `call`. This is the node-side guarantee that does not depend on any client prompt. |
@@ -199,7 +199,7 @@ These four make something on your machine readable from the internet. The link i
 | `mesh_update(action, force, offline, restart)` | Reports, checks for or installs a newer release of the node's own code. `status` reads local state (no network), `check` asks GitHub, `apply` downloads the payload, verifies its published SHA-256, installs it with a rollback backup and restarts the agent. |
 
 > [!TIP]
-> Nodes update themselves: a running agent checks for a newer release in the background (every 6 hours by default) and installs what it finds, and on Windows the `AntigravityMeshUpdater` task checks once a day even when no agent is running. `MESH_UPDATE_AUTO=0` switches that to "report only". Details, environment variables and rollback: [docs/UPDATES.md](docs/UPDATES.md).
+> Nodes update themselves: a running agent checks for a newer release in the background (every 6 hours by default) and installs what it finds, and on Windows the `RemoteHarnessMCPUpdater` task checks once a day even when no agent is running. `MESH_UPDATE_AUTO=0` switches that to "report only". Details, environment variables and rollback: [docs/UPDATES.md](docs/UPDATES.md).
 
 > [!TIP]
 > Gemini gives a single tool call roughly 30 seconds. For anything longer (builds, backups, downloads) the agent uses `run_job` and polls `job_output`, so tasks never get cut off.
@@ -238,13 +238,13 @@ runtime and shows the MCP link at the end — see [docs/GUI_INSTALLER.md](docs/G
 
 **📦 Node.js (any OS)**
 ```bash
-npx gemini-computer-use
+npx remote-harness-mcp
 ```
 
 **🛠️ From source**
 ```bash
-git clone https://github.com/LevRa7/Computer-use-for-Gemini-App-Web.git
-cd Computer-use-for-Gemini-App-Web
+git clone https://github.com/LevRa7/remote-harness-mcp.git
+cd remote-harness-mcp
 ./install.sh --quick
 ```
 
@@ -331,17 +331,17 @@ installer shows it in its preflight.
 ### Download the setup executable
 
 The release also ships a single compiled installer, for machines where you would rather
-not clone or download anything else — `AntigravityMesh-Setup-<version>.exe`:
+not clone or download anything else — `RemoteHarnessMCP-Setup-<version>.exe`:
 
 ```powershell
-.\AntigravityMesh-Setup-0.4.4.exe            # open the visual installer
-.\AntigravityMesh-Setup-0.4.4.exe -Lang ru   # start in Russian
-.\AntigravityMesh-Setup-0.4.4.exe -SelfTest  # headless self-check, prints JSON
-.\AntigravityMesh-Setup-0.4.4.exe --version  # print the version
+.\RemoteHarnessMCP-Setup-0.4.4.exe            # open the visual installer
+.\RemoteHarnessMCP-Setup-0.4.4.exe -Lang ru   # start in Russian
+.\RemoteHarnessMCP-Setup-0.4.4.exe -SelfTest  # headless self-check, prints JSON
+.\RemoteHarnessMCP-Setup-0.4.4.exe --version  # print the version
 ```
 
 It carries the wizard, `install.ps1`, `core/` and `install.sh` inside itself, unpacks them
-to `%LOCALAPPDATA%\AntigravityMesh\setup\<version>` (override with `MESH_SETUP_DIR`) and
+to `%LOCALAPPDATA%\RemoteHarnessMCP\setup\<version>` (override with `MESH_SETUP_DIR`) and
 runs the wizard from there. It needs nothing but the .NET Framework and PowerShell that
 Windows already has, and it is built from this repository by
 `.\build-installer-exe.ps1` — no SDK, no NuGet, no network.
@@ -365,10 +365,10 @@ Full details, screenshots and the SSH notes: [docs/GUI_INSTALLER.md](docs/GUI_IN
 
 | Path | What it is |
 | :--- | :--- |
-| `%USERPROFILE%\.config\antigravity-mesh\agent.env` | `MESH_GATEWAY`, `MESH_USER`, `MESH_TOKEN` |
-| `%USERPROFILE%\.config\antigravity-mesh\domain.env` | `MESH_PUBLIC_URL` — the resolved shared domain, so the node's share links, its tunnel and the gateway name the same host (not written when the built-in default is all that is configured) |
-| `…\Start Menu\Programs\Startup\antigravity-agent.vbs` | autostart entry, so the node comes back after a reboot |
-| `%USERPROFILE%\.config\antigravity-mesh\agent.log` | agent output, for when a silent autostart fails |
+| `%USERPROFILE%\.config\remote-harness-mcp\agent.env` | `MESH_GATEWAY`, `MESH_USER`, `MESH_TOKEN` |
+| `%USERPROFILE%\.config\remote-harness-mcp\domain.env` | `MESH_PUBLIC_URL` — the resolved shared domain, so the node's share links, its tunnel and the gateway name the same host (not written when the built-in default is all that is configured) |
+| `…\Start Menu\Programs\Startup\rhm-agent.vbs` | autostart entry, so the node comes back after a reboot |
+| `%USERPROFILE%\.config\remote-harness-mcp\agent.log` | agent output, for when a silent autostart fails |
 
 ### Language
 
@@ -379,7 +379,7 @@ The visual installer starts in the language of your Windows language settings �
 - **"No gateway domain configured"** — this copy was not published with a domain. Pass one: use *Custom setup* in the wizard, or `.\install.ps1 -Gateway <shared-domain>`, or set `MESH_PUBLIC_URL`.
 - **Registration fails** — the installer stops *before* writing anything when the gateway cannot be reached. Check that the domain resolves, then retry with an explicit `-Gateway`.
 - **`python` opens the Microsoft Store** — that is the App Execution Alias, not an interpreter. Both installers resolve a real `python.exe` by full path and ignore the alias; the wizard never pins an alias into the autostart entry.
-- **The node does not come back after a reboot** — run `.\ops\doctor.ps1`: it prints the autostart interpreter, the heartbeat age, the last `agent.log` lines (including a torn final line) and the gateway's own view of this node. `.\ops\windows\agent-watchdog.ps1` performs that check once and restarts the agent; the scheduled task `AntigravityMeshWatchdog` runs it every five minutes, so a dead agent comes back on its own.
+- **The node does not come back after a reboot** — run `.\ops\doctor.ps1`: it prints the autostart interpreter, the heartbeat age, the last `agent.log` lines (including a torn final line) and the gateway's own view of this node. `.\ops\windows\agent-watchdog.ps1` performs that check once and restarts the agent; the scheduled task `RemoteHarnessMCPWatchdog` runs it every five minutes, so a dead agent comes back on its own.
 
 ### Standalone on Windows
 
@@ -412,7 +412,7 @@ What a phone changes, and how the installer handles it:
 | :--- | :--- |
 | **Packages** | `pkg` instead of `apt`, `python`/`python-pip` instead of `python3-pip`/`python3-venv` — a phone is never root and has no `sudo`. |
 | **Node name** | The device model (`Pixel 7 Pro` → `pixel7pro`): Android answers `localhost` to every app, and the gateway keeps one tunnel per name. |
-| **Domain file** | `~/.config/antigravity-mesh/domain.env` — there is no `/etc` to write to. The installer records the resolved shared domain there, so the phone's share links, its tunnel and the gateway name the same host (the built-in default is never recorded). |
+| **Domain file** | `~/.config/remote-harness-mcp/domain.env` — there is no `/etc` to write to. The installer records the resolved shared domain there, so the phone's share links, its tunnel and the gateway name the same host (the built-in default is never recorded). |
 | **Autostart** | A **runit** service (`termux-services`, the `Restart=always` equivalent) plus a **Termux:Boot** script that takes the wake lock after a reboot. |
 | **Clipboard** | `termux-clipboard-set` (Termux:API), so the MCP link goes straight into the Gemini app. |
 
@@ -429,9 +429,9 @@ resolve and says so before writing anything: see
 [docs/TERMUX.md](docs/TERMUX.md#private-gateway-tailscale--vpn).
 
 ```bash
-sv status agy-agent                       # is it up?
-sv restart agy-agent                      # restart now
-tail -f $PREFIX/var/log/sv/agy-agent/current
+sv status rhm-agent                       # is it up?
+sv restart rhm-agent                      # restart now
+tail -f $PREFIX/var/log/sv/rhm-agent/current
 ```
 
 `--mode=standalone` also works, but it serves `127.0.0.1` only — reachable from
@@ -447,32 +447,32 @@ way. You do not re-install anything by hand, and nothing unverified is installed
 - **It checks by itself.** A running agent asks the GitHub Releases API every 6
   hours (`MESH_UPDATE_CHECK_INTERVAL`), compares the tag with the version in
   `core/version.py` and installs what it finds. On Windows the daily
-  `AntigravityMeshUpdater` task does the same for a machine whose agent is not
+  `RemoteHarnessMCPUpdater` task does the same for a machine whose agent is not
   running. `MESH_UPDATE_AUTO=0` turns installing off and keeps reporting.
 - **It verifies before it installs.** The payload is downloaded, its SHA-256 is
   compared with the published checksum, and only then are `core/`, `skills/` and
   `ops/` replaced. No checksum, no update.
 - **It can always go back.** The replaced directories are saved under
-  `%USERPROFILE%\.config\antigravity-mesh\backups\<version>-<timestamp>\`, and an
+  `%USERPROFILE%\.config\remote-harness-mcp\backups\<version>-<timestamp>\`, and an
   update interrupted by a kill or a power cut is rolled back automatically on the
   next start.
 - **The node comes back new.** The agent is restarted through whatever supervises
-  it (the watchdog task on Windows, `systemctl --user restart agy-agent.service`,
+  it (the watchdog task on Windows, `systemctl --user restart rhm-agent.service`,
   `launchctl kickstart -k`) — or started directly when nothing supervises it.
 
 By hand, any time:
 
 ```powershell
-gemini-computer-use update -Check      # is a newer release published?
-gemini-computer-use update             # install it now and restart
-gemini-computer-use update -Check -Json
+remote-harness-mcp update -Check      # is a newer release published?
+remote-harness-mcp update             # install it now and restart
+remote-harness-mcp update -Check -Json
 ```
 
 From Gemini: ask the node to run `mesh_update` (`status`, then `check`, then
 `apply`).
 
 The state of the last check is in the heartbeat, so `ops/doctor.ps1` shows it, and
-the full history is in `%USERPROFILE%\.config\antigravity-mesh\update.log`.
+the full history is in `%USERPROFILE%\.config\remote-harness-mcp\update.log`.
 Configuration, exit codes, rollback and troubleshooting: [docs/UPDATES.md](docs/UPDATES.md).
 
 ---
@@ -492,7 +492,7 @@ Why: every extra hostname would need its own DNS record *and* its own SAN in the
 - The shared domain defaults to `smart-server.online`; override it with `./install.sh --domain=<shared-domain>` (node side) or `MESH_PUBLIC_URL` (gateway side).
 - Legacy per-device subdomain URLs still resolve for backwards compatibility and log a deprecation warning; set `MESH_LEGACY_SUBDOMAIN=0` on the gateway to reject them outright.
 - The installer now records the domain it resolved in the domain file, so the node's share links, its tunnel and the gateway all name the same host: `MESH_PUBLIC_URL=https://<shared-domain>` in `domain.env`, written in both install branches (standalone, and cloud-gateway/tunnel right after `agent.env`). The value is normalised first, the `__MESH_DOMAIN__` placeholder and an empty value are never written, the write is skipped when the file already names that host, and a file that cannot be written is not fatal — the installer prints the exact command to run by hand. The built-in default is never recorded at all: it is a fallback, not a configuration, and pinning it would stop `core/domain.py` from consulting the legacy `MESH_GATEWAY` at all, so a later change in `agent.env` would be silently ignored — nothing is lost, because with no file that same value is already the resolver's last fallback. `--dry-run` reports the file and the value it would write — including `not written (the built-in default is a fallback, not a configuration)` — and still changes nothing on disk.
-- Why this matters: share links are built by `core/domain.py`, whose chain is `MESH_PUBLIC_URL` → `AGY_PUBLIC_BASE_URL` → the domain file → the built-in default, and which deliberately never reads the legacy `MESH_GATEWAY` that `agent.env` carries (only `gateway_host()`, the tunnel host, does). A node installed the normal way — `agent.env` with `MESH_GATEWAY`/`MESH_USER`/`MESH_TOKEN` and no domain file — therefore dialled the right gateway while minting links on the built-in default. On an already-installed node, re-run the installer or write the one line by hand: `mkdir -p ~/.config/antigravity-mesh && echo 'MESH_PUBLIC_URL=https://<domain>' > ~/.config/antigravity-mesh/domain.env`, or the same with `sudo tee /etc/antigravity-mesh/domain.env` on Linux. Existing share links keep working; new ones use the configured domain.
+- Why this matters: share links are built by `core/domain.py`, whose chain is `MESH_PUBLIC_URL` → `AGY_PUBLIC_BASE_URL` → the domain file → the built-in default, and which deliberately never reads the legacy `MESH_GATEWAY` that `agent.env` carries (only `gateway_host()`, the tunnel host, does). A node installed the normal way — `agent.env` with `MESH_GATEWAY`/`MESH_USER`/`MESH_TOKEN` and no domain file — therefore dialled the right gateway while minting links on the built-in default. On an already-installed node, re-run the installer or write the one line by hand: `mkdir -p ~/.config/remote-harness-mcp && echo 'MESH_PUBLIC_URL=https://<domain>' > ~/.config/remote-harness-mcp/domain.env`, or the same with `sudo tee /etc/remote-harness-mcp/domain.env` on Linux. Existing share links keep working; new ones use the configured domain.
 - `MESH_DOMAIN_FILE` only overrides the *path*, and it belongs to the node's own configuration rather than to the installer invocation: keep it in `agent.env` (every `MESH_*` key there is exported to the node), or the domain is written into a file the node never reads. The installer creates the parent directory of whichever file is in effect. Over `--ssh=<host>` the domain resolved here is handed to the remote `install.sh` as `--domain=`, so the target records that host instead of re-resolving it (a repository copy still carrying the `__MESH_DOMAIN__` placeholder would otherwise fall back to the built-in default).
 
 ---
@@ -523,7 +523,7 @@ It verifies every upload with an sha256 manifest on the host, takes a timestampe
 
 > [!TIP]
 > **One place for the domain.** `MESH_PUBLIC_URL` in `domain.env`
-> (`/etc/antigravity-mesh/domain.env` on Linux, `%USERPROFILE%\.config\antigravity-mesh\domain.env`
+> (`/etc/remote-harness-mcp/domain.env` on Linux, `%USERPROFILE%\.config\remote-harness-mcp\domain.env`
 > on Windows) is the only setting that names it: the node, the gateway, the installers, the public
 > file links and the nginx vhosts all resolve it through `core/domain.py`. Switching domains is one
 > value plus `ops/nginx/render-domain.sh --apply` — see [docs/DOMAIN.md](docs/DOMAIN.md).
@@ -561,7 +561,7 @@ Legacy per-device SANs may still be present from before this contract. They are 
 ## 💡 Идея
 
 Gemini в браузере или на телефоне умеет разговаривать, но ничего не может *сделать* на вашем компьютере.
-**Gemini Computer Use** устраняет этот разрыв. Это бесплатный open-source сервер **Model Context Protocol (MCP)**, который подключается к **Gemini Spark** ([gemini.google.com/spark/apps](https://gemini.google.com/spark/apps) или мобильное приложение Gemini) одной ссылкой. После этого у Gemini появляются «руки»:
+**Remote Harness MCP** устраняет этот разрыв. Это бесплатный open-source сервер **Model Context Protocol (MCP)**, который подключается к **Gemini Spark** ([gemini.google.com/spark/apps](https://gemini.google.com/spark/apps) или мобильное приложение Gemini) одной ссылкой. После этого у Gemini появляются «руки»:
 
 - выполняет команды терминала, собирает и тестирует код, работает с git;
 - читает, создаёт и редактирует файлы;
@@ -718,7 +718,7 @@ Gemini Spark решает, останавливаться ли с вопросо
 | :--- | :--- | :--- |
 | `MESH_DEVICE` | `auto` | `auto` — ветка отвечает везде (различается только ответ), `0` — выключает ветку, `1` — включает принудительно. |
 | `MESH_DEVICE_ACTIONS` | пусто | Список разрешённых имён действий через запятую для `device_control`, `device_capture` и `device_messages`; пусто — все действия, реализованные сборкой. |
-| `MESH_DEVICE_CAPTURE_DIR` | общее хранилище телефона после `termux-setup-storage` (`~/storage/dcim/antigravity-mesh` или `~/storage/shared/AntigravityMesh`), иначе `~/.cache/antigravity-mesh/captures` | Куда пишутся фото и записи. |
+| `MESH_DEVICE_CAPTURE_DIR` | общее хранилище телефона после `termux-setup-storage` (`~/storage/dcim/remote-harness-mcp` или `~/storage/shared/RemoteHarnessMCP`), иначе `~/.cache/remote-harness-mcp/captures` | Куда пишутся фото и записи. |
 | `MESH_DEVICE_PIM` | `0` | `1` включает SMS, журнал вызовов, контакты и звонок. |
 | `MESH_DEVICE_QUICK` | `0` | `1` оставляет `system_info` мгновенным, пропуская сеть, камеры, микрофоны и датчики. |
 | `MESH_READ_ONLY` | `0` | `1` отказывает в каждом действии `device_control` и `device_capture`, а также блокирует `sms_send` и `call`. Это гарантия на стороне узла, не зависящая от диалога клиента. |
@@ -750,7 +750,7 @@ Gemini Spark решает, останавливаться ли с вопросо
 | `mesh_update(action, force, offline, restart)` | Сообщает, проверяет или устанавливает новую версию кода самого узла. `status` — локальное состояние (без сети), `check` — запрос к GitHub, `apply` — скачивает payload, проверяет опубликованный SHA-256, ставит с бэкапом для отката и перезапускает агент. |
 
 > [!TIP]
-> Узлы обновляются сами: работающий агент проверяет новые релизы в фоне (по умолчанию раз в 6 часов) и устанавливает найденное, а на Windows задача `AntigravityMeshUpdater` проверяет раз в сутки даже когда агент не запущен. `MESH_UPDATE_AUTO=0` переводит это в режим «только сообщать». Подробности, переменные окружения и откат: [docs/UPDATES.md](docs/UPDATES.md).
+> Узлы обновляются сами: работающий агент проверяет новые релизы в фоне (по умолчанию раз в 6 часов) и устанавливает найденное, а на Windows задача `RemoteHarnessMCPUpdater` проверяет раз в сутки даже когда агент не запущен. `MESH_UPDATE_AUTO=0` переводит это в режим «только сообщать». Подробности, переменные окружения и откат: [docs/UPDATES.md](docs/UPDATES.md).
 
 > [!TIP]
 > Gemini даёт одному вызову инструмента около 30 секунд. Всё, что дольше (сборки, бэкапы, загрузки), агент запускает через `run_job` и забирает результат через `job_output` — задачи не обрываются.
@@ -789,13 +789,13 @@ irm https://racknerd-5a24bf9.merino-carob.ts.net/install.ps1 | iex
 
 **📦 Node.js (любая ОС)**
 ```bash
-npx gemini-computer-use
+npx remote-harness-mcp
 ```
 
 **🛠️ Из исходников**
 ```bash
-git clone https://github.com/LevRa7/Computer-use-for-Gemini-App-Web.git
-cd Computer-use-for-Gemini-App-Web
+git clone https://github.com/LevRa7/remote-harness-mcp.git
+cd remote-harness-mcp
 ./install.sh --quick
 ```
 
@@ -880,18 +880,18 @@ https://racknerd-5a24bf9.merino-carob.ts.net/sse?user=<имя-вашего-уз�
 
 ### Готовый .exe установщика
 
-В релизе есть один собранный установщик — `AntigravityMesh-Setup-<версия>.exe`, для машин,
+В релизе есть один собранный установщик — `RemoteHarnessMCP-Setup-<версия>.exe`, для машин,
 где не хочется ничего клонировать:
 
 ```powershell
-.\AntigravityMesh-Setup-0.4.4.exe            # открыть визуальный установщик
-.\AntigravityMesh-Setup-0.4.4.exe -Lang ru   # начать на русском
-.\AntigravityMesh-Setup-0.4.4.exe -SelfTest  # самопроверка без окна, печатает JSON
-.\AntigravityMesh-Setup-0.4.4.exe --version  # показать версию
+.\RemoteHarnessMCP-Setup-0.4.4.exe            # открыть визуальный установщик
+.\RemoteHarnessMCP-Setup-0.4.4.exe -Lang ru   # начать на русском
+.\RemoteHarnessMCP-Setup-0.4.4.exe -SelfTest  # самопроверка без окна, печатает JSON
+.\RemoteHarnessMCP-Setup-0.4.4.exe --version  # показать версию
 ```
 
 Внутри него лежат мастер, `install.ps1`, `core/` и `install.sh`; он распаковывает их в
-`%LOCALAPPDATA%\AntigravityMesh\setup\<версия>` (можно переопределить переменной
+`%LOCALAPPDATA%\RemoteHarnessMCP\setup\<версия>` (можно переопределить переменной
 `MESH_SETUP_DIR`) и запускает мастера оттуда. Ему нужны только .NET Framework и
 PowerShell, которые в Windows уже есть, а собирается он из этого же репозитория скриптом
 `.\build-installer-exe.ps1` — без SDK, без NuGet и без сети.
@@ -915,10 +915,10 @@ PowerShell, которые в Windows уже есть, а собирается �
 
 | Путь | Что это |
 | :--- | :--- |
-| `%USERPROFILE%\.config\antigravity-mesh\agent.env` | `MESH_GATEWAY`, `MESH_USER`, `MESH_TOKEN` |
-| `%USERPROFILE%\.config\antigravity-mesh\domain.env` | `MESH_PUBLIC_URL` — разрешённый общий домен, чтобы ссылки узла, его туннель и шлюз называли один и тот же хост (не пишется, если настроено только встроенное значение по умолчанию) |
-| `…\Start Menu\Programs\Startup\antigravity-agent.vbs` | запись автозапуска, чтобы узел поднимался после перезагрузки |
-| `%USERPROFILE%\.config\antigravity-mesh\agent.log` | вывод агента — на случай, если автозапуск молча не сработал |
+| `%USERPROFILE%\.config\remote-harness-mcp\agent.env` | `MESH_GATEWAY`, `MESH_USER`, `MESH_TOKEN` |
+| `%USERPROFILE%\.config\remote-harness-mcp\domain.env` | `MESH_PUBLIC_URL` — разрешённый общий домен, чтобы ссылки узла, его туннель и шлюз называли один и тот же хост (не пишется, если настроено только встроенное значение по умолчанию) |
+| `…\Start Menu\Programs\Startup\rhm-agent.vbs` | запись автозапуска, чтобы узел поднимался после перезагрузки |
+| `%USERPROFILE%\.config\remote-harness-mcp\agent.log` | вывод агента — на случай, если автозапуск молча не сработал |
 
 ### Язык
 
@@ -929,7 +929,7 @@ PowerShell, которые в Windows уже есть, а собирается �
 - **«Домен шлюза не задан»** — эта копия не была опубликована с доменом. Укажите его: режим *«Кастомная настройка»* в мастере, либо `.\install.ps1 -Gateway <общий-домен>`, либо переменная `MESH_PUBLIC_URL`.
 - **Регистрация не проходит** — установщик останавливается **до** записи файлов, если шлюз недоступен. Проверьте, что домен разрешается, и повторите с явным `-Gateway`.
 - **`python` открывает Microsoft Store** — это заглушка App Execution Alias, а не интерпретатор. Оба установщика находят настоящий `python.exe` по полному пути; в автозапуск заглушка не попадает никогда.
-- **Узел не поднимается после перезагрузки** — запустите `.\ops\doctor.ps1`: он покажет интерпретатор из автозапуска, свежесть heartbeat, последние строки `agent.log` (включая оборванную) и то, что о узле думает шлюз. `.\ops\windows\agent-watchdog.ps1` выполняет ту же проверку один раз и поднимает агент; задача `AntigravityMeshWatchdog` повторяет её каждые пять минут, поэтому умерший агент поднимается сам.
+- **Узел не поднимается после перезагрузки** — запустите `.\ops\doctor.ps1`: он покажет интерпретатор из автозапуска, свежесть heartbeat, последние строки `agent.log` (включая оборванную) и то, что о узле думает шлюз. `.\ops\windows\agent-watchdog.ps1` выполняет ту же проверку один раз и поднимает агент; задача `RemoteHarnessMCPWatchdog` повторяет её каждые пять минут, поэтому умерший агент поднимается сам.
 
 ### Автономный режим на Windows
 
@@ -962,7 +962,7 @@ curl -fsSL https://racknerd-5a24bf9.merino-carob.ts.net/install.sh | bash
 | :--- | :--- |
 | **Пакеты** | `pkg` вместо `apt`, `python`/`python-pip` вместо `python3-pip`/`python3-venv`: на телефоне нет root и нет `sudo`. |
 | **Имя узла** | Модель устройства (`Pixel 7 Pro` → `pixel7pro`): Android отвечает `localhost` всем приложениям, а шлюз держит один туннель на имя. |
-| **Файл домена** | `~/.config/antigravity-mesh/domain.env` — писать в `/etc` некуда. Установщик записывает туда разрешённый общий домен, чтобы ссылки телефона, его туннель и шлюз называли один и тот же хост (встроенное значение по умолчанию не записывается). |
+| **Файл домена** | `~/.config/remote-harness-mcp/domain.env` — писать в `/etc` некуда. Установщик записывает туда разрешённый общий домен, чтобы ссылки телефона, его туннель и шлюз называли один и тот же хост (встроенное значение по умолчанию не записывается). |
 | **Автозапуск** | Служба **runit** (`termux-services`, аналог `Restart=always`) плюс скрипт **Termux:Boot**, который берёт wake lock после перезагрузки. |
 | **Буфер обмена** | `termux-clipboard-set` (Termux:API): ссылка MCP сразу вставляется в приложение Gemini. |
 
@@ -979,9 +979,9 @@ VPN, запись в DNS на ноутбуке) виден только там, 
 [docs/TERMUX.md](docs/TERMUX.md#10-приватный-шлюз-tailscale--vpn).
 
 ```bash
-sv status agy-agent                       # работает ли
-sv restart agy-agent                      # перезапустить
-tail -f $PREFIX/var/log/sv/agy-agent/current
+sv status rhm-agent                       # работает ли
+sv restart rhm-agent                      # перезапустить
+tail -f $PREFIX/var/log/sv/rhm-agent/current
 ```
 
 `--mode=standalone` тоже работает, но слушает только `127.0.0.1` — доступен лишь
@@ -999,32 +999,32 @@ tail -f $PREFIX/var/log/sv/agy-agent/current
 - **Узел проверяет сам.** Работающий агент раз в 6 часов
   (`MESH_UPDATE_CHECK_INTERVAL`) спрашивает GitHub Releases API, сравнивает тег с
   версией в `core/version.py` и ставит найденное. На Windows то же самое раз в
-  сутки делает задача `AntigravityMeshUpdater` — даже если агент не запущен.
+  сутки делает задача `RemoteHarnessMCPUpdater` — даже если агент не запущен.
   `MESH_UPDATE_AUTO=0` отключает установку, оставляя только уведомления.
 - **Сначала проверка, потом установка.** Payload скачивается, его SHA-256
   сравнивается с опубликованной контрольной суммой, и только затем заменяются
   `core/`, `skills/` и `ops/`. Нет суммы — нет обновления.
 - **Откат возможен всегда.** Заменённые каталоги сохраняются в
-  `%USERPROFILE%\.config\antigravity-mesh\backups\<версия>-<время>\`, а
+  `%USERPROFILE%\.config\remote-harness-mcp\backups\<версия>-<время>\`, а
   обновление, прерванное убийством процесса или отключением питания,
   откатывается автоматически при следующем запуске.
 - **Узел возвращается уже новым.** Агент перезапускается тем, что за ним
-  присматривает (задача-сторож на Windows, `systemctl --user restart agy-agent.service`,
+  присматривает (задача-сторож на Windows, `systemctl --user restart rhm-agent.service`,
   `launchctl kickstart -k`), а если надзора нет — запускается напрямую.
 
 Вручную, в любой момент:
 
 ```powershell
-gemini-computer-use update -Check      # вышел ли новый релиз?
-gemini-computer-use update             # установить сейчас и перезапустить
-gemini-computer-use update -Check -Json
+remote-harness-mcp update -Check      # вышел ли новый релиз?
+remote-harness-mcp update             # установить сейчас и перезапустить
+remote-harness-mcp update -Check -Json
 ```
 
 Из Gemini: попросите узел выполнить `mesh_update` (`status`, затем `check`, затем
 `apply`).
 
 Результат последней проверки попадает в heartbeat, поэтому его показывает
-`ops\doctor.ps1`, а полная история — в `%USERPROFILE%\.config\antigravity-mesh\update.log`.
+`ops\doctor.ps1`, а полная история — в `%USERPROFILE%\.config\remote-harness-mcp\update.log`.
 Настройки, коды выхода, откат и диагностика: [docs/UPDATES.md](docs/UPDATES.md).
 
 ---
@@ -1044,7 +1044,7 @@ gemini-computer-use update -Check -Json
 - Общий домен по умолчанию `smart-server.online`; переопределяется через `./install.sh --domain=<общий-домен>` (на стороне узла) или `MESH_PUBLIC_URL` (на стороне шлюза).
 - Старые ссылки с субдоменами устройства продолжают работать для совместимости и пишут предупреждение в лог; `MESH_LEGACY_SUBDOMAIN=0` на шлюзе отключает их.
 - Установщик теперь записывает разрешённый домен в файл домена, чтобы публичные ссылки узла, его туннель и шлюз называли один и тот же хост: `MESH_PUBLIC_URL=https://<общий-домен>` в `domain.env` — в обеих ветках установки (standalone и «облачный шлюз/туннель» сразу после `agent.env`). Значение сначала нормализуется, плейсхолдер `__MESH_DOMAIN__` и пустое значение не пишутся никогда, уже названный хост не переписывается, а неудачная запись не фатальна — установщик печатает точную команду для ручного запуска. Встроенное значение по умолчанию не записывается вообще: это запасной вариант, а не конфигурация, и закрепление его в файле заставило бы `core/domain.py` вовсе перестать смотреть на устаревший `MESH_GATEWAY`, так что позднейшая правка `agent.env` молча игнорировалась бы — потерь нет, потому что без файла то же значение и есть последний запасной вариант резолвера. Сухой прогон сообщает файл и значение, которое было бы записано, — включая `not written (the built-in default is a fallback, not a configuration)`, — и по-прежнему ничего не меняет на диске.
-- Зачем это нужно: ссылки на файлы строит `core/domain.py` по цепочке `MESH_PUBLIC_URL` → `AGY_PUBLIC_BASE_URL` → файл `domain.env` → встроенное значение по умолчанию, а устаревший `MESH_GATEWAY` из `agent.env` он намеренно не читает (его читает только `gateway_host()` — хост туннеля). Поэтому узел, поставленный обычным способом (`agent.env` с `MESH_GATEWAY`/`MESH_USER`/`MESH_TOKEN` и без файла домена), звонил на правильный шлюз, а ссылки публиковал на встроенном домене. На уже установленном узле: повторите установку или допишите одну строку вручную — `mkdir -p ~/.config/antigravity-mesh && echo 'MESH_PUBLIC_URL=https://<домен>' > ~/.config/antigravity-mesh/domain.env`, в Linux то же через `sudo tee /etc/antigravity-mesh/domain.env`. Уже выданные ссылки продолжают работать, новые берут настроенный домен.
+- Зачем это нужно: ссылки на файлы строит `core/domain.py` по цепочке `MESH_PUBLIC_URL` → `AGY_PUBLIC_BASE_URL` → файл `domain.env` → встроенное значение по умолчанию, а устаревший `MESH_GATEWAY` из `agent.env` он намеренно не читает (его читает только `gateway_host()` — хост туннеля). Поэтому узел, поставленный обычным способом (`agent.env` с `MESH_GATEWAY`/`MESH_USER`/`MESH_TOKEN` и без файла домена), звонил на правильный шлюз, а ссылки публиковал на встроенном домене. На уже установленном узле: повторите установку или допишите одну строку вручную — `mkdir -p ~/.config/remote-harness-mcp && echo 'MESH_PUBLIC_URL=https://<домен>' > ~/.config/remote-harness-mcp/domain.env`, в Linux то же через `sudo tee /etc/remote-harness-mcp/domain.env`. Уже выданные ссылки продолжают работать, новые берут настроенный домен.
 - `MESH_DOMAIN_FILE` переопределяет только *путь*, и задавать его нужно в конфигурации самого узла, а не в запуске установщика: держите его в `agent.env` (все ключи `MESH_*` оттуда экспортируются узлу), иначе домен окажется в файле, который узел никогда не прочитает. Каталог того файла, который реально используется, установщик создаёт сам. При `--ssh=<хост>` разрешённый здесь домен передаётся удалённому `install.sh` как `--domain=`, поэтому цель записывает именно этот хост, а не разрешает домен заново (копия из репозитория с плейсхолдером `__MESH_DOMAIN__` иначе ушла бы на встроенное значение).
 
 ---
@@ -1073,7 +1073,7 @@ MESH_GATEWAY_SSH=root@<ip-шлюза> ./deploy_gateway.sh --dry-run  # пред�
 
 > [!TIP]
 > **Домен задаётся в одном месте.** `MESH_PUBLIC_URL` в `domain.env`
-> (`/etc/antigravity-mesh/domain.env` в Linux, `%USERPROFILE%\.config\antigravity-mesh\domain.env`
+> (`/etc/remote-harness-mcp/domain.env` в Linux, `%USERPROFILE%\.config\remote-harness-mcp\domain.env`
 > в Windows) — единственная настройка, где он назван: узел, шлюз, установщики, публичные ссылки
 > на файлы и конфиги nginx берут его через `core/domain.py`. Смена домена — это одно значение и
 > `ops/nginx/render-domain.sh --apply`, подробности в [docs/DOMAIN.md](docs/DOMAIN.md).

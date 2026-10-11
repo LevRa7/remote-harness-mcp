@@ -84,9 +84,10 @@ import urllib.request
 import zipfile
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from core import paths
 from core import version as version_module
 
-logger = logging.getLogger("agy-updater")
+logger = logging.getLogger("rhm-updater")
 
 # ---------------------------------------------------------------------------
 # Identity
@@ -96,7 +97,7 @@ logger = logging.getLogger("agy-updater")
 REPO = version_module.REPO_SLUG
 
 API_ROOT = "https://api.github.com"
-USER_AGENT = "AntigravityMesh-Updater/%s (+https://github.com/%s)" % (
+USER_AGENT = "RemoteHarnessMCP-Updater/%s (+https://github.com/%s)" % (
     version_module.__version__, REPO)
 
 #: What an update replaces inside the install directory. Everything else in that
@@ -109,14 +110,18 @@ PAYLOAD_FILES: Tuple[str, ...] = ("package.json",)
 REQUIRED_PATHS: Tuple[str, ...] = (
     "core/agent.py",
     "core/mcp_tools.py",
+    "core/paths.py",
     "core/updater.py",
     "core/version.py",
     "core/__init__.py",
 )
 
-#: Names the release is expected to carry, newest format first.
+#: Names the release is expected to carry, newest format first. The pre-rename
+#: setup name stays accepted, so a release published before the rename is still
+#: installable by the new code.
 PAYLOAD_ASSET = "mesh-payload-%s.zip"
-SETUP_ASSET = "AntigravityMesh-Setup-%s.exe"
+SETUP_ASSET = "RemoteHarnessMCP-Setup-%s.exe"
+LEGACY_SETUP_ASSET = "AntigravityMesh-Setup-%s.exe"
 
 HTTP_TIMEOUT = 20.0
 DOWNLOAD_TIMEOUT = 120.0
@@ -128,15 +133,19 @@ MIN_CHECK_INTERVAL = 300
 #: After a failed apply, do not hammer the same release again immediately.
 APPLY_RETRY_BACKOFF = 60 * 60
 
-CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".config", "antigravity-mesh")
+CONFIG_DIR = paths.config_dir()
 STATE_FILE = os.path.join(CONFIG_DIR, "update.state.json")
 JOURNAL_FILE = os.path.join(CONFIG_DIR, "update.journal.json")
 LOG_FILE = os.path.join(CONFIG_DIR, "update.log")
 BACKUP_ROOT = os.path.join(CONFIG_DIR, "backups")
 HEARTBEAT_FILE = os.path.join(CONFIG_DIR, "agent.heartbeat")
 WATCHDOG = os.path.join("ops", "windows", "agent-watchdog.ps1")
-SYSTEMD_UNIT = "agy-agent.service"
-LAUNCHD_LABEL = "com.antigravity.mesh.agent"
+SYSTEMD_UNIT = "rhm-agent.service"
+#: Supervisor names from before the rename: an upgraded node keeps restarting
+#: through the unit/agent it already has installed.
+LEGACY_SYSTEMD_UNIT = "agy-agent.service"
+LAUNCHD_LABEL = "com.remoteharness.mcp.agent"
+LEGACY_LAUNCHD_LABEL = "com.antigravity.mesh.agent"
 
 _VERSION_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)(?:[-+]([0-9A-Za-z.\-]+))?$")
 _VERSION_LITERAL_RE = re.compile(r"^__version__\s*=\s*[\"']([^\"']+)[\"']", re.M)
@@ -558,8 +567,9 @@ def choose_asset(release: Dict[str, Any], *, platform: Optional[str] = None) -> 
 
     1. ``mesh-payload-<version>.zip`` - the node payload, built by the release
        workflow, verified with its published ``.sha256``;
-    2. ``AntigravityMesh-Setup-<version>.exe`` - the Windows setup, unpacked with
-       ``--unpack`` and applied from there (Windows only);
+    2. ``RemoteHarnessMCP-Setup-<version>.exe`` - the Windows setup, unpacked with
+       ``--unpack`` and applied from there (Windows only); the pre-rename
+       ``AntigravityMesh-Setup-<version>.exe`` is accepted as its alias;
     3. the release source archive - only when the operator allowed unverified
        payloads, because GitHub publishes no checksum for it.
     """
@@ -570,7 +580,8 @@ def choose_asset(release: Dict[str, Any], *, platform: Optional[str] = None) -> 
                 "url": payload["url"], "size": payload["size"], "verified": True}
     name = platform or ("windows" if os.name == "nt" else sys.platform)
     if name.startswith("win"):
-        setup = find_asset(release, SETUP_ASSET % version)
+        setup = find_asset(release, SETUP_ASSET % version) or find_asset(
+            release, LEGACY_SETUP_ASSET % version)
         if setup and setup.get("url"):
             return {"kind": "setup", "asset": setup, "name": setup["name"],
                     "url": setup["url"], "size": setup["size"], "verified": True}
@@ -767,7 +778,7 @@ _UNPACK_PATH_RE = re.compile(r"^unpacked\s+\S+\s+to\s+(.+?)\s*$", re.M)
 def _unpack_setup(exe_path: str, workdir: str, version: str = "") -> str:
     """Unpack a downloaded setup executable and return its payload root.
 
-    ``AntigravityMesh-Setup-<version>.exe --unpack`` prints
+    ``RemoteHarnessMCP-Setup-<version>.exe --unpack`` prints
     ``unpacked <version> to <path>`` and stops, which is the authoritative answer;
     the paths it defaults to are only used when that line cannot be parsed.
     """
@@ -1236,9 +1247,15 @@ def _restart_posix(install_dir: str, config: Dict[str, Any],
     started = time.time()
     home = os.path.expanduser("~")
     if sys.platform == "darwin":
-        plist = os.path.join(home, "Library", "LaunchAgents", LAUNCHD_LABEL + ".plist")
+        # A node installed before the rename is supervised by the legacy label.
+        label = LAUNCHD_LABEL
+        plist = os.path.join(home, "Library", "LaunchAgents", label + ".plist")
+        legacy_plist = os.path.join(home, "Library", "LaunchAgents", LEGACY_LAUNCHD_LABEL + ".plist")
+        if not os.path.isfile(plist) and os.path.isfile(legacy_plist):
+            label = LEGACY_LAUNCHD_LABEL
+            plist = legacy_plist
         if os.path.isfile(plist) and shutil.which("launchctl"):
-            target = "gui/%d/%s" % (os.getuid(), LAUNCHD_LABEL)
+            target = "gui/%d/%s" % (os.getuid(), label)
             code, output = _run_capture(["launchctl", "kickstart", "-k", target], timeout=60.0)
             if code == 0:
                 verified = wait_for_node(heartbeat, previous_pid=previous_pid,
@@ -1247,9 +1264,14 @@ def _restart_posix(install_dir: str, config: Dict[str, Any],
                     return {"ok": True, "method": "launchctl", "verified": True}
             return _start_agent_directly(install_dir, config)
         return _start_agent_directly(install_dir, config)
-    unit = os.path.join(home, ".config", "systemd", "user", SYSTEMD_UNIT)
+    unit_name = SYSTEMD_UNIT
+    unit = os.path.join(home, ".config", "systemd", "user", unit_name)
+    legacy_unit = os.path.join(home, ".config", "systemd", "user", LEGACY_SYSTEMD_UNIT)
+    if not os.path.isfile(unit) and os.path.isfile(legacy_unit):
+        unit_name = LEGACY_SYSTEMD_UNIT
+        unit = legacy_unit
     if os.path.isfile(unit) and shutil.which("systemctl"):
-        code, output = _run_capture(["systemctl", "--user", "restart", SYSTEMD_UNIT], timeout=60.0)
+        code, output = _run_capture(["systemctl", "--user", "restart", unit_name], timeout=60.0)
         if code == 0:
             verified = wait_for_node(heartbeat, previous_pid=previous_pid,
                                      after=started, timeout=45.0)
@@ -1257,7 +1279,7 @@ def _restart_posix(install_dir: str, config: Dict[str, Any],
                 return {"ok": True, "method": "systemctl", "verified": True}
         else:
             file_log("systemctl --user restart %s exited %d: %s"
-                     % (SYSTEMD_UNIT, code, output.strip()[-200:]),
+                     % (unit_name, code, output.strip()[-200:]),
                      str(config.get("log_file")))
     return _start_agent_directly(install_dir, config)
 
@@ -1648,7 +1670,7 @@ def _make_output_safe() -> None:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m core.updater",
-        description="Check for, download and apply Antigravity Mesh updates.")
+        description="Check for, download and apply Remote Harness MCP updates.")
     actions = parser.add_mutually_exclusive_group()
     actions.add_argument("--status", action="store_true",
                          help="report local state; no network, no changes")

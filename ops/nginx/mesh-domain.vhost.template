@@ -1,5 +1,5 @@
 # ==============================================================================
-#  Antigravity Mesh - the gateway's HTTPS vhost, as a template
+#  Remote Harness MCP - the gateway's HTTPS vhost, as a template
 #
 #  Rendered by ops/nginx/render-domain.sh, which takes the domain from the one
 #  place that declares it (MESH_PUBLIC_URL, the domain file, or core/domain.py).
@@ -41,7 +41,7 @@ server {
     ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
 
     # The installers, the node bootstrap payload and the public file shares.
-    include /etc/nginx/snippets/antigravity-mesh-mcp.conf;
+    include /etc/nginx/snippets/remote-harness-mcp.conf;
 
     # The MCP surface: SSE and Streamable HTTP stream, so buffering stays off.
     location / {

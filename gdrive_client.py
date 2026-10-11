@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-gdrive_client.py - Direct Python Google Drive API client for antigravity_tasks.json.
+gdrive_client.py - Direct Python Google Drive API client for rhm_tasks.json.
 Operates strictly inside the 'gemini-remote' folder on Google Drive.
 Uses exponential backoff and persistent HTTP requests to avoid rclone overhead and rate limits.
 """
@@ -21,7 +21,7 @@ TOKEN_FILE = BASE_DIR / "token.json"
 GEMINI_REMOTE_FOLDER_ID = "18A74X_2SEup7HkUh0oq5z8icYkRaAQYk"
 QUEUE_FILE_ID = "1yBlk4JchKHD88Gn7nnM2EJZRhx9CKucH"
 DEFAULT_FILE_ID = QUEUE_FILE_ID
-FILE_NAME = "antigravity_tasks.json"
+FILE_NAME = "rhm_tasks.json"
 
 DRIVE_API_BASE = "https://www.googleapis.com/drive/v3"
 DRIVE_UPLOAD_BASE = "https://www.googleapis.com/upload/drive/v3"
@@ -41,7 +41,7 @@ class GDriveClient:
         return self.token_file.exists()
 
     def find_all_queue_files(self, folder_id: str = GEMINI_REMOTE_FOLDER_ID, force: bool = False) -> list:
-        """Finds all antigravity_tasks.json file IDs inside gemini-remote folder with fast refresh."""
+        """Finds all rhm_tasks.json file IDs inside gemini-remote folder with fast refresh."""
         now = time.time()
         if not force and (now - self.last_folder_search < 5) and self.cached_file_ids:
             return self.cached_file_ids
@@ -129,7 +129,7 @@ class GDriveClient:
             return token
 
     def read_queue(self, file_id: str = QUEUE_FILE_ID, max_retries: int = 4) -> Tuple[Dict[str, Any], str]:
-        """Reads antigravity_tasks.json from Google Drive using direct API with backoff."""
+        """Reads rhm_tasks.json from Google Drive using direct API with backoff."""
         import random
         target_id = file_id or self.file_id
         for attempt in range(max_retries):

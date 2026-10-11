@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-#  Antigravity Mesh - Universal Turnkey Installer (v0.1.2)
+#  Remote Harness MCP - Universal Turnkey Installer (v0.1.2)
 #  Bilingual: English (Default) & Russian, Device Detection, SSH & Autostart
 #  Targets: Linux, macOS, Windows (Git Bash) and Android/Termux (phone/tablet)
 # ==============================================================================
@@ -35,8 +35,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
 #    2. MESH_PUBLIC_URL in the environment;
 #    3. AGY_PUBLIC_BASE_URL in the environment (legacy alias, same meaning);
 #    4. the domain file - MESH_DOMAIN_FILE when set, otherwise
-#       /etc/antigravity-mesh/domain.env, or on Windows/Git Bash
-#       %USERPROFILE%\.config\antigravity-mesh\domain.env;
+#       /etc/remote-harness-mcp/domain.env, or on Windows/Git Bash
+#       %USERPROFILE%\.config\remote-harness-mcp\domain.env;
 #    5. $PUBLISHED_DOMAIN - the domain this copy was published with. The repository
 #       carries the placeholder __MESH_DOMAIN__ here and deploy_gateway.sh rewrites
 #       that line while publishing, so a served copy already knows its domain;
@@ -96,15 +96,24 @@ if [ "$IS_TERMUX" = true ]; then
 fi
 
 case "$(uname -s 2>/dev/null)" in
-    MINGW*|MSYS*|CYGWIN*) DEFAULT_DOMAIN_DIR="${USERPROFILE:-$HOME}/.config/antigravity-mesh" ;;
-    *)                    DEFAULT_DOMAIN_DIR="/etc/antigravity-mesh" ;;
+    MINGW*|MSYS*|CYGWIN*) DEFAULT_DOMAIN_DIR="${USERPROFILE:-$HOME}/.config/remote-harness-mcp" ;;
+    *)                    DEFAULT_DOMAIN_DIR="/etc/remote-harness-mcp" ;;
 esac
 # A phone has no /etc and no root, so the per-user directory is the only place
 # that can hold the domain file there. core/domain.py answers the same question
 # in default_domain_file(), so the installer and the node never disagree about
 # where the domain lives.
 if [ "$IS_TERMUX" = true ]; then
-    DEFAULT_DOMAIN_DIR="$HOME/.config/antigravity-mesh"
+    DEFAULT_DOMAIN_DIR="$HOME/.config/remote-harness-mcp"
+fi
+# The project was renamed from "Antigravity Mesh": a host upgraded from that
+# version already has its domain file under the old directory name, and writing a
+# second, empty one would silently un-configure the node. The pre-rename
+# directory wins while it is the only one that exists - the same rule
+# core/paths.py applies for every other runtime directory.
+LEGACY_DOMAIN_DIR="${DEFAULT_DOMAIN_DIR%/*}/antigravity-mesh"
+if [ ! -d "$DEFAULT_DOMAIN_DIR" ] && [ -d "$LEGACY_DOMAIN_DIR" ]; then
+    DEFAULT_DOMAIN_DIR="$LEGACY_DOMAIN_DIR"
 fi
 DEFAULT_DOMAIN_FILE="${MESH_DOMAIN_FILE:-$DEFAULT_DOMAIN_DIR/domain.env}"
 
@@ -204,7 +213,7 @@ resolve_domain() {
 #  gateway it was actually registered on.
 #
 #  This script has already resolved the domain, so it writes it down here - the
-#  same thing deploy_gateway.sh does for /etc/antigravity-mesh/domain.env on the
+#  same thing deploy_gateway.sh does for /etc/remote-harness-mcp/domain.env on the
 #  gateway host. The place that decides the domain is then also the place that
 #  records it, and the node's links, its tunnel and the gateway agree by
 #  construction.
@@ -286,7 +295,13 @@ domain_required() {
     return 1
 }
 
-CONFIG_DIR="$HOME/.config/antigravity-mesh"
+CONFIG_DIR="$HOME/.config/remote-harness-mcp"
+# An upgraded node keeps the configuration directory its token and agent.env
+# already live in; core/paths.py resolves the same preference for the node itself.
+LEGACY_CONFIG_DIR="$HOME/.config/antigravity-mesh"
+if [ ! -d "$CONFIG_DIR" ] && [ -d "$LEGACY_CONFIG_DIR" ]; then
+    CONFIG_DIR="$LEGACY_CONFIG_DIR"
+fi
 CONFIG_FILE="$CONFIG_DIR/agent.env"
 
 # Colors
@@ -874,7 +889,7 @@ if [ ! -f "$SCRIPT_DIR/core/agent.py" ]; then
     # exists; arriving through wget, a copy-paste or an embedded runner does not.
     ensure_curl || exit 1
     require_gateway_dns || exit 1
-    BOOTSTRAP_DIR="$HOME/.gemini-computer-use"
+    BOOTSTRAP_DIR="$HOME/.remote-harness-mcp"
     mkdir -p "$BOOTSTRAP_DIR/core" "$BOOTSTRAP_DIR/skills"
     # EVERY module the node can import, not a hand-picked few: the list below used to
     # stop at the files that existed when it was written, and a fresh phone install
@@ -882,13 +897,14 @@ if [ ! -f "$SCRIPT_DIR/core/agent.py" ]; then
     # while the branch was advertised - the tool was there, its module was not.
     # tests/test_installer_bootstrap.py fails when a core module is missing here.
     for f in core/__init__.py core/agent.py core/agent_harness.py core/code_cache.py \
-             core/device.py core/domain.py core/hooks.py core/mcp_tools.py core/policies.py \
+             core/device.py core/domain.py core/hooks.py core/mcp_tools.py core/paths.py \
+             core/policies.py \
              core/redact.py core/schemas.py core/server.py core/subagents.py core/termux.py \
              core/triggers.py core/updater.py core/version.py core/vitals.py core/web_share.py \
              skills/orchestrator.md; do
         bootstrap_tmp="$BOOTSTRAP_DIR/${f}.part"
         if curl -fsSL "https://${GATEWAY}/${f}" -o "$bootstrap_tmp" 2>/dev/null \
-            || curl -fsSL "https://raw.githubusercontent.com/LevRa7/Computer-use-for-Gemini-App-Web/main/${f}" -o "$bootstrap_tmp" 2>/dev/null; then
+            || curl -fsSL "https://raw.githubusercontent.com/LevRa7/remote-harness-mcp/main/${f}" -o "$bootstrap_tmp" 2>/dev/null; then
             mv "$bootstrap_tmp" "$BOOTSTRAP_DIR/${f}"
         else
             rm -f "$bootstrap_tmp"
@@ -902,15 +918,15 @@ if [ ! -f "$SCRIPT_DIR/core/agent.py" ]; then
     if [ ! -f "$BOOTSTRAP_DIR/core/agent.py" ]; then
         if [ "$LANG_CHOICE" = "ru" ]; then
             echo -e "${RED}${BOLD}[ОШИБКА] Не удалось скачать код узла.${RESET}" >&2
-            echo -e "  Пробовали: ${CYAN}https://${GATEWAY}/core/agent.py${RESET} и ${CYAN}github.com/LevRa7/Computer-use-for-Gemini-App-Web${RESET}." >&2
+            echo -e "  Пробовали: ${CYAN}https://${GATEWAY}/core/agent.py${RESET} и ${CYAN}github.com/LevRa7/remote-harness-mcp${RESET}." >&2
             echo -e "  Проверьте сеть и DNS либо скопируйте репозиторий на устройство и запустите из него:" >&2
-            echo -e "    ${CYAN}git clone https://github.com/LevRa7/Computer-use-for-Gemini-App-Web.git && cd Computer-use-for-Gemini-App-Web && ./install.sh --quick${RESET}" >&2
+            echo -e "    ${CYAN}git clone https://github.com/LevRa7/remote-harness-mcp.git && cd remote-harness-mcp && ./install.sh --quick${RESET}" >&2
             echo -e "  ${YELLOW}Остановка: без кода узла запускать нечего, ничего не создано.${RESET}" >&2
         else
             echo -e "${RED}${BOLD}[ERROR] Could not download the node code.${RESET}" >&2
-            echo -e "  Tried: ${CYAN}https://${GATEWAY}/core/agent.py${RESET} and ${CYAN}github.com/LevRa7/Computer-use-for-Gemini-App-Web${RESET}." >&2
+            echo -e "  Tried: ${CYAN}https://${GATEWAY}/core/agent.py${RESET} and ${CYAN}github.com/LevRa7/remote-harness-mcp${RESET}." >&2
             echo -e "  Check the network and DNS, or put the repository on this device and install from it:" >&2
-            echo -e "    ${CYAN}git clone https://github.com/LevRa7/Computer-use-for-Gemini-App-Web.git && cd Computer-use-for-Gemini-App-Web && ./install.sh --quick${RESET}" >&2
+            echo -e "    ${CYAN}git clone https://github.com/LevRa7/remote-harness-mcp.git && cd remote-harness-mcp && ./install.sh --quick${RESET}" >&2
             echo -e "  ${YELLOW}Stopping: there is no node code to run, nothing was created.${RESET}" >&2
         fi
         echo ""
@@ -1176,7 +1192,7 @@ fi"
     # $PATH may not even contain $PREFIX/bin.
     cat << RUNNER_EOF > "$run_script"
 #!$TERMUX_PREFIX/bin/sh
-# Antigravity Mesh - $name launcher (written by install.sh; do not edit).
+# Remote Harness MCP - $name launcher (written by install.sh; do not edit).
 # Run this file to start the node by hand; docs/TERMUX.md documents the automatic
 # paths (runit service, Termux:Boot) and where the logs are.
 export PATH="$TERMUX_PREFIX/bin:/system/bin:\$PATH"
@@ -1230,7 +1246,7 @@ SV_EOF
     #    something is the Termux:Boot app.
     cat << BOOT_EOF > "$boot_script"
 #!$TERMUX_PREFIX/bin/sh
-# Antigravity Mesh - starts the $name node after the device boots (Termux:Boot).
+# Remote Harness MCP - starts the $name node after the device boots (Termux:Boot).
 #
 # Requirements, both of them outside this file (docs/TERMUX.md):
 #   * the Termux:Boot app (F-Droid), opened once so Android lets it run;
@@ -1346,9 +1362,66 @@ print_termux_hints() {
     fi
 }
 
+# ------------------------------------------------------------------------------
+#  Retire the pre-rename autostart entries.
+#
+#  This project was published as "Antigravity Mesh" and its supervisors were named
+#  agy-* (agy-agent.service, com.antigravity.mesh.agent, the runit service
+#  agy-agent, ~/.termux/boot/agy-agent.sh). Installing under the new names must not
+#  leave the old supervisor behind: two agents would share one tunnel, one config
+#  and one token, and would fight over them. Each legacy entry is stopped and
+#  removed, but only when it actually exists - a fresh machine has none of them,
+#  and no system-wide unit is ever touched.
+# ------------------------------------------------------------------------------
+retire_legacy_autostart() {
+    local legacy_units="agy-agent.service agy-standalone.service agy-gateway.service agy-watcher.service agy-mcp.service agy-webhook.service"
+    local unit unit_file
+    local home="${HOME:-}"
+    for unit in $legacy_units; do
+        unit_file="$home/.config/systemd/user/$unit"
+        if [ -f "$unit_file" ]; then
+            if command -v systemctl >/dev/null 2>&1; then
+                systemctl --user disable --now "$unit" >/dev/null 2>&1 || true
+                systemctl --user daemon-reload >/dev/null 2>&1 || true
+            fi
+            rm -f "$unit_file"
+            echo "  Retired the pre-rename service $unit."
+        fi
+    done
+
+    if [ "$(uname -s 2>/dev/null)" = "Darwin" ]; then
+        local label plist
+        for label in com.antigravity.mesh.agent com.antigravity.mesh.standalone; do
+            plist="$home/Library/LaunchAgents/$label.plist"
+            if [ -f "$plist" ]; then
+                command -v launchctl >/dev/null 2>&1 && \
+                    launchctl unload -w "$plist" >/dev/null 2>&1 || true
+                rm -f "$plist"
+                echo "  Retired the pre-rename launch agent $label."
+            fi
+        done
+    fi
+
+    if [ "$IS_TERMUX" = true ] && [ -n "$TERMUX_PREFIX" ]; then
+        local name svdir boot_script
+        for name in agy-agent agy-standalone; do
+            svdir="$TERMUX_PREFIX/var/service/$name"
+            boot_script="$home/.termux/boot/$name.sh"
+            if [ -d "$svdir" ] || [ -f "$boot_script" ]; then
+                if command -v sv >/dev/null 2>&1; then
+                    sv down "$name" >/dev/null 2>&1 || true
+                fi
+                rm -rf "$svdir"
+                rm -f "$boot_script" "$CONFIG_DIR/$name.sh"
+                echo "  Retired the pre-rename Termux service $name."
+            fi
+        done
+    fi
+}
+
 # Dry-run
 if [ "$DRY_RUN" = true ]; then
-    echo "[DRY-RUN] Simulating Antigravity Mesh installation..."
+    echo "[DRY-RUN] Simulating Remote Harness MCP installation..."
     echo "[DRY-RUN] Language: $LANG_CHOICE"
     echo "[DRY-RUN] Detected Host: $DETECTED_HOSTNAME ($DETECTED_TYPE)"
     echo "[DRY-RUN] Architecture: ${ARCH_LABEL:-$DETECTED_ARCH}"
@@ -1386,10 +1459,10 @@ fi
 # SSH Remote install branch
 if [ -n "$SSH_TARGET" ]; then
     if [ "$LANG_CHOICE" = "ru" ]; then
-        echo -e "${BOLD}${BLUE}=== Удаленная установка Antigravity Mesh через SSH ===${RESET}"
+        echo -e "${BOLD}${BLUE}=== Удаленная установка Remote Harness MCP через SSH ===${RESET}"
         echo -e "Целевой сервер: ${CYAN}${SSH_TARGET}${RESET} (порт: ${SSH_PORT})"
     else
-        echo -e "${BOLD}${BLUE}=== Remote Antigravity Mesh SSH Installation ===${RESET}"
+        echo -e "${BOLD}${BLUE}=== Remote Remote Harness MCP SSH Installation ===${RESET}"
         echo -e "Target Server: ${CYAN}${SSH_TARGET}${RESET} (port: ${SSH_PORT})"
     fi
 
@@ -1400,11 +1473,11 @@ if [ -n "$SSH_TARGET" ]; then
         SCP_BIN="sshpass -e $SCP_BIN"
     fi
 
-    $SSH_BIN -p "$SSH_PORT" "$SSH_TARGET" "mkdir -p ~/antigravity-mesh/core ~/antigravity-mesh/skills"
-    $SCP_BIN -P "$SSH_PORT" -r "$SCRIPT_DIR/core"/* "$SSH_TARGET:~/antigravity-mesh/core/"
-    $SCP_BIN -P "$SSH_PORT" "$SCRIPT_DIR/install.sh" "$SSH_TARGET:~/antigravity-mesh/"
+    $SSH_BIN -p "$SSH_PORT" "$SSH_TARGET" "mkdir -p ~/remote-harness-mcp/core ~/remote-harness-mcp/skills"
+    $SCP_BIN -P "$SSH_PORT" -r "$SCRIPT_DIR/core"/* "$SSH_TARGET:~/remote-harness-mcp/core/"
+    $SCP_BIN -P "$SSH_PORT" "$SCRIPT_DIR/install.sh" "$SSH_TARGET:~/remote-harness-mcp/"
     if [ -d "$SCRIPT_DIR/skills" ]; then
-        $SCP_BIN -P "$SSH_PORT" -r "$SCRIPT_DIR/skills"/* "$SSH_TARGET:~/antigravity-mesh/skills/" 2>/dev/null || true
+        $SCP_BIN -P "$SSH_PORT" -r "$SCRIPT_DIR/skills"/* "$SSH_TARGET:~/remote-harness-mcp/skills/" 2>/dev/null || true
     fi
     # The domain was resolved on THIS machine, so it is handed to the target: the
     # remote copy otherwise re-resolves from its own environment, and a repository
@@ -1414,7 +1487,7 @@ if [ -n "$SSH_TARGET" ]; then
     if [ -n "$GATEWAY" ] && [ "$GATEWAY" != "$DOMAIN_PLACEHOLDER" ]; then
         REMOTE_DOMAIN_ARG=" --domain=$GATEWAY"
     fi
-    $SSH_BIN -p "$SSH_PORT" "$SSH_TARGET" "cd ~/antigravity-mesh && bash install.sh --quick --lang=$LANG_CHOICE$REMOTE_DOMAIN_ARG"
+    $SSH_BIN -p "$SSH_PORT" "$SSH_TARGET" "cd ~/remote-harness-mcp && bash install.sh --quick --lang=$LANG_CHOICE$REMOTE_DOMAIN_ARG"
     exit 0
 fi
 
@@ -1493,6 +1566,10 @@ fi
 
 print_device_info
 
+# Before any new unit is created: stop and remove the pre-rename autostart entries
+# (see retire_legacy_autostart above).
+retire_legacy_autostart
+
 # ==============================================================================
 #  BRANCH: STANDALONE MODE
 # ==============================================================================
@@ -1556,14 +1633,14 @@ if [ "$MODE" = "standalone" ]; then
     if [ "$(uname -s)" = "Darwin" ]; then
         LAUNCH_AGENTS="$HOME/Library/LaunchAgents"
         mkdir -p "$LAUNCH_AGENTS"
-        PLIST_FILE="$LAUNCH_AGENTS/com.antigravity.mesh.standalone.plist"
+        PLIST_FILE="$LAUNCH_AGENTS/com.remoteharness.mcp.standalone.plist"
         cat << EOF > "$PLIST_FILE"
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.antigravity.mesh.standalone</string>
+    <string>com.remoteharness.mcp.standalone</string>
     <key>ProgramArguments</key>
     <array>
         <string>$PYTHON_BIN</string>
@@ -1590,14 +1667,14 @@ EOF
     elif [ "$IS_TERMUX" = true ]; then
         # Android: neither systemd nor launchd exists - runit inside Termux
         # supervises the server, and Termux:Boot brings it back after a reboot.
-        configure_termux_node "agy-standalone" "core.server" "--host 127.0.0.1 --port=$PORT" "$STANDALONE_ENV_FILE"
+        configure_termux_node "rhm-standalone" "core.server" "--host 127.0.0.1 --port=$PORT" "$STANDALONE_ENV_FILE"
     else
         USER_SYSTEMD_DIR="$HOME/.config/systemd/user"
         mkdir -p "$USER_SYSTEMD_DIR"
-        SERVICE_FILE="$USER_SYSTEMD_DIR/agy-standalone.service"
+        SERVICE_FILE="$USER_SYSTEMD_DIR/rhm-standalone.service"
         cat << EOF > "$SERVICE_FILE"
 [Unit]
-Description=Antigravity Mesh Local Standalone MCP Server
+Description=Remote Harness MCP Local Standalone MCP Server
 After=network.target
 
 [Service]
@@ -1612,7 +1689,7 @@ RestartSec=5
 WantedBy=default.target
 EOF
         systemctl --user daemon-reload 2>/dev/null || true
-        systemctl --user enable --now agy-standalone.service 2>/dev/null || {
+        systemctl --user enable --now rhm-standalone.service 2>/dev/null || {
             pkill -f "core.server" 2>/dev/null || true
             if [ -n "$TOKEN" ]; then
                 nohup env MESH_TOKEN="$TOKEN" $PYTHON_BIN -m core.server --host 127.0.0.1 --port="$PORT" > "$CONFIG_DIR/standalone.log" 2>&1 &
@@ -1642,24 +1719,24 @@ EOF
         if [ "$LANG_CHOICE" = "ru" ]; then
             echo -e "\033[1;31m[ОШИБКА] Standalone MCP-сервер не отвечает (HTTP ${HTTP_CODE:-нет ответа}): $HEALTH_URL\033[0m" >&2
             if [ "$IS_TERMUX" = true ]; then
-                echo -e "  Статус: ${CYAN}sv status agy-standalone${RESET} (runit, termux-services)" >&2
-                echo -e "  Логи:   ${CYAN}$TERMUX_PREFIX/var/log/sv/agy-standalone/current${RESET}" >&2
+                echo -e "  Статус: ${CYAN}sv status rhm-standalone${RESET} (runit, termux-services)" >&2
+                echo -e "  Логи:   ${CYAN}$TERMUX_PREFIX/var/log/sv/rhm-standalone/current${RESET}" >&2
                 echo -e "  Локальный сервер на телефоне доступен только внутри Termux (127.0.0.1):" >&2
                 echo -e "  для Gemini с телефона используйте режим туннеля (--mode=tunnel)." >&2
             else
-                echo -e "  Проверьте статус: ${CYAN}systemctl --user status agy-standalone.service${RESET}" >&2
-                echo -e "  Логи:             ${CYAN}journalctl --user -u agy-standalone.service -n 50 --no-pager${RESET}" >&2
+                echo -e "  Проверьте статус: ${CYAN}systemctl --user status rhm-standalone.service${RESET}" >&2
+                echo -e "  Логи:             ${CYAN}journalctl --user -u rhm-standalone.service -n 50 --no-pager${RESET}" >&2
             fi
         else
             echo -e "\033[1;31m[ERROR] Standalone MCP server is not responding (HTTP ${HTTP_CODE:-no response}): $HEALTH_URL\033[0m" >&2
             if [ "$IS_TERMUX" = true ]; then
-                echo -e "  Status: ${CYAN}sv status agy-standalone${RESET} (runit, termux-services)" >&2
-                echo -e "  Logs:   ${CYAN}$TERMUX_PREFIX/var/log/sv/agy-standalone/current${RESET}" >&2
+                echo -e "  Status: ${CYAN}sv status rhm-standalone${RESET} (runit, termux-services)" >&2
+                echo -e "  Logs:   ${CYAN}$TERMUX_PREFIX/var/log/sv/rhm-standalone/current${RESET}" >&2
                 echo -e "  A local server on a phone is reachable inside Termux only (127.0.0.1):" >&2
                 echo -e "  use --mode=tunnel to drive this phone from Gemini." >&2
             else
-                echo -e "  Check status: ${CYAN}systemctl --user status agy-standalone.service${RESET}" >&2
-                echo -e "  Logs:         ${CYAN}journalctl --user -u agy-standalone.service -n 50 --no-pager${RESET}" >&2
+                echo -e "  Check status: ${CYAN}systemctl --user status rhm-standalone.service${RESET}" >&2
+                echo -e "  Logs:         ${CYAN}journalctl --user -u rhm-standalone.service -n 50 --no-pager${RESET}" >&2
             fi
         fi
         exit 1
@@ -1723,7 +1800,7 @@ EOF
         echo ""
     fi
     if [ "$IS_TERMUX" = true ]; then
-        print_termux_hints "agy-standalone"
+        print_termux_hints "rhm-standalone"
     fi
     exit 0
 fi
@@ -1881,14 +1958,14 @@ fi
 if [ "$(uname -s)" = "Darwin" ]; then
     LAUNCH_AGENTS="$HOME/Library/LaunchAgents"
     mkdir -p "$LAUNCH_AGENTS"
-    PLIST_FILE="$LAUNCH_AGENTS/com.antigravity.mesh.agent.plist"
+    PLIST_FILE="$LAUNCH_AGENTS/com.remoteharness.mcp.agent.plist"
     cat << EOF > "$PLIST_FILE"
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.antigravity.mesh.agent</string>
+    <string>com.remoteharness.mcp.agent</string>
     <key>ProgramArguments</key>
     <array>
         <string>$PYTHON_BIN</string>
@@ -1918,13 +1995,13 @@ EOF
 elif [ "$IS_TERMUX" = true ]; then
     # Android: the tunnel node is supervised by runit inside Termux, and the
     # Termux:Boot entry brings it back after a reboot - see configure_termux_node.
-    configure_termux_node "agy-agent" "core.agent" "" "$CONFIG_FILE"
+    configure_termux_node "rhm-agent" "core.agent" "" "$CONFIG_FILE"
 else
     USER_SYSTEMD_DIR="$HOME/.config/systemd/user"
     mkdir -p "$USER_SYSTEMD_DIR"
-    cat << EOF > "$USER_SYSTEMD_DIR/agy-agent.service"
+    cat << EOF > "$USER_SYSTEMD_DIR/rhm-agent.service"
 [Unit]
-Description=Antigravity Mesh Reverse RPC Agent
+Description=Remote Harness MCP Reverse RPC Agent
 After=network.target
 
 [Service]
@@ -1939,7 +2016,7 @@ RestartSec=5
 WantedBy=default.target
 EOF
     systemctl --user daemon-reload 2>/dev/null || true
-    systemctl --user enable --now agy-agent.service 2>/dev/null || {
+    systemctl --user enable --now rhm-agent.service 2>/dev/null || {
         pkill -f "core.agent" 2>/dev/null || true
         nohup $PYTHON_BIN -m core.agent > "$CONFIG_DIR/agent.log" 2>&1 &
     }
@@ -2009,5 +2086,5 @@ fi
 # The phone-specific steps (Termux:Boot, battery optimisation, clipboard) are the
 # same in both modes; on a Linux/macOS/Windows node there is nothing to add.
 if [ "$IS_TERMUX" = true ]; then
-    print_termux_hints "agy-agent"
+    print_termux_hints "rhm-agent"
 fi
