@@ -1,4 +1,4 @@
-# 📱 Remote Harness MCP — control any PC from Gemini Spark (App & Web)
+# 📱 Remote Harness MCP — control any PC from Gemini (App & Web)
 
 > **An MCP server that turns Google Gemini from a chatbot into a full-fledged mobile agent.**
 > Type a task in the Gemini app on your phone — your PC, laptop or server executes it, and Gemini reports back with real results.
@@ -501,7 +501,7 @@ Why: every extra hostname would need its own DNS record *and* its own SAN in the
 
 ---
 
-## 🔒 Security
+## 🔒 SecurityWhoever has your MCP link can run commands on that machine. Treat it like a password: don't publish it, and reinstall the node to rotate the token if it leaks.
 
 - **Token-gated endpoints** — every request must carry the node's secret token.
 - **Outbound-only tunnel** — nodes never listen on public ports; the agent dials out to the gateway.
