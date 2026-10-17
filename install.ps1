@@ -899,8 +899,8 @@ if ($Lang -eq "ru") {
     Print-McpBox "ССЫЛКА ЛОКАЛЬНОГО MCP-СЕРВЕРА (СКОПИРУЙТЕ):" $LocalUrl $copyMsg
     Write-Host ""
     Write-Host " Куда вставлять ссылку в Google Gemini:" -ForegroundColor Yellow
-    Write-Host " 1. Откройте в браузере: https://gemini.google.com/spark/apps" -ForegroundColor Cyan
-    Write-Host " 2. Нажмите 'Добавить приложение' (Add app / Настройки MCP)"
+    Write-Host " 1. Откройте в браузере: https://gemini.google.com/customize/connectors" -ForegroundColor Cyan
+    Write-Host " 2. Нажмите 'Добавить коннектор' (Add connector) и задайте имя 'MyDevice'"
     Write-Host " 3. Вставьте скопированную ссылку в поле 'URL сервера' (Ctrl+V) и нажмите Подключить." -ForegroundColor White
     Write-Host ""
 } else {
@@ -909,8 +909,8 @@ if ($Lang -eq "ru") {
     Print-McpBox "LOCAL MCP SERVER URL (COPY THIS):" $LocalUrl $copyMsg
     Write-Host ""
     Write-Host " Where to paste this URL in Google Gemini:" -ForegroundColor Yellow
-    Write-Host " 1. Open in your browser: https://gemini.google.com/spark/apps" -ForegroundColor Cyan
-    Write-Host " 2. Click 'Add app' (or navigate to MCP settings)"
+    Write-Host " 1. Open in your browser: https://gemini.google.com/customize/connectors" -ForegroundColor Cyan
+    Write-Host " 2. Click 'Add connector' and name it 'MyDevice'"
     Write-Host " 3. Paste the URL into the 'Server URL' field (Ctrl+V) and click Connect." -ForegroundColor White
     Write-Host ""
 }
@@ -1264,8 +1264,8 @@ if ($Lang -eq "ru") {
     Print-McpBox "ССЫЛКА MCP-СЕРВЕРА ДЛЯ ПОДКЛЮЧЕНИЯ (СКОПИРУЙТЕ):" $SseUrl $copyMsg
     Write-Host ""
     Write-Host " Куда вставлять ссылку в Google Gemini:" -ForegroundColor Yellow
-    Write-Host " 1. Откройте в браузере: https://gemini.google.com/spark/apps" -ForegroundColor Cyan
-    Write-Host " 2. Нажмите 'Добавить приложение' (Add app / Настройки MCP)"
+    Write-Host " 1. Откройте в браузере: https://gemini.google.com/customize/connectors" -ForegroundColor Cyan
+    Write-Host " 2. Нажмите 'Добавить коннектор' (Add connector) и задайте имя 'MyDevice'"
     Write-Host " 3. Вставьте скопированную ссылку в поле 'URL сервера' (Ctrl+V) и нажмите Подключить." -ForegroundColor White
     Write-Host ""
 } else {
@@ -1274,8 +1274,8 @@ if ($Lang -eq "ru") {
     Print-McpBox "MCP SERVER URL (COPY THIS):" $SseUrl $copyMsg
     Write-Host ""
     Write-Host " Where to paste this URL in Google Gemini:" -ForegroundColor Yellow
-    Write-Host " 1. Open in your browser: https://gemini.google.com/spark/apps" -ForegroundColor Cyan
-    Write-Host " 2. Click 'Add app' (or navigate to MCP settings)"
+    Write-Host " 1. Open in your browser: https://gemini.google.com/customize/connectors" -ForegroundColor Cyan
+    Write-Host " 2. Click 'Add connector' and name it 'MyDevice'"
     Write-Host " 3. Paste the URL into the 'Server URL' field (Ctrl+V) and click Connect." -ForegroundColor White
     Write-Host ""
 }

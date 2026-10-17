@@ -6,6 +6,10 @@ rem  Double-click this file, or run it from a terminal. It only picks the
 rem  interpreter and keeps the window open when something goes wrong; all the
 rem  real work is in install-gui.ps1.
 rem
+rem  Where the wizard sends you at the end: the Gemini connectors page,
+rem  https://gemini.google.com/customize/connectors - add a connector named
+rem  "MyDevice" there and paste the MCP URL the installer printed.
+rem
 rem  Windows PowerShell 5.1 is used deliberately: it is present on every
 rem  supported Windows build, and it is the interpreter install.ps1 and the
 rem  repository tests target.
@@ -33,6 +37,11 @@ set "EXITCODE=%ERRORLEVEL%"
 if not "%EXITCODE%"=="0" (
     echo.
     echo The visual installer exited with code %EXITCODE%.
+    echo.
+    echo You can still connect by hand: open
+    echo   https://gemini.google.com/customize/connectors
+    echo add a connector named "MyDevice", then paste the MCP URL the installer
+    echo printed between the installer lines above.
     echo.
     pause
 )

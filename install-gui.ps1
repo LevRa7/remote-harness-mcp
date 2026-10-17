@@ -98,7 +98,7 @@ $AgentLogFile  = Join-Path $ConfigDir 'agent.log'
 $StartupDir    = [Environment]::GetFolderPath('Startup')
 $AutostartFile = Join-Path $StartupDir 'rhm-agent.vbs'
 
-$GeminiAppsUrl = 'https://gemini.google.com/spark/apps'
+$GeminiAppsUrl = 'https://gemini.google.com/customize/connectors'
 
 # The canonical shared-domain URL: one domain for every node, the node selected
 # by ?user=. This pattern only reads back the URL install.ps1 printed; it never
@@ -1133,8 +1133,8 @@ function Build-ResultPage {
 # ---- navigation --------------------------------------------------------------
 
 # Buttons grow with their label, so the footer is positioned from the right edge
-# instead of at fixed coordinates: "Open Gemini Apps" is far wider than "Next >",
-# and the Russian labels are wider still.
+# instead of at fixed coordinates: "Open Gemini Connectors" is far wider than
+# "Next >", and the Russian labels are wider still.
 function Format-FooterButtons {
     $right = $script:Form.ClientSize.Width - 16
     foreach ($button in @($script:BtnClose, $script:BtnPrimary, $script:BtnBack)) {

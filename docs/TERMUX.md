@@ -99,8 +99,8 @@ The installer prints the personal link and copies it to the clipboard:
 https://<shared-domain>/sse?user=<node-name>&token=<secret>
 ```
 
-Paste it at **[gemini.google.com/spark/apps](https://gemini.google.com/spark/apps)**
-→ **Add App** (or the Gemini app → **Settings → Tools / Extensions (MCP)**).
+Paste it at **[gemini.google.com/customize/connectors](https://gemini.google.com/customize/connectors)**
+→ **Add connector** and name it **MyDevice** (or the Gemini app → **Settings → Connectors**).
 
 To copy it again later:
 
@@ -452,9 +452,9 @@ termux-wake-lock
 https://<общий-домен>/sse?user=<имя-узла>&token=<секрет>
 ```
 
-Вставьте её на **[gemini.google.com/spark/apps](https://gemini.google.com/spark/apps)**
-→ **Добавить приложение** (или в приложении Gemini: **Настройки → Инструменты /
-Расширения (MCP)**).
+Вставьте её на **[gemini.google.com/customize/connectors](https://gemini.google.com/customize/connectors)**
+→ **Добавить коннектор** и задайте имя **MyDevice** (или в приложении Gemini:
+**Настройки → Коннекторы**).
 
 Скопировать ссылку позже:
 

@@ -10,7 +10,7 @@
 ## 💡 The idea
 
 Gemini in a browser or on a phone can talk, but it cannot *do* anything on your computer.
-**Remote Harness MCP** closes that gap. It is a free, open-source **Model Context Protocol (MCP)** server that you connect to **Gemini Spark** ([gemini.google.com/spark/apps](https://gemini.google.com/spark/apps) or the Gemini mobile app) with a single link. After that, Gemini gets hands:
+**Remote Harness MCP** closes that gap. It is a free, open-source **Model Context Protocol (MCP)** server that you connect to **Gemini Spark** ([gemini.google.com/customize/connectors](https://gemini.google.com/customize/connectors) or the Gemini mobile app) with a single link. After that, Gemini gets hands:
 
 - runs shell commands, builds and tests code, manages git;
 - reads, writes and edits files;
@@ -259,9 +259,9 @@ https://racknerd-5a24bf9.merino-carob.ts.net/sse?user=<your-node-name>&token=<yo
 
 ### 2. Connect it to Gemini Spark
 
-1. Open **[gemini.google.com/spark/apps](https://gemini.google.com/spark/apps)** in a browser or in the Gemini mobile app.
-2. Tap **Add App** (or **Settings ⚙️ → Tools / Extensions (MCP)**).
-3. Paste the link (**Ctrl+V**) and save.
+1. Open **[gemini.google.com/customize/connectors](https://gemini.google.com/customize/connectors)** in a browser or in the Gemini mobile app.
+2. Click **Add connector** (or **Settings ⚙️ → Connectors**) and name it **MyDevice**.
+3. Paste the link (**Ctrl+V**) into the **Server URL** field and click **Connect**.
 
 ### 3. Give it a task
 
@@ -338,10 +338,10 @@ The release also ships a single compiled installer, for machines where you would
 not clone or download anything else — `RemoteHarnessMCP-Setup-<version>.exe`:
 
 ```powershell
-.\RemoteHarnessMCP-Setup-0.4.4.exe            # open the visual installer
-.\RemoteHarnessMCP-Setup-0.4.4.exe -Lang ru   # start in Russian
-.\RemoteHarnessMCP-Setup-0.4.4.exe -SelfTest  # headless self-check, prints JSON
-.\RemoteHarnessMCP-Setup-0.4.4.exe --version  # print the version
+.\RemoteHarnessMCP-Setup-0.4.5.exe            # open the visual installer
+.\RemoteHarnessMCP-Setup-0.4.5.exe -Lang ru   # start in Russian
+.\RemoteHarnessMCP-Setup-0.4.5.exe -SelfTest  # headless self-check, prints JSON
+.\RemoteHarnessMCP-Setup-0.4.5.exe --version  # print the version
 ```
 
 It carries the wizard, `install.ps1`, `core/` and `install.sh` inside itself, unpacks them

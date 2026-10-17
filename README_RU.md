@@ -10,7 +10,7 @@
 ## 💡 Идея
 
 Gemini в браузере или на телефоне умеет разговаривать, но ничего не может *сделать* на вашем компьютере.
-**Remote Harness MCP** устраняет этот разрыв. Это бесплатный open-source сервер **Model Context Protocol (MCP)**, который подключается к **Gemini Spark** ([gemini.google.com/spark/apps](https://gemini.google.com/spark/apps) или мобильное приложение Gemini) одной ссылкой. После этого у Gemini появляются «руки»:
+**Remote Harness MCP** устраняет этот разрыв. Это бесплатный open-source сервер **Model Context Protocol (MCP)**, который подключается к **Gemini Spark** ([gemini.google.com/customize/connectors](https://gemini.google.com/customize/connectors) или мобильное приложение Gemini) одной ссылкой. После этого у Gemini появляются «руки»:
 
 - выполняет команды терминала, собирает и тестирует код, работает с git;
 - читает, создаёт и редактирует файлы;
@@ -259,9 +259,9 @@ https://racknerd-5a24bf9.merino-carob.ts.net/sse?user=<имя-вашего-уз�
 
 ### 2. Подключите её к Gemini Spark
 
-1. Откройте **[gemini.google.com/spark/apps](https://gemini.google.com/spark/apps)** в браузере или в мобильном приложении Gemini.
-2. Нажмите **Добавить приложение** (или **Настройки ⚙️ → Инструменты / Расширения (MCP)**).
-3. Вставьте ссылку (**Ctrl+V**) и сохраните.
+1. Откройте **[gemini.google.com/customize/connectors](https://gemini.google.com/customize/connectors)** в браузере или в мобильном приложении Gemini.
+2. Нажмите **Добавить коннектор** (или **Настройки ⚙️ → Коннекторы**) и задайте имя **MyDevice**.
+3. Вставьте ссылку (**Ctrl+V**) в поле **URL сервера** и нажмите **Подключить**.
 
 ### 3. Дайте задачу
 
@@ -337,10 +337,10 @@ https://racknerd-5a24bf9.merino-carob.ts.net/sse?user=<имя-вашего-уз�
 где не хочется ничего клонировать:
 
 ```powershell
-.\RemoteHarnessMCP-Setup-0.4.4.exe            # открыть визуальный установщик
-.\RemoteHarnessMCP-Setup-0.4.4.exe -Lang ru   # начать на русском
-.\RemoteHarnessMCP-Setup-0.4.4.exe -SelfTest  # самопроверка без окна, печатает JSON
-.\RemoteHarnessMCP-Setup-0.4.4.exe --version  # показать версию
+.\RemoteHarnessMCP-Setup-0.4.5.exe            # открыть визуальный установщик
+.\RemoteHarnessMCP-Setup-0.4.5.exe -Lang ru   # начать на русском
+.\RemoteHarnessMCP-Setup-0.4.5.exe -SelfTest  # самопроверка без окна, печатает JSON
+.\RemoteHarnessMCP-Setup-0.4.5.exe --version  # показать версию
 ```
 
 Внутри него лежат мастер, `install.ps1`, `core/` и `install.sh`; он распаковывает их в
