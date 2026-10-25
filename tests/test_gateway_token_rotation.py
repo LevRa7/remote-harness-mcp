@@ -187,3 +187,26 @@ def test_a_rotation_also_drops_legacy_plaintext_credentials():
     assert "token" not in entry
     assert "allow_legacy_query" not in entry
     assert entry["token_sha256"] == gateway.hash_secret("brand-new-token")
+
+
+def test_rotating_the_link_key_does_not_touch_the_legacy_token_url():
+    """Two credentials, two rotations: retiring a leaked LINK must not also
+    invalidate the device-token URL the node was installed with (that is what
+    the user would experience as "the reinstall broke my connector")."""
+    gateway.save_registry({"old-node": {
+        "token": "legacy-token",
+        "allow_legacy_query": True,
+        "link_key": "lk_" + "0" * 32,
+    }})
+
+    response = asyncio.run(gateway.device_rotate(_request(
+        method="POST",
+        path_params={"user": "old-node"},
+        headers={"Authorization": "Bearer legacy-token"},
+    )))
+
+    assert response.status_code == 200
+    assert json.loads(response.body)["link_key"] != "lk_" + "0" * 32
+    ok, _message, _user = gateway.verify_token(_request("?user=old-node&token=legacy-token"))
+    assert ok is True
+    assert _registry()["old-node"].get("allow_legacy_query") is True

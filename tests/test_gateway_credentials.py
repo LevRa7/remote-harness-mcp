@@ -297,6 +297,34 @@ def test_a_pre_0_4_6_registry_entry_still_authenticates():
     assert ok_header is True
 
 
+def test_reinstalling_a_legacy_node_keeps_its_existing_url_working():
+    """Re-running the installer must not break the connector already configured.
+
+    A pre-0.4.6 node is re-registered with the token it already has: the token is
+    unchanged (the gateway echoes the one that was proved), the entry is upgraded
+    to a link key, and BOTH URLs keep working - the new `lk_` one the installer
+    prints and the old one already pasted into Gemini. Killing the old one here
+    was the silent breakage this test exists to prevent; `rotate-token` is what
+    ends it, deliberately.
+    """
+    gateway.save_registry({"old-node": {"token": "legacy-token", "created_at": "2025-01-01"}})
+
+    again = _register("old-node", token="legacy-token")
+
+    assert again["status_code"] == 200
+    assert again["reused"] is True
+    assert again["token"] == "legacy-token", "a reinstall must not mint a new token"
+
+    entry = _registry()["old-node"]
+    assert "token" not in entry, "the plaintext token is replaced by its hash"
+    assert entry["token_sha256"] == gateway.hash_secret("legacy-token")
+
+    old_url, _m, _u = gateway.verify_token(_request("?user=old-node&token=legacy-token"))
+    new_url, _m, _u = gateway.verify_token(_request(f"?user=old-node&token={again['link_key']}"))
+    assert old_url is True, "the URL already configured in the client keeps working"
+    assert new_url is True, "and the link-key URL the installer printed works too"
+
+
 def test_access_log_records_are_scrubbed():
     record = logging.LogRecord(
         "uvicorn.access", logging.INFO, __file__, 1,

@@ -837,18 +837,18 @@ async def api_register(request: Request):
             entry["arch"] = clean_arch
         entry["last_seen"] = now_iso
         if not entry.get("link_key"):
-            # Upgrade a pre-0.4.6 node: give it a rotatable link key. Its old URL
-            # keeps working for the transition, because killing it here would
-            # disconnect a client that was configured months ago.
+            # Upgrade a pre-0.4.6 node: give it a rotatable link key, so the
+            # installer can hand out a URL whose credential is revocable.
             entry["link_key"] = new_link_key()
-            if entry.get("token"):
-                entry["allow_legacy_query"] = True
         if entry.get("token") and supplied and token_matches_device(entry, supplied):
-            # Move the device token off plaintext storage as well.
+            # Move the device token off plaintext storage. The credential the
+            # node was installed with keeps working in the query string until an
+            # explicit token rotation (promote_device_token clears the flag):
+            # re-running the installer or the updater must not silently break a
+            # connector that was pasted into Gemini months ago.
             entry["token_sha256"] = hash_secret(supplied)
             entry.pop("token", None)
-            if entry.get("allow_legacy_query"):
-                entry["allow_legacy_query"] = False
+            entry["allow_legacy_query"] = True
 
     save_registry(registry)
     if created:
@@ -1041,8 +1041,16 @@ async def device_rotate(request: Request):
     if not (admin_authorised(request) or token_matches_device(entry, supplied)):
         return JSONResponse({"error": "forbidden"}, status_code=403)
     entry["link_key"] = new_link_key()
-    entry.pop("token", None)                 # plaintext is never kept after a rotate
-    entry.pop("allow_legacy_query", None)
+    if entry.get("token"):
+        # Move a pre-0.4.6 plaintext token to its hash before dropping it: the
+        # credential must keep verifying, or rotating the link key would also
+        # invalidate the device-token URL this node was installed with.
+        entry["token_sha256"] = hash_secret(entry["token"])
+        entry.pop("token", None)
+    # `allow_legacy_query` deliberately survives: rotating the LINK key retires
+    # the URL that carried it, and it is not a reason to also invalidate the
+    # device-token URL such a node was originally installed with. Ending that one
+    # is `rotate-token`'s job, after the node has the replacement.
     save_registry(registry)
     logger.info("Link key rotated for '%s'", user)
     return JSONResponse({

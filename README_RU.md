@@ -361,10 +361,10 @@ https://racknerd-5a24bf9.merino-carob.ts.net/sse?user=<имя-вашего-уз�
 где не хочется ничего клонировать:
 
 ```powershell
-.\RemoteHarnessMCP-Setup-0.4.7.exe            # открыть визуальный установщик
-.\RemoteHarnessMCP-Setup-0.4.7.exe -Lang ru   # начать на русском
-.\RemoteHarnessMCP-Setup-0.4.7.exe -SelfTest  # самопроверка без окна, печатает JSON
-.\RemoteHarnessMCP-Setup-0.4.7.exe --version  # показать версию
+.\RemoteHarnessMCP-Setup-0.4.8.exe            # открыть визуальный установщик
+.\RemoteHarnessMCP-Setup-0.4.8.exe -Lang ru   # начать на русском
+.\RemoteHarnessMCP-Setup-0.4.8.exe -SelfTest  # самопроверка без окна, печатает JSON
+.\RemoteHarnessMCP-Setup-0.4.8.exe --version  # показать версию
 ```
 
 Внутри него лежат мастер, `install.ps1`, `core/` и `install.sh`; он распаковывает их в
