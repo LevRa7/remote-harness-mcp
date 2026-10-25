@@ -47,6 +47,30 @@ No SSH client, no terminal on your phone, no VPN — only a chat.
 
 ---
 
+## 📸 In action
+
+Three exchanges from one chat, each answered by a different machine on the other
+side of the bridge. The phone never opened a terminal.
+
+**The laptop describes itself** — *"@Rem Matebook-deb, give me the system and hardware specs"*:
+
+![Gemini listing a laptop's CPU, GPU, disks and memory, read from the node itself](docs/screenshots/01-hardware.png)
+
+**The phone reports its own battery, radio and VPN** — *"@Rem Phone, check"*.
+The SSID and both addresses are mosaicked; everything else came from `device_info`:
+
+![Gemini reporting battery, Wi-Fi signal, LTE status, VPN and CPU temperature of an Android phone](docs/screenshots/02-phone.png)
+
+**The desktop is photographed, published and read back** — *"take a screenshot of @RemMatebook-deb"*,
+then *"describe what is running on the screens"*:
+
+![Gemini capturing a 8086x2880 desktop, publishing it as a file and describing both monitors](docs/screenshots/03-screen-capture.png)
+
+Every answer was produced by `system_vitals`, `device_info`, `device_capture` and
+`share_file` running on the node itself — the model only ever saw tool results.
+
+---
+
 ## ✨ Why it works this way
 
 | | |
