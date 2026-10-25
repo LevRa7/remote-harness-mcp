@@ -362,10 +362,10 @@ The release also ships a single compiled installer, for machines where you would
 not clone or download anything else — `RemoteHarnessMCP-Setup-<version>.exe`:
 
 ```powershell
-.\RemoteHarnessMCP-Setup-0.4.6.exe            # open the visual installer
-.\RemoteHarnessMCP-Setup-0.4.6.exe -Lang ru   # start in Russian
-.\RemoteHarnessMCP-Setup-0.4.6.exe -SelfTest  # headless self-check, prints JSON
-.\RemoteHarnessMCP-Setup-0.4.6.exe --version  # print the version
+.\RemoteHarnessMCP-Setup-0.4.7.exe            # open the visual installer
+.\RemoteHarnessMCP-Setup-0.4.7.exe -Lang ru   # start in Russian
+.\RemoteHarnessMCP-Setup-0.4.7.exe -SelfTest  # headless self-check, prints JSON
+.\RemoteHarnessMCP-Setup-0.4.7.exe --version  # print the version
 ```
 
 It carries the wizard, `install.ps1`, `core/` and `install.sh` inside itself, unpacks them
@@ -529,6 +529,7 @@ Why: every extra hostname would need its own DNS record *and* its own SAN in the
 
 - **Two credentials per node** — the *device token* opens the tunnel and is accepted only in an `Authorization: Bearer` header; the *link key* (`lk_…`) is the only credential allowed in a URL. The device token in a query string is rejected with HTTP 401.
 - **Link keys rotate** — `POST /v1/devices/<node>/rotate` issues a new link key and kills the old URL; `POST /v1/devices/<node>/revoke` removes the node. Neither needs a reinstall.
+- **The device token rotates too** — `remote-harness-mcp rotate` (or `python -m core.rekey` from the install directory) asks the gateway for a new token, writes it into `agent.env`, the launchd plist on macOS and the Startup launcher on Windows, restarts the supervisor (systemd / launchd / Scheduled Task / runit) and waits for the node to report online. The previous token keeps working until the node connects with the new one, so a failed restart restores the old token instead of locking the machine out. `POST /v1/devices/<node>/rotate-token/finish` retires it immediately when the old token is known to be in someone else's hands.
 - **Enrolment** — `/api/register` refuses to hand a token to a request that only knows a name or a MAC address; possession of the device token is required to reuse a registration. Set `MESH_REGISTER_MODE=pair` (with `MESH_ADMIN_TOKEN`) to replace self-registration entirely with the pairing flow: `POST /v1/devices/pair` → approve the code → collect the credentials.
 - **Outbound-only tunnel** — nodes never listen on public ports; the agent dials out to the gateway.
 - **Gateway is a relay** — it terminates TLS and forwards calls; commands run only on your node.

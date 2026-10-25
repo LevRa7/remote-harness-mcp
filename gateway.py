@@ -456,6 +456,41 @@ def get_target_user(request: Request) -> str:
 
     return "anonymous"
 
+def token_matches_next(entry: dict, token: str) -> bool:
+    """True when *token* is the new device token a rotation handed out.
+
+    A rotated token has to work BEFORE the node has restarted, otherwise the
+    rotation cannot be completed: the node would write a token the gateway
+    rejects and lose the tunnel. It therefore lives beside the current one until
+    the node proves it can use it (see ``promote_device_token``), which is the
+    moment the old token stops being accepted.
+    """
+    stored = str(entry.get("token_next_sha256") or "")
+    return bool(stored) and bool(token) and tokens_equal(hash_secret(token), stored)
+
+
+def promote_device_token(user: str, registry: dict, entry: dict) -> bool:
+    """Make the pending token current and kill every older credential.
+
+    Called when a tunnel authenticates with the pending token: the node has just
+    demonstrated that its configuration holds the new secret, so the old token -
+    the one that may have leaked - is retired here, and not a moment earlier.
+    """
+    pending = str(entry.get("token_next_sha256") or "")
+    if not pending:
+        return False
+    entry["token_sha256"] = pending
+    entry.pop("token_next_sha256", None)
+    entry.pop("token_rotated_at", None)
+    # A pre-0.4.6 plaintext token and the legacy-query allowance must not
+    # survive a rotation: that is the whole point of rotating.
+    entry.pop("token", None)
+    entry.pop("allow_legacy_query", None)
+    save_registry(registry)
+    logger.info("Device token rotated for '%s'; the previous token is now invalid", user)
+    return True
+
+
 def verify_token(request: Request) -> tuple[bool, str, str]:
     user = get_target_user(request)
     if user == "anonymous":
@@ -471,7 +506,9 @@ def verify_token(request: Request) -> tuple[bool, str, str]:
     if not token:
         return False, credential_denial(entry, source), user
     if source == "header":
-        ok = token_matches_device(entry, token) or token_matches_link(entry, token)
+        ok = (token_matches_device(entry, token)
+              or token_matches_next(entry, token)
+              or token_matches_link(entry, token))
     else:
         # A URL is not a private channel: it is logged by the proxy, kept in
         # browser history, forwarded in Referer and stored in a third-party
@@ -1014,6 +1051,72 @@ async def device_rotate(request: Request):
         "link_key": entry["link_key"],
         "sse_url": node_mcp_url(user, entry["link_key"]),
         "message": "The previous URL no longer works. Update the client connector.",
+    })
+
+
+async def device_rotate_token(request: Request):
+    """Issue a new DEVICE TOKEN for a node (admin, or the node itself).
+
+    The old token keeps working until the node opens a tunnel with the new one
+    (``promote_device_token``). That order matters: a rotation which invalidates
+    the credential before the machine could store its replacement locks the node
+    out of its own gateway, and the recovery for that is a reinstall - exactly
+    what this endpoint exists to avoid. The response therefore carries the token
+    exactly once and the caller must persist it.
+    """
+    user = (request.path_params.get("user") or "").lower()
+    registry = load_registry()
+    entry = registry.get(user)
+    if entry is None:
+        return JSONResponse({"error": "unknown_node"}, status_code=404)
+    supplied, _source = request_credential(request)
+    if not (admin_authorised(request) or token_matches_device(entry, supplied)):
+        return JSONResponse({
+            "error": "forbidden",
+            "message": "Rotating a device token needs the node's current token or an admin token.",
+        }, status_code=403)
+
+    token = new_device_token()
+    entry["token_next_sha256"] = hash_secret(token)
+    entry["token_rotated_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    save_registry(registry)
+    logger.warning("Device token rotation requested for '%s' (pending until the node reconnects)", user)
+    return JSONResponse({
+        "status": "rotation_pending",
+        "username": user,
+        "token": token,
+        "gateway": PUBLIC_HOST,
+        "tunnel_url": f"wss://{PUBLIC_HOST}/ws/tunnel?user={user}",
+        "note": (
+            "Store this token in the node's configuration and restart the agent. The "
+            "previous token stops working as soon as the node connects with this one."
+        ),
+    })
+
+
+async def device_rotate_token_finish(request: Request):
+    """Retire the previous device token immediately, without waiting for the node.
+
+    For an operator who knows the leaked credential is in someone else's hands: the
+    node will have to be fixed by hand, but the stolen token dies now.
+    """
+    user = (request.path_params.get("user") or "").lower()
+    registry = load_registry()
+    entry = registry.get(user)
+    if entry is None:
+        return JSONResponse({"error": "unknown_node"}, status_code=404)
+    supplied, _source = request_credential(request)
+    if not (admin_authorised(request)
+            or token_matches_device(entry, supplied)
+            or token_matches_next(entry, supplied)):
+        return JSONResponse({"error": "forbidden"}, status_code=403)
+    if not entry.get("token_next_sha256"):
+        return JSONResponse({"error": "no_rotation_pending"}, status_code=409)
+    promote_device_token(user, registry, entry)
+    return JSONResponse({
+        "status": "rotated",
+        "username": user,
+        "message": "The previous device token is now invalid.",
     })
 
 
@@ -2427,9 +2530,16 @@ async def ws_tunnel_endpoint(websocket: WebSocket):
             header = auth[7:].strip()
     token = header or query.get("token", "")
 
-    if entry is None or not token_matches_device(entry, token):
+    if entry is None or not (token_matches_device(entry, token) or token_matches_next(entry, token)):
         await websocket.close(code=4001, reason="Unauthorized")
         return
+    # A tunnel that presents the pending token is the node saying "my config holds
+    # the new secret now": that is the moment the rotation completes and the old
+    # token dies. Doing it here, rather than when the rotation was requested,
+    # means a node that fails to restart keeps a working tunnel instead of
+    # becoming unreachable.
+    if token_matches_next(entry, token) and not token_matches_device(entry, token):
+        promote_device_token(user, registry, entry)
     if not header:
         logger.warning(
             "Agent '%s' opened its tunnel with ?token= in the URL; update the node "
@@ -3246,6 +3356,8 @@ routes = [
     Route("/v1/devices/pair/{code}", device_pair_status, methods=["GET", "OPTIONS"]),
     Route("/v1/devices/pair/{code}/approve", device_pair_approve, methods=["POST", "OPTIONS"]),
     Route("/v1/devices/{user}/rotate", device_rotate, methods=["POST", "OPTIONS"]),
+    Route("/v1/devices/{user}/rotate-token", device_rotate_token, methods=["POST", "OPTIONS"]),
+    Route("/v1/devices/{user}/rotate-token/finish", device_rotate_token_finish, methods=["POST", "OPTIONS"]),
     Route("/v1/devices/{user}/revoke", device_revoke, methods=["POST", "OPTIONS"]),
     Route("/.well-known/oauth-protected-resource", oauth_discovery, methods=["GET", "HEAD", "OPTIONS"]),
     Route("/.well-known/oauth-protected-resource/{path:path}", oauth_discovery, methods=["GET", "HEAD", "OPTIONS"]),

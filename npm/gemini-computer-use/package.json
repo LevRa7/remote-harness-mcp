@@ -1,6 +1,6 @@
 {
   "name": "gemini-computer-use",
-  "version": "0.4.6",
+  "version": "0.4.7",
   "description": "Alias for remote-harness-mcp: turn any PC, laptop, server or Android phone into an autonomous execution node for Gemini via native MCP.",
   "main": "cli.js",
   "bin": {
@@ -11,7 +11,7 @@
     "README.md"
   ],
   "dependencies": {
-    "remote-harness-mcp": "^0.4.6"
+    "remote-harness-mcp": "^0.4.7"
   },
   "keywords": [
     "gemini",

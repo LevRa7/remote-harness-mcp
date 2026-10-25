@@ -115,8 +115,71 @@ function launchRemoteInstaller(args) {
 }
 
 const subcommand = (argv[0] || '').toLowerCase();
+
+// Subcommands that run a Python module shipped with the node. They are not
+// Windows-only (the doctor and the watchdog are), so they take their own path:
+// `rotate` has to work on the same four platforms the agent does.
+const PY_MODULES = {
+  rotate: 'core.rekey'
+};
+
+function findPython() {
+  // The installer pins a real interpreter by full path and records it nowhere the
+  // CLI could read, so the candidates are probed instead of assumed: on Windows
+  // `python` may be the Microsoft Store alias, which exits without running
+  // anything, and `py -3` is the launcher that always finds a real one.
+  const candidates = [];
+  if (process.env.MESH_PYTHON) {
+    candidates.push({ command: process.env.MESH_PYTHON, prefix: [] });
+  }
+  if (isWindows) {
+    candidates.push({ command: 'py', prefix: ['-3'] });
+    candidates.push({ command: 'python', prefix: [] });
+  } else {
+    candidates.push({ command: 'python3', prefix: [] });
+    candidates.push({ command: 'python', prefix: [] });
+  }
+  for (const candidate of candidates) {
+    const probe = require('child_process').spawnSync(
+      candidate.command,
+      candidate.prefix.concat(['-c', 'import sys']),
+      { stdio: 'ignore' }
+    );
+    if (probe.status === 0) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+function runPythonModule(moduleName, rest) {
+  const python = findPython();
+  if (!python) {
+    console.error('No working Python 3 interpreter found.');
+    console.error('Install Python 3, or point MESH_PYTHON at one, then retry.');
+    process.exit(1);
+  }
+  const root = path.resolve(__dirname, '..');
+  if (!fs.existsSync(path.join(root, 'core', moduleName.split('.').pop() + '.py'))) {
+    console.error(`Cannot find ${moduleName} next to this CLI. Run this from an installed node.`);
+    process.exit(1);
+  }
+  const child = spawn(
+    python.command,
+    python.prefix.concat(['-m', moduleName], rest),
+    { stdio: 'inherit', cwd: root }
+  );
+  child.on('error', (err) => {
+    console.error(`${moduleName}: could not start ${python.command}: ${err.message}`);
+    process.exit(1);
+  });
+  child.on('exit', (code) => process.exit(code === null ? 1 : code));
+}
+
 if (Object.prototype.hasOwnProperty.call(LOCAL_SCRIPTS, subcommand)) {
   runLocalScript(subcommand, argv.slice(1));
+} else if (Object.prototype.hasOwnProperty.call(PY_MODULES, subcommand)) {
+  runPythonModule(PY_MODULES[subcommand], argv.slice(1));
 } else {
   launchRemoteInstaller(argv);
 }
