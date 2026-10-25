@@ -3,6 +3,7 @@ import base64
 from collections import deque
 from contextlib import asynccontextmanager
 import datetime
+import hashlib
 import hmac
 import json
 import logging
@@ -25,6 +26,33 @@ import uvicorn
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("gateway")
+
+# uvicorn's access log writes the whole request target, query string included, so
+# every MCP call used to put the node credential on disk. Redacting at the record
+# level keeps the rest of the line (status, client, latency) and removes the
+# secret, whether it is a link key or a pre-0.4.6 device token.
+_TOKEN_IN_QUERY = re.compile(r"(token=)[^&\s\"']+")
+
+
+class CredentialRedactionFilter(logging.Filter):
+    def filter(self, record):
+        if isinstance(record.args, tuple):
+            record.args = tuple(
+                _TOKEN_IN_QUERY.sub(r"\1<redacted>", a) if isinstance(a, str) else a
+                for a in record.args
+            )
+        elif isinstance(record.args, dict):
+            record.args = {
+                k: (_TOKEN_IN_QUERY.sub(r"\1<redacted>", v) if isinstance(v, str) else v)
+                for k, v in record.args.items()
+            }
+        if isinstance(record.msg, str):
+            record.msg = _TOKEN_IN_QUERY.sub(r"\1<redacted>", record.msg)
+        return True
+
+
+for _log_name in ("uvicorn.access", "uvicorn.error", "gateway"):
+    logging.getLogger(_log_name).addFilter(CredentialRedactionFilter())
 
 REGISTRY_PATH = "/etc/remote-harness-mcp/registry.json"
 #: Registry location from before the rename. A gateway deployed earlier keeps its
@@ -304,6 +332,103 @@ def tokens_equal(a: str, b: str) -> bool:
         return False
 
 
+# ---------------------------------------------------------------------------
+# NODE CREDENTIALS: a device token and a link key, with different jobs
+# ---------------------------------------------------------------------------
+# A node used to hold ONE secret and put it in every URL. That secret opens the
+# tunnel, i.e. it is the machine's own identity, and a URL is the worst place to
+# keep it: it lands in nginx access logs, browser history, the Referer header,
+# the connector settings of a third-party client and in the clipboard that the
+# installer writes. Two credentials fix that split:
+#
+#   * device token - opens the tunnel, proves the node's identity, travels only
+#     in an Authorization header (or x-mesh-token) between the agent and here.
+#   * link key     - the credential that goes into a URL such as
+#     /sse?user=<node>&token=lk_<32 hex>. It can invoke tools for that node but
+#     it CANNOT open a tunnel, so a leaked link cannot impersonate an agent; and
+#     it is rotatable, so a leaked link is fixed by pressing "rotate" instead of
+#     reinstalling the node.
+#
+# The device token is stored as sha256 only. The link key is stored as-is: the
+# owner has to be able to read it again (it is the thing pasted into Gemini) and
+# it is already public by construction. Registry entries written by gateways
+# before 0.4.6 keep a plaintext "token"; that one is still honoured in
+# constant time so an upgrade does not lock existing nodes out, and the node is
+# upgraded to a hash + link key the next time it proves possession with it.
+LINK_KEY_PREFIX = "lk_"
+
+
+def hash_secret(value: str) -> str:
+    """Stable digest for a credential; the plaintext is never stored."""
+    return hashlib.sha256(str(value).encode("utf-8", "surrogateescape")).hexdigest()
+
+
+def new_device_token() -> str:
+    return secrets.token_hex(16)
+
+
+def new_link_key() -> str:
+    return LINK_KEY_PREFIX + secrets.token_hex(16)
+
+
+def is_link_key(value: str) -> bool:
+    return bool(value) and str(value).startswith(LINK_KEY_PREFIX)
+
+
+def token_matches_device(entry: dict, token: str) -> bool:
+    """True when *token* is this node's device token (hashed or legacy plaintext)."""
+    if not token:
+        return False
+    stored = str(entry.get("token_sha256") or "")
+    if stored:
+        return tokens_equal(hash_secret(token), stored)
+    legacy = entry.get("token") or ""
+    return bool(legacy) and tokens_equal(token, legacy)
+
+
+def token_matches_link(entry: dict, token: str) -> bool:
+    """True when *token* is this node's link key (the URL-safe credential)."""
+    stored = entry.get("link_key") or ""
+    return bool(stored) and bool(token) and tokens_equal(token, stored)
+
+
+def request_credential(request: Request) -> tuple[str, str]:
+    """Return ``(credential, source)`` with source in header/query/none.
+
+    The header is checked first: a client that can set an Authorization header
+    never has to put a secret in a URL, so its token stays out of every log.
+    """
+    header = (request.headers.get("x-mesh-token") or "").strip()
+    if not header:
+        auth = request.headers.get("authorization", "")
+        if auth.startswith("Bearer "):
+            header = auth[7:].strip()
+    if header:
+        return header, "header"
+    query = (request.query_params.get("token") or "").strip()
+    if query:
+        return query, "query"
+    return "", "none"
+
+
+def get_request_token(request: Request) -> str:
+    return request_credential(request)[0]
+
+
+def credential_denial(entry: dict, source: str) -> str:
+    if source == "query":
+        if entry.get("link_key"):
+            return (
+                "The device token is not accepted in a URL: use this node's link key "
+                "('lk_...') or send the device token in an Authorization: Bearer header."
+            )
+        return (
+            "Invalid or missing link key. Use the 'lk_...' value from registration, "
+            "or send the device token in an Authorization: Bearer header."
+        )
+    return "Invalid or missing credential. Send 'Authorization: Bearer <token>'."
+
+
 def get_target_user(request: Request) -> str:
     """Resolve which node a request addresses.
 
@@ -331,28 +456,40 @@ def get_target_user(request: Request) -> str:
 
     return "anonymous"
 
-def get_request_token(request: Request) -> str:
-    token = request.query_params.get("token") or request.headers.get("x-mesh-token")
-    if not token:
-        auth = request.headers.get("authorization", "")
-        if auth.startswith("Bearer "):
-            token = auth[7:].strip()
-    return token or ""
-
 def verify_token(request: Request) -> tuple[bool, str, str]:
     user = get_target_user(request)
     if user == "anonymous":
         return False, (
             "Node identity is missing. Use the shared-domain URL form "
-            f"{PUBLIC_BASE_URL}/sse?user=<node-name>&token=<your_token>."
+            f"{PUBLIC_BASE_URL}/sse?user=<node-name>&token=<link-key>."
         ), ""
     registry = load_registry()
-    if user not in registry:
+    entry = registry.get(user)
+    if not entry:
         return False, f"User '{user}' is not registered.", user
-    expected = registry[user].get("token", "")
-    token = get_request_token(request)
-    if not token or not tokens_equal(token, expected):
-        return False, "Invalid or missing token. Specify ?token=<your_token> in the URL.", user
+    token, source = request_credential(request)
+    if not token:
+        return False, credential_denial(entry, source), user
+    if source == "header":
+        ok = token_matches_device(entry, token) or token_matches_link(entry, token)
+    else:
+        # A URL is not a private channel: it is logged by the proxy, kept in
+        # browser history, forwarded in Referer and stored in a third-party
+        # client's connector settings. Only the rotatable link key may travel in
+        # one. A legacy entry (registered before link keys existed) keeps working
+        # so an upgrade does not disconnect an already-configured node, but the
+        # warning says how to move it off the old secret.
+        ok = token_matches_link(entry, token)
+        if not ok and (entry.get("allow_legacy_query") or not entry.get("link_key")) \
+                and token_matches_device(entry, token):
+            ok = True
+            logger.warning(
+                "Legacy ?token= credential accepted for '%s' (pre-0.4.6 node). "
+                "Re-register it or call /v1/devices/%s/rotate to move it to a "
+                "rotatable link key.", user, user,
+            )
+    if not ok:
+        return False, credential_denial(entry, source), user
     return True, "ok", user
 
 def get_skill(user: str, host: str) -> str:
@@ -488,6 +625,94 @@ async def health(request: Request):
         "tunnel_events": list(tunnel_events),
     }, headers={"Access-Control-Allow-Origin": "*"})
 
+def node_mcp_url(user: str, link_key: str) -> str:
+    """Public MCP endpoint for one node: the link key, never the device token."""
+    base = f"{PUBLIC_BASE_URL}/sse?user={user}"
+    return f"{base}&token={link_key}" if link_key else base
+
+
+def unique_node_name(registry: dict, wanted: str) -> str:
+    suffix = 2
+    cand = f"{wanted}-{suffix}"
+    while cand in registry or cand in RESERVED_NAMES:
+        suffix += 1
+        cand = f"{wanted}-{suffix}"
+    return cand
+
+
+def new_node_entry(mac: str, os_name: str, arch: str, now_iso: str, token: str) -> dict:
+    """A fresh registration: hashed device token, plaintext link key, metadata.
+
+    ``mac_address`` is kept as an inventory detail only. It is NOT an identity: a
+    MAC is visible to the whole LAN, is trivially spoofed, and on its own used to
+    be enough to receive another machine's token from /api/register.
+    """
+    return {
+        "token_sha256": hash_secret(token),
+        "link_key": new_link_key(),
+        "created_at": now_iso,
+        "last_seen": now_iso,
+        "mode": "tunnel",
+        "status": "active",
+        "mac_address": mac,
+        "os": os_name,
+        "arch": arch,
+    }
+
+
+REGISTER_MODE = os.environ.get("MESH_REGISTER_MODE", "open").strip().lower()
+ENROLL_SECRET = os.environ.get("MESH_ENROLL_SECRET", "").strip()
+
+
+def enrolment_refusal(request: Request) -> str:
+    """Why this request may not enrol a node, or "" when it may.
+
+    ``MESH_REGISTER_MODE=pair`` closes self-registration entirely and leaves the
+    pairing endpoints as the only way in. ``MESH_ENROLL_SECRET`` keeps
+    self-registration but requires a shared secret the installer was given.
+    """
+    if REGISTER_MODE == "pair":
+        return (
+            "Self-registration is disabled on this gateway (MESH_REGISTER_MODE=pair). "
+            "Start a pairing with POST /v1/devices/pair and approve the code."
+        )
+    if ENROLL_SECRET:
+        supplied = request.headers.get("x-enroll-secret", "")
+        if not tokens_equal(supplied, ENROLL_SECRET):
+            return (
+                "This gateway requires an enrollment secret. Re-run the installer "
+                "with --enroll-secret, or use pairing."
+            )
+    return ""
+
+
+def client_ip(request: Request) -> str:
+    forwarded = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+    if forwarded:
+        return forwarded
+    return request.client.host if request.client else "unknown"
+
+
+_rate_windows: dict[str, list[float]] = {}
+
+
+def rate_limited(bucket: str, key: str, limit: int, window: float = 60.0) -> bool:
+    """False when the caller is still under *limit* requests per *window*.
+
+    In-memory on purpose: registration is a control-plane concern and the paid
+    deployment delegates it, but the public gateway must not be a free enrolment
+    machine for a botnet either. One process, one bucket map.
+    """
+    now = time.time()
+    seen = [t for t in _rate_windows.get(f"{bucket}:{key}", []) if now - t < window]
+    if len(seen) >= limit:
+        _rate_windows[f"{bucket}:{key}"] = seen
+        return True
+    seen.append(now)
+    _rate_windows[f"{bucket}:{key}"] = seen
+    return False
+
+
 async def api_register(request: Request):
     if request.method == "OPTIONS":
         return Response(status_code=204, headers={"Allow": "POST, OPTIONS", "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "*"})
@@ -495,6 +720,15 @@ async def api_register(request: Request):
         data = await request.json()
     except Exception:
         return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+
+    if rate_limited("register", client_ip(request), limit=10):
+        return JSONResponse(
+            {"error": "rate_limited", "message": "Too many registrations from this address."},
+            status_code=429,
+        )
+    refusal = enrolment_refusal(request)
+    if refusal:
+        return JSONResponse({"error": "registration_disabled", "message": refusal}, status_code=410)
 
     raw_user = data.get("username", "").strip()
     clean_user = re.sub(r"[^a-z0-9_-]", "", raw_user.lower())
@@ -517,112 +751,298 @@ async def api_register(request: Request):
             clean_mac = raw_mac.lower()
 
     clean_os = str(data.get("os", "")).strip()[:100]
+    clean_arch = str(data.get("arch", "")).strip()[:40]
     registry = load_registry()
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
-    # --- DEVICE FINGERPRINTING (MAC & OS) ---
-    # 1. Check if a device with this MAC address was already registered
-    if clean_mac and clean_mac != "00:00:00:00:00:00":
-        for u, entry in registry.items():
-            entry_mac = entry.get("mac_address", "").lower()
-            if entry_mac == clean_mac:
-                logger.info(f"Reusing existing node registration '{u}' for MAC {clean_mac}")
-                entry["last_seen"] = now_iso
-                if clean_os and not entry.get("os"):
-                    entry["os"] = clean_os
-                save_registry(registry)
-                token = entry["token"]
-                return JSONResponse({
-                    "status": "success",
-                    "username": u,
-                    "token": token,
-                    "gateway": PUBLIC_HOST,
-                    "sse_url": public_url("/sse", u, token),
-                    "tunnel_url": f"wss://{PUBLIC_HOST}/ws/tunnel?user={u}&token={token}",
-                    "reused": True,
-                    # `u` is the loop variable above; `user` does not exist in this
-                    # branch, so every re-registration of an already-known MAC
-                    # raised NameError and the gateway answered HTTP 500.
-                    "instructions": f"Remote Harness MCP node '{u}'. Direct access to the real remote host over a reverse tunnel. "
-                f"Do not guess paths or outputs: use list_dir/glob_find/grep_search/read_file/bash_exec/"
-                f"system_vitals. Use run_job for slow commands; page output with max_chars+cursor."
-                })
-
-    # 2. If not found by MAC, check if username already exists in registry
+    # The device token may arrive as an Authorization header (preferred) or in
+    # the JSON body (installers that predate the header). It is never read from
+    # the query string here: a registration URL is not a place for a secret.
+    supplied, _source = request_credential(request)
+    supplied = supplied or str(data.get("token") or "").strip()
     auto_suffix = data.get("auto_suffix", False)
-    if clean_user in registry:
-        req_token = request.headers.get("authorization", "").replace("Bearer ", "").strip() or data.get("token")
-        # If valid token provided, update device info for existing user
-        if req_token and tokens_equal(req_token, registry[clean_user]["token"]):
-            token = registry[clean_user]["token"]
-            if clean_mac:
-                registry[clean_user]["mac_address"] = clean_mac
-            if clean_os:
-                registry[clean_user]["os"] = clean_os
-            registry[clean_user]["last_seen"] = now_iso
-            save_registry(registry)
-            return JSONResponse({
-                "status": "success",
-                "username": clean_user,
-                "token": token,
-                "gateway": PUBLIC_HOST,
-                "sse_url": public_url("/sse", clean_user, token),
-                "tunnel_url": f"wss://{PUBLIC_HOST}/ws/tunnel?user={clean_user}&token={token}",
-                "reused": True,
-                "instructions": "Authenticated and updated existing user registration."
-            })
-        elif auto_suffix:
-            # Different device claiming same name -> generate unique suffix
-            suffix = 2
-            cand = f"{clean_user}-{suffix}"
-            while cand in registry or cand in RESERVED_NAMES:
-                suffix += 1
-                cand = f"{clean_user}-{suffix}"
-            clean_user = cand
-            token = secrets.token_hex(16)
-            registry[clean_user] = {
-                "token": token,
-                "created_at": now_iso,
-                "mode": "tunnel",
-                "status": "active",
-                "mac_address": clean_mac,
-                "os": clean_os
-            }
-            save_registry(registry)
-        else:
-            suffix = 2
-            cand = f"{clean_user}-{suffix}"
-            while cand in registry or cand in RESERVED_NAMES:
-                suffix += 1
-                cand = f"{clean_user}-{suffix}"
-            return JSONResponse({
-                "error": "conflict",
-                "message": f"User '{clean_user}' already exists. Provide token to retrieve config.",
-                "suggested_username": cand
-            }, status_code=409)
+
+    entry = registry.get(clean_user)
+    created = False
+
+    if entry is not None:
+        # A name is not an identity. Re-registering under an existing name is
+        # only allowed with that node's device token; otherwise the caller gets
+        # a conflict or, when it asked for one, a fresh unique name. This is the
+        # branch that replaced reuse-by-MAC: proving possession of the token is
+        # the only way to inherit an existing registration.
+        if not token_matches_device(entry, supplied):
+            if not auto_suffix:
+                return JSONResponse({
+                    "error": "conflict",
+                    "message": (
+                        f"Node '{clean_user}' already exists and this request did not "
+                        "prove possession of its device token. Send it in an "
+                        "Authorization: Bearer header, or ask for auto_suffix."
+                    ),
+                    "suggested_username": unique_node_name(registry, clean_user),
+                }, status_code=409)
+            clean_user = unique_node_name(registry, clean_user)
+            entry = None
+
+    if entry is None:
+        token_plain = new_device_token()
+        entry = new_node_entry(clean_mac, clean_os, clean_arch, now_iso, token_plain)
+        registry[clean_user] = entry
+        created = True
     else:
-        # Brand new registration
-        token = secrets.token_hex(16)
-        registry[clean_user] = {
-            "token": token,
-            "created_at": now_iso,
-            "mode": "tunnel",
-            "status": "active",
-            "mac_address": clean_mac,
-            "os": clean_os
-        }
-        save_registry(registry)
+        token_plain = supplied          # echo back the token the caller proved
+        if clean_mac:
+            entry["mac_address"] = clean_mac
+        if clean_os:
+            entry["os"] = clean_os
+        if clean_arch:
+            entry["arch"] = clean_arch
+        entry["last_seen"] = now_iso
+        if not entry.get("link_key"):
+            # Upgrade a pre-0.4.6 node: give it a rotatable link key. Its old URL
+            # keeps working for the transition, because killing it here would
+            # disconnect a client that was configured months ago.
+            entry["link_key"] = new_link_key()
+            if entry.get("token"):
+                entry["allow_legacy_query"] = True
+        if entry.get("token") and supplied and token_matches_device(entry, supplied):
+            # Move the device token off plaintext storage as well.
+            entry["token_sha256"] = hash_secret(supplied)
+            entry.pop("token", None)
+            if entry.get("allow_legacy_query"):
+                entry["allow_legacy_query"] = False
+
+    save_registry(registry)
+    if created:
+        logger.info("Registered node '%s' (link key issued, device token hashed)", clean_user)
+    else:
+        logger.info("Re-registered node '%s' after token proof", clean_user)
 
     return JSONResponse({
         "status": "success",
         "username": clean_user,
-        "token": token,
+        "token": token_plain,
+        "link_key": entry["link_key"],
         "gateway": PUBLIC_HOST,
-        "sse_url": public_url("/sse", clean_user, token),
-        "tunnel_url": f"wss://{PUBLIC_HOST}/ws/tunnel?user={clean_user}&token={token}",
-        "reused": False,
-        "instructions": "Add the sse_url to Google Gemini Web (Settings -> MCP)."
+        # The URL a client pastes carries the link key. The device token stays
+        # in the caller's own config and in Authorization headers only.
+        "sse_url": node_mcp_url(clean_user, entry["link_key"]),
+        "tunnel_url": f"wss://{PUBLIC_HOST}/ws/tunnel?user={clean_user}",
+        "reused": not created,
+        "token_use": "Authorization: Bearer <token> (the tunnel and CLI use this; never put it in a URL)",
+        "instructions": (
+            f"Remote Harness MCP node '{clean_user}'. Paste sse_url into Google Gemini "
+            "(Settings -> Connectors). Do not guess paths or outputs: use list_dir/"
+            "glob_find/grep_search/read_file/bash_exec/system_vitals. Use run_job for "
+            "slow commands; page output with max_chars+cursor."
+        ),
     })
+
+# ---------------------------------------------------------------------------
+# DEVICE PAIRING (/v1/devices)
+# ---------------------------------------------------------------------------
+# The join flow that replaces "anyone may POST /api/register and receive a token":
+#
+#   1. the node asks for a code            POST /v1/devices/pair
+#   2. a human with admin rights approves  POST /v1/devices/pair/{code}/approve
+#   3. the node collects its credentials   GET  /v1/devices/pair/{code}
+#
+# The credentials are handed out exactly once, after approval, and the code dies
+# with its 10-minute TTL. Nothing is created in the registry before step 2, so a
+# bot that can reach the endpoint can at worst ask for codes.
+PAIR_TTL_SECONDS = 600
+PAIR_MAX_PENDING = 200
+PAIR_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"   # no 0/O/1/I confusables
+ADMIN_TOKEN = os.environ.get("MESH_ADMIN_TOKEN", "").strip()
+
+pending_pairs: dict[str, dict] = {}
+
+
+def admin_authorised(request: Request) -> bool:
+    supplied = (request.headers.get("x-admin-token") or "").strip()
+    return bool(ADMIN_TOKEN) and bool(supplied) and tokens_equal(supplied, ADMIN_TOKEN)
+
+
+def purge_pairs() -> None:
+    now = time.time()
+    for code, pair in list(pending_pairs.items()):
+        if pair.get("expires_at", 0) < now or pair.get("collected"):
+            pending_pairs.pop(code, None)
+
+
+def new_pair_code() -> str:
+    while True:
+        raw = "".join(secrets.choice(PAIR_ALPHABET) for _ in range(8))
+        code = f"{raw[:4]}-{raw[4:]}"
+        if code not in pending_pairs:
+            return code
+
+
+async def device_pair_start(request: Request):
+    if request.method == "OPTIONS":
+        return Response(status_code=204, headers={"Allow": "POST, OPTIONS", "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "*"})
+    if rate_limited("pair", client_ip(request), limit=20):
+        return JSONResponse(
+            {"error": "rate_limited", "message": "Too many pairing requests from this address."},
+            status_code=429,
+        )
+    purge_pairs()
+    if len(pending_pairs) >= PAIR_MAX_PENDING:
+        return JSONResponse(
+            {"error": "too_many_pending", "message": "Too many pending pairings; try again shortly."},
+            status_code=503,
+        )
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    code = new_pair_code()
+    pending_pairs[code] = {
+        "created_at": time.time(),
+        "expires_at": time.time() + PAIR_TTL_SECONDS,
+        "hostname": str(data.get("hostname") or "")[:100],
+        "os": str(data.get("os") or "")[:100],
+        "arch": str(data.get("arch") or "")[:40],
+        "approved": False,
+        "issued": None,
+        "collected": False,
+        "attempts": 0,
+    }
+    logger.info("Pairing code %s issued (host=%s)", code, pending_pairs[code]["hostname"] or "?")
+    return JSONResponse({
+        "pair_code": code,
+        "pair_url": f"{PUBLIC_BASE_URL}/pair?code={code}",
+        "expires_in": PAIR_TTL_SECONDS,
+        "message": (
+            "Approve this code with POST /v1/devices/pair/{code}/approve and an "
+            "X-Admin-Token header, then collect the credentials from this endpoint."
+        ),
+    }, status_code=201)
+
+
+async def device_pair_status(request: Request):
+    code = (request.path_params.get("code") or "").strip().upper()
+    purge_pairs()
+    pair = pending_pairs.get(code)
+    if pair is None:
+        return JSONResponse(
+            {"error": "unknown_pair", "message": "Unknown or expired pairing code."},
+            status_code=404,
+        )
+    if not pair["approved"]:
+        pair["attempts"] += 1
+        return JSONResponse({
+            "status": "pending",
+            "expires_in": max(0, int(pair["expires_at"] - time.time())),
+        })
+    issued = pair.get("issued") or {}
+    pending_pairs.pop(code, None)          # credentials are handed out once
+    return JSONResponse({"status": "approved", **issued})
+
+
+async def device_pair_approve(request: Request):
+    if not ADMIN_TOKEN:
+        return JSONResponse({
+            "error": "pairing_not_configured",
+            "message": "This gateway has no MESH_ADMIN_TOKEN set, so no code can be approved.",
+        }, status_code=503)
+    if not admin_authorised(request):
+        return JSONResponse({"error": "forbidden"}, status_code=403)
+    code = (request.path_params.get("code") or "").strip().upper()
+    purge_pairs()
+    pair = pending_pairs.get(code)
+    if pair is None:
+        return JSONResponse({"error": "unknown_pair"}, status_code=404)
+    if pair["approved"]:
+        return JSONResponse({"error": "already_approved"}, status_code=409)
+
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    wanted = re.sub(r"[^a-z0-9_-]", "", str(data.get("username") or pair.get("hostname") or "node").lower())[:40]
+    if not wanted or len(wanted) < 2:
+        wanted = "node"
+    registry = load_registry()
+    if wanted in registry or wanted in RESERVED_NAMES:
+        wanted = unique_node_name(registry, wanted)
+
+    token = new_device_token()
+    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    entry = new_node_entry("", pair["os"], pair["arch"], now_iso, token)
+    entry["hostname"] = pair["hostname"]
+    registry[wanted] = entry
+    save_registry(registry)
+
+    pair["approved"] = True
+    pair["issued"] = {
+        "username": wanted,
+        "token": token,
+        "link_key": entry["link_key"],
+        "gateway": PUBLIC_HOST,
+        "sse_url": node_mcp_url(wanted, entry["link_key"]),
+        "tunnel_url": f"wss://{PUBLIC_HOST}/ws/tunnel?user={wanted}",
+        "token_use": "Authorization: Bearer <token> (the tunnel and CLI use this; never in a URL)",
+    }
+    logger.info("Paired node '%s' from code %s", wanted, code)
+    return JSONResponse({"status": "approved", "username": wanted})
+
+
+async def device_rotate(request: Request):
+    """Issue a new link key, invalidating the old URL. Admin or the node itself."""
+    user = (request.path_params.get("user") or "").lower()
+    registry = load_registry()
+    entry = registry.get(user)
+    if entry is None:
+        return JSONResponse({"error": "unknown_node"}, status_code=404)
+    supplied, _source = request_credential(request)
+    if not (admin_authorised(request) or token_matches_device(entry, supplied)):
+        return JSONResponse({"error": "forbidden"}, status_code=403)
+    entry["link_key"] = new_link_key()
+    entry.pop("token", None)                 # plaintext is never kept after a rotate
+    entry.pop("allow_legacy_query", None)
+    save_registry(registry)
+    logger.info("Link key rotated for '%s'", user)
+    return JSONResponse({
+        "status": "rotated",
+        "username": user,
+        "link_key": entry["link_key"],
+        "sse_url": node_mcp_url(user, entry["link_key"]),
+        "message": "The previous URL no longer works. Update the client connector.",
+    })
+
+
+async def device_revoke(request: Request):
+    """Remove a node entirely, closing its tunnel. Admin or the node itself."""
+    user = (request.path_params.get("user") or "").lower()
+    registry = load_registry()
+    entry = registry.get(user)
+    if entry is None:
+        return JSONResponse({"error": "unknown_node"}, status_code=404)
+    supplied, _source = request_credential(request)
+    if not (admin_authorised(request) or token_matches_device(entry, supplied)):
+        return JSONResponse({"error": "forbidden"}, status_code=403)
+    registry.pop(user, None)
+    save_registry(registry)
+    tunnel = active_tunnels.pop(user, None)
+    if tunnel and tunnel.get("ws"):
+        try:
+            await tunnel["ws"].close(code=4001, reason="Node revoked")
+        except Exception:
+            pass
+    for queue in active_sse_subscribers.pop(user, []):
+        try:
+            queue.put_nowait(None)
+        except Exception:
+            pass
+    logger.warning("Node '%s' revoked", user)
+    return JSONResponse({"status": "revoked", "username": user})
+
 
 async def oauth_discovery(request: Request):
     """RFC 9728 protected-resource metadata.
@@ -671,7 +1091,13 @@ async def sse_endpoint(request: Request):
             }
         )
 
-    token = get_request_token(request)
+    # The credential a client authenticated WITH is what the classic transport may
+    # echo back in its endpoint frame. When the client proved itself with a header
+    # there is nothing to echo: the secret stays in its own headers, out of the
+    # URL and out of the proxy log. When it used a link key, that (rotatable,
+    # URL-safe) key is the only thing that may appear here.
+    credential, credential_source = request_credential(request)
+    endpoint_credential = credential if credential_source == "query" else ""
     # Two different things are needed here, and conflating them broke delivery:
     #   * the id the CLIENT sees must match the one POST responses return, or the
     #     client believes it holds two sessions and aborts one;
@@ -729,7 +1155,10 @@ async def sse_endpoint(request: Request):
         last_write = time.monotonic()
         try:
             if announce_endpoint:
-                yield f"event: endpoint\ndata: /messages?user={user}&token={token}\n\n"
+                endpoint = f"/messages?user={user}"
+                if endpoint_credential:
+                    endpoint += f"&token={endpoint_credential}"
+                yield f"event: endpoint\ndata: {endpoint}\n\n"
             while True:
                 try:
                     remaining = keepalive_interval - (time.monotonic() - last_write)
@@ -1983,12 +2412,29 @@ async def mcp_unified_endpoint(request: Request):
 async def ws_tunnel_endpoint(websocket: WebSocket):
     query = websocket.query_params
     user = query.get("user", "").lower()
-    token = query.get("token", "")
     registry = load_registry()
+    entry = registry.get(user) if user else None
 
-    if not user or user not in registry or not tokens_equal(token, registry[user].get("token", "")):
+    # The tunnel is the machine's own identity: it accepts the DEVICE TOKEN only,
+    # never a link key (a link that leaks must not let someone attach a fake
+    # agent to that node name). The header is preferred; the query form is kept
+    # for agents released before 0.4.6, which have the wss URL in their service
+    # config and would otherwise need a reinstall to come back online.
+    header = (websocket.headers.get("x-mesh-token") or "").strip()
+    if not header:
+        auth = websocket.headers.get("authorization", "")
+        if auth.startswith("Bearer "):
+            header = auth[7:].strip()
+    token = header or query.get("token", "")
+
+    if entry is None or not token_matches_device(entry, token):
         await websocket.close(code=4001, reason="Unauthorized")
         return
+    if not header:
+        logger.warning(
+            "Agent '%s' opened its tunnel with ?token= in the URL; update the node "
+            "to send 'Authorization: Bearer' instead.", user,
+        )
 
     # Cleanly terminate any prior websocket and fail pending futures for this user
     old_tunnel = active_tunnels.get(user)
@@ -2793,6 +3239,14 @@ routes = [
     Route("/health", health, methods=["GET", "HEAD", "OPTIONS"]),
     Route("/health-mesh", health, methods=["GET", "HEAD", "OPTIONS"]),
     Route("/api/register", api_register, methods=["POST", "OPTIONS"]),
+    # Device pairing: the join flow that does not hand a token to an anonymous
+    # caller. Credentials are issued only after an admin approves the code.
+    Route("/v1/devices", device_pair_start, methods=["POST", "OPTIONS"]),
+    Route("/v1/devices/pair", device_pair_start, methods=["POST", "OPTIONS"]),
+    Route("/v1/devices/pair/{code}", device_pair_status, methods=["GET", "OPTIONS"]),
+    Route("/v1/devices/pair/{code}/approve", device_pair_approve, methods=["POST", "OPTIONS"]),
+    Route("/v1/devices/{user}/rotate", device_rotate, methods=["POST", "OPTIONS"]),
+    Route("/v1/devices/{user}/revoke", device_revoke, methods=["POST", "OPTIONS"]),
     Route("/.well-known/oauth-protected-resource", oauth_discovery, methods=["GET", "HEAD", "OPTIONS"]),
     Route("/.well-known/oauth-protected-resource/{path:path}", oauth_discovery, methods=["GET", "HEAD", "OPTIONS"]),
     Route("/sse", mcp_unified_endpoint, methods=["GET", "POST", "DELETE", "OPTIONS", "HEAD"]),

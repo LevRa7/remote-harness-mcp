@@ -55,7 +55,7 @@ No SSH client, no terminal on your phone, no VPN — only a chat.
 | 🖥️ **Any PC** | Linux, macOS, Windows — desktops, laptops, VPS, containers. **Android phones and tablets** run the same node inside Termux. |
 | 🌐 **Behind any NAT** | The node opens an *outbound* WebSocket tunnel. No public IP, no port forwarding, no router setup. |
 | ⚡ **One-line install** | Detects OS, architecture and device type; installs autostart (`systemd` / `launchd` / Windows task / runit + Termux:Boot on Android); copies your connection link to the clipboard. |
-| 🛡️ **Token-gated** | Every call needs a personal 128-bit token (`?token=…` or `Authorization: Bearer`). Everything else gets HTTP 401. |
+| 🛡️ **Two credentials, no secret in a URL** | The **device token** opens the tunnel and travels only in an `Authorization: Bearer` header. The **link key** (`lk_…`) is what goes into a URL; it can run tools but cannot open a tunnel, and it is rotatable — so a leaked link is fixed in one call, not by reinstalling the node. Everything else gets HTTP 401. |
 | 🔁 **Many machines, one gateway** | Each node is addressed by `?user=<node-name>` on one shared domain. |
 | 🆓 **Free & open source** | MIT license, works with the free Gemini tier. |
 
@@ -338,10 +338,10 @@ The release also ships a single compiled installer, for machines where you would
 not clone or download anything else — `RemoteHarnessMCP-Setup-<version>.exe`:
 
 ```powershell
-.\RemoteHarnessMCP-Setup-0.4.5.exe            # open the visual installer
-.\RemoteHarnessMCP-Setup-0.4.5.exe -Lang ru   # start in Russian
-.\RemoteHarnessMCP-Setup-0.4.5.exe -SelfTest  # headless self-check, prints JSON
-.\RemoteHarnessMCP-Setup-0.4.5.exe --version  # print the version
+.\RemoteHarnessMCP-Setup-0.4.6.exe            # open the visual installer
+.\RemoteHarnessMCP-Setup-0.4.6.exe -Lang ru   # start in Russian
+.\RemoteHarnessMCP-Setup-0.4.6.exe -SelfTest  # headless self-check, prints JSON
+.\RemoteHarnessMCP-Setup-0.4.6.exe --version  # print the version
 ```
 
 It carries the wizard, `install.ps1`, `core/` and `install.sh` inside itself, unpacks them
@@ -487,9 +487,9 @@ A node is **never** addressed by its own hostname. The gateway publishes a singl
 
 | Purpose | Canonical URL |
 | :--- | :--- |
-| MCP over SSE | `https://<shared-domain>/sse?user=<node-name>&token=<token>` |
-| MCP Streamable HTTP | `https://<shared-domain>/mcp?user=<node-name>&token=<token>` |
-| Reverse tunnel (agent) | `wss://<shared-domain>/ws/tunnel?user=<node-name>&token=<token>` |
+| MCP over SSE | `https://<shared-domain>/sse?user=<node-name>&token=<link-key>` |
+| MCP Streamable HTTP | `https://<shared-domain>/mcp?user=<node-name>&token=<link-key>` |
+| Reverse tunnel (agent) | `wss://<shared-domain>/ws/tunnel?user=<node-name>` + `Authorization: Bearer <device-token>` |
 
 Why: every extra hostname would need its own DNS record *and* its own SAN in the TLS certificate. A node whose name is missing from the certificate fails the TLS handshake, and the Gemini client then reports an opaque "cannot connect to host". With one shared domain the certificate covers every node forever, and adding a node is only a registration call.
 
@@ -501,15 +501,17 @@ Why: every extra hostname would need its own DNS record *and* its own SAN in the
 
 ---
 
-## 🔒 SecurityWhoever has your MCP link can run commands on that machine. Treat it like a password: don't publish it, and reinstall the node to rotate the token if it leaks.
+## 🔒 Security
 
-- **Token-gated endpoints** — every request must carry the node's secret token.
+- **Two credentials per node** — the *device token* opens the tunnel and is accepted only in an `Authorization: Bearer` header; the *link key* (`lk_…`) is the only credential allowed in a URL. The device token in a query string is rejected with HTTP 401.
+- **Link keys rotate** — `POST /v1/devices/<node>/rotate` issues a new link key and kills the old URL; `POST /v1/devices/<node>/revoke` removes the node. Neither needs a reinstall.
+- **Enrolment** — `/api/register` refuses to hand a token to a request that only knows a name or a MAC address; possession of the device token is required to reuse a registration. Set `MESH_REGISTER_MODE=pair` (with `MESH_ADMIN_TOKEN`) to replace self-registration entirely with the pairing flow: `POST /v1/devices/pair` → approve the code → collect the credentials.
 - **Outbound-only tunnel** — nodes never listen on public ports; the agent dials out to the gateway.
 - **Gateway is a relay** — it terminates TLS and forwards calls; commands run only on your node.
 - **Unprivileged by default** — the agent runs in user space, without root.
 
 > [!WARNING]
-> Whoever has your MCP link can run commands on that machine. Treat it like a password: don't publish it, and reinstall the node to rotate the token if it leaks.
+> Whoever has your MCP link can run commands on that machine. Treat it like a password: don't publish it, and rotate the link key (`POST /v1/devices/<node>/rotate`) if it leaks.
 
 ---
 

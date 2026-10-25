@@ -105,7 +105,12 @@ def test_registration_response_has_no_subdomain(tmp_path, monkeypatch):
     assert data["username"] == "fresh-node"
     assert "subdomain" not in data, "per-device subdomains must not be issued any more"
     assert data["gateway"] == gateway.PUBLIC_HOST
-    assert data["sse_url"] == f"{gateway.PUBLIC_BASE_URL}/sse?user=fresh-node&token={data['token']}"
+    # The URL a client pastes carries the link key, never the device token: the
+    # token opens the tunnel, so it must not end up in logs, history or a
+    # third-party connector's settings.
+    assert data["link_key"].startswith("lk_")
+    assert data["sse_url"] == f"{gateway.PUBLIC_BASE_URL}/sse?user=fresh-node&token={data['link_key']}"
+    assert data["token"] not in data["sse_url"]
     assert f"{gateway.PUBLIC_HOST}/ws/tunnel?user=fresh-node" in data["tunnel_url"]
 
 

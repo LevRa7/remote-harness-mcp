@@ -1904,6 +1904,11 @@ REG_RESP=$(curl -s -X POST "https://${GATEWAY}/api/register" \
 
 ASSIGNED_USER=$(json_field "$REG_RESP" username)
 ASSIGNED_TOKEN=$(json_field "$REG_RESP" token)
+# The URL a client gets carries the link key, not the device token: a URL is
+# logged, kept in history and pasted into a third-party connector, while the
+# token opens the tunnel. Older gateways return no link key, in which case the
+# URL falls back to the token exactly as before.
+ASSIGNED_LINK=$(json_field "$REG_RESP" link_key)
 
 if [ -z "$ASSIGNED_TOKEN" ]; then
     FALLBACK_USER="${USERNAME}-$(date +%s | tail -c 4)"
@@ -1912,6 +1917,7 @@ if [ -z "$ASSIGNED_TOKEN" ]; then
         -d "{\"username\": \"${FALLBACK_USER}\", \"auto_suffix\": true, \"mac_address\": \"${DETECTED_MAC}\", \"os\": \"${DETECTED_OS}\", \"arch\": \"${DETECTED_ARCH}\"}")
     ASSIGNED_USER=$(json_field "$REG_RESP" username)
     ASSIGNED_TOKEN=$(json_field "$REG_RESP" token)
+    ASSIGNED_LINK=$(json_field "$REG_RESP" link_key)
 fi
 
 if [ -z "$ASSIGNED_TOKEN" ]; then
@@ -1937,6 +1943,7 @@ cat << EOF > "$CONFIG_FILE"
 MESH_GATEWAY=${GATEWAY}
 MESH_USER=${ASSIGNED_USER}
 MESH_TOKEN=${ASSIGNED_TOKEN}
+MESH_LINK_KEY=${ASSIGNED_LINK}
 EOF
 chmod 600 "$CONFIG_FILE"
 
@@ -2026,7 +2033,10 @@ fi
 sleep 1
 
 # Canonical shared-domain MCP URL (one domain for every node; ?user= selects it).
-MCP_URL="$(node_sse_url "$ASSIGNED_USER" "$ASSIGNED_TOKEN")"
+# Canonical shared-domain MCP URL (one domain for every node; ?user= selects it).
+# The URL uses the link key when the gateway issued one: it is rotatable and it
+# cannot open a tunnel, so a leaked link is revoked without reinstalling the node.
+MCP_URL="$(node_sse_url "$ASSIGNED_USER" "${ASSIGNED_LINK:-$ASSIGNED_TOKEN}")"
 
 # Quick Copy to Clipboard
 COPIED=false
