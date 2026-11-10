@@ -1,0 +1,539 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Mesh System Monitor | Windows & Android</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #090c10;
+      --card-bg: rgba(18, 24, 38, 0.75);
+      --card-border: rgba(255, 255, 255, 0.08);
+      --win-color: #00d2ff;
+      --win-glow: rgba(0, 210, 255, 0.25);
+      --and-color: #10b981;
+      --and-glow: rgba(16, 185, 129, 0.25);
+      --text: #f1f5f9;
+      --text-muted: #8b9bb4;
+      --danger: #ef4444;
+      --warning: #f59e0b;
+      --bar-bg: rgba(255, 255, 255, 0.06);
+    }
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    body {
+      background-color: var(--bg);
+      background-image: 
+        radial-gradient(at 15% 15%, rgba(0, 210, 255, 0.08) 0px, transparent 50%),
+        radial-gradient(at 85% 85%, rgba(16, 185, 129, 0.08) 0px, transparent 50%),
+        radial-gradient(at 50% 50%, rgba(124, 58, 237, 0.05) 0px, transparent 60%);
+      color: var(--text);
+      font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+      min-height: 100vh;
+      padding: 24px 16px 40px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+    .mono {
+      font-family: 'JetBrains Mono', monospace;
+    }
+    .container {
+      max-width: 1200px;
+      width: 100%;
+    }
+    header {
+      margin-bottom: 28px;
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      background: var(--card-bg);
+      backdrop-filter: blur(16px);
+      border: 1px solid var(--card-border);
+      border-radius: 20px;
+      padding: 20px 28px;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35);
+    }
+    .header-title {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+    .pulse-dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: var(--win-color);
+      box-shadow: 0 0 16px var(--win-color);
+      animation: pulse 2s infinite;
+    }
+    @keyframes pulse {
+      0% { transform: scale(0.95); opacity: 0.8; }
+      50% { transform: scale(1.2); opacity: 1; box-shadow: 0 0 20px var(--win-color); }
+      100% { transform: scale(0.95); opacity: 0.8; }
+    }
+    h1 {
+      font-size: 22px;
+      font-weight: 700;
+      letter-spacing: -0.5px;
+    }
+    .header-subtitle {
+      font-size: 13px;
+      color: var(--text-muted);
+    }
+    .header-meta {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      font-size: 13px;
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 12px;
+      border-radius: 9999px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .badge-online {
+      background: rgba(16, 185, 129, 0.15);
+      color: #34d399;
+      border: 1px solid rgba(16, 185, 129, 0.3);
+    }
+    .badge-offline {
+      background: rgba(239, 68, 68, 0.15);
+      color: #f87171;
+      border: 1px solid rgba(239, 68, 68, 0.3);
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+      gap: 24px;
+    }
+    .card {
+      background: var(--card-bg);
+      backdrop-filter: blur(16px);
+      border: 1px solid var(--card-border);
+      border-radius: 24px;
+      padding: 26px;
+      box-shadow: 0 10px 40px rgba(0, 0, 0, 0.4);
+      display: flex;
+      flex-direction: column;
+      gap: 22px;
+      position: relative;
+      overflow: hidden;
+      transition: border-color 0.3s ease;
+    }
+    .card-win {
+      border-top: 3px solid var(--win-color);
+    }
+    .card-and {
+      border-top: 3px solid var(--and-color);
+    }
+    .card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+    }
+    .device-title {
+      font-size: 20px;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .device-sub {
+      font-size: 13px;
+      color: var(--text-muted);
+      margin-top: 4px;
+    }
+    .metric-row {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .metric-label {
+      display: flex;
+      justify-content: space-between;
+      font-size: 13px;
+      color: var(--text-muted);
+    }
+    .metric-val {
+      color: var(--text);
+      font-weight: 600;
+    }
+    .progress-bar-bg {
+      height: 9px;
+      background: var(--bar-bg);
+      border-radius: 6px;
+      overflow: hidden;
+      position: relative;
+    }
+    .progress-bar-fill {
+      height: 100%;
+      border-radius: 6px;
+      transition: width 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+    .fill-win {
+      background: linear-gradient(90deg, #0072ff, #00d2ff);
+      box-shadow: 0 0 10px var(--win-glow);
+    }
+    .fill-and {
+      background: linear-gradient(90deg, #059669, #10b981);
+      box-shadow: 0 0 10px var(--and-glow);
+    }
+    .fill-purple {
+      background: linear-gradient(90deg, #7c3aed, #a855f7);
+    }
+    .fill-warning {
+      background: linear-gradient(90deg, #d97706, #f59e0b);
+    }
+    .fill-danger {
+      background: linear-gradient(90deg, #dc2626, #ef4444);
+    }
+    .chips-group {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .chips-title {
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--text-muted);
+      font-weight: 700;
+    }
+    .chips-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .chip {
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 10px;
+      padding: 6px 12px;
+      font-size: 12px;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: #cbd5e1;
+    }
+    .chip-bullet {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--win-color);
+    }
+    .info-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 12px;
+    }
+    .info-box {
+      background: rgba(255, 255, 255, 0.02);
+      border: 1px solid rgba(255, 255, 255, 0.05);
+      border-radius: 14px;
+      padding: 12px 14px;
+    }
+    .info-box-label {
+      font-size: 11px;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .info-box-value {
+      font-size: 14px;
+      font-weight: 700;
+      margin-top: 4px;
+    }
+    footer {
+      margin-top: 36px;
+      text-align: center;
+      font-size: 12px;
+      color: var(--text-muted);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div class="header-title">
+        <div class="pulse-dot" id="global-pulse"></div>
+        <div>
+          <h1>Mesh Realtime Monitor</h1>
+          <div class="header-subtitle">Синхронизированный мониторинг узлов сети Antigravity</div>
+        </div>
+      </div>
+      <div class="header-meta">
+        <div class="badge badge-online mono" id="last-update-badge">Обновление: --</div>
+      </div>
+    </header>
+
+    <div class="grid">
+      <!-- Windows Node -->
+      <div class="card card-win" id="card-win">
+        <div class="card-header">
+          <div>
+            <div class="device-title">
+              <span>💻</span> <span id="win-hostname">MateBook16</span>
+            </div>
+            <div class="device-sub" id="win-os">Windows 11 IoT Enterprise</div>
+          </div>
+          <div class="badge badge-online mono" id="win-status-badge">● ОНЛАЙН</div>
+        </div>
+
+        <div class="info-grid">
+          <div class="info-box">
+            <div class="info-box-label">Аптайм</div>
+            <div class="info-box-value mono" id="win-uptime">--</div>
+          </div>
+          <div class="info-box">
+            <div class="info-box-label">ЦП Загрузка</div>
+            <div class="info-box-value mono" id="win-cpu-text">0%</div>
+          </div>
+        </div>
+
+        <div class="metric-row">
+          <div class="metric-label">
+            <span>Процессор (CPU)</span>
+            <span class="metric-val mono" id="win-cpu-pct">0%</span>
+          </div>
+          <div class="progress-bar-bg">
+            <div class="progress-bar-fill fill-win" id="win-cpu-bar" style="width: 0%"></div>
+          </div>
+        </div>
+
+        <div class="metric-row">
+          <div class="metric-label">
+            <span>Оперативная память (RAM)</span>
+            <span class="metric-val mono" id="win-ram-text">-- / -- ГБ (0%)</span>
+          </div>
+          <div class="progress-bar-bg">
+            <div class="progress-bar-fill fill-win" id="win-ram-bar" style="width: 0%"></div>
+          </div>
+        </div>
+
+        <div class="metric-row">
+          <div class="metric-label">
+            <span>Диск C:</span>
+            <span class="metric-val mono" id="win-disk-c-text">--</span>
+          </div>
+          <div class="progress-bar-bg">
+            <div class="progress-bar-fill fill-warning" id="win-disk-c-bar" style="width: 0%"></div>
+          </div>
+        </div>
+
+        <div class="metric-row">
+          <div class="metric-label">
+            <span>Диск D:</span>
+            <span class="metric-val mono" id="win-disk-d-text">--</span>
+          </div>
+          <div class="progress-bar-bg">
+            <div class="progress-bar-fill fill-win" id="win-disk-d-bar" style="width: 0%"></div>
+          </div>
+        </div>
+
+        <div class="chips-group">
+          <div class="chips-title">Активные окна и процессы</div>
+          <div class="chips-list" id="win-windows-list">
+            <div class="chip">Загрузка данных...</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Android Node -->
+      <div class="card card-and" id="card-and">
+        <div class="card-header">
+          <div>
+            <div class="device-title">
+              <span>📱</span> <span id="and-hostname">OPPO Find X7 Ultra</span>
+            </div>
+            <div class="device-sub" id="and-os">Android 16 · Snapdragon 8 Gen 3</div>
+          </div>
+          <div class="badge badge-online mono" id="and-status-badge">● ОНЛАЙН</div>
+        </div>
+
+        <div class="info-grid">
+          <div class="info-box">
+            <div class="info-box-label">Аптайм / Статус</div>
+            <div class="info-box-value mono" id="and-uptime">--</div>
+          </div>
+          <div class="info-box">
+            <div class="info-box-label">Load Average (1/5/15)</div>
+            <div class="info-box-value mono" id="and-load">--</div>
+          </div>
+        </div>
+
+        <div class="metric-row">
+          <div class="metric-label">
+            <span>Оперативная память (RAM 16 ГБ)</span>
+            <span class="metric-val mono" id="and-ram-text">-- / -- ГБ (0%)</span>
+          </div>
+          <div class="progress-bar-bg">
+            <div class="progress-bar-fill fill-and" id="and-ram-bar" style="width: 0%"></div>
+          </div>
+        </div>
+
+        <div class="metric-row">
+          <div class="metric-label">
+            <span>Swap / ZRAM (9.5 ГБ)</span>
+            <span class="metric-val mono" id="and-swap-text">-- / -- ГБ (0%)</span>
+          </div>
+          <div class="progress-bar-bg">
+            <div class="progress-bar-fill fill-purple" id="and-swap-bar" style="width: 0%"></div>
+          </div>
+        </div>
+
+        <div class="metric-row">
+          <div class="metric-label">
+            <span>Внутренняя память (512 ГБ UFS)</span>
+            <span class="metric-val mono" id="and-storage-text">--</span>
+          </div>
+          <div class="progress-bar-bg">
+            <div class="progress-bar-fill fill-and" id="and-storage-bar" style="width: 0%"></div>
+          </div>
+        </div>
+
+        <div class="chips-group">
+          <div class="chips-title">Параметры и среда хоста</div>
+          <div class="chips-list">
+            <div class="chip"><span class="chip-bullet" style="background:#10b981;"></span> Терминал Termux / aarch64</div>
+            <div class="chip"><span class="chip-bullet" style="background:#10b981;"></span> Tailscale Mesh Node</div>
+            <div class="chip"><span class="chip-bullet" style="background:#10b981;"></span> Direct Host Relay</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <footer>
+      <div>Узел хостинга: <strong>MateBook16 (Tailscale Funnel Gateway)</strong> · Непрерывный опрос состояния каждые 2 секунды</div>
+      <div class="mono" style="opacity: 0.7;">Antigravity Mesh Orchestration Protocol</div>
+    </footer>
+  </div>
+
+  <script>
+    async function updateDashboard() {
+      try {
+        const res = await fetch('status.txt?t=' + Date.now());
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await res.json();
+
+        document.getElementById('last-update-badge').textContent = 'Обновлено: ' + (data.updated_at || new Date().toLocaleTimeString());
+        document.getElementById('global-pulse').style.background = '#00d2ff';
+
+        // Update Android
+        if (data.android) {
+          const a = data.android;
+          document.getElementById('and-hostname').textContent = a.hostname || 'OPPO Find X7 Ultra';
+          document.getElementById('and-os').textContent = (a.os || 'Android 16') + ' · ' + (a.soc || 'Snapdragon 8 Gen 3');
+          document.getElementById('and-uptime').textContent = a.uptime || '--';
+
+          const badge = document.getElementById('and-status-badge');
+          if (a.online) {
+            badge.className = 'badge badge-online mono';
+            badge.textContent = '● В СЕТИ';
+          } else {
+            badge.className = 'badge badge-offline mono';
+            badge.textContent = '○ СОН / ОФЛАЙН';
+          }
+          
+          if (a.load_avg) {
+            document.getElementById('and-load').textContent = a.load_avg.map(v => Number(v).toFixed(1)).join(' / ');
+          }
+
+          if (a.ram) {
+            document.getElementById('and-ram-text').textContent = `${a.ram.used_gb} / ${a.ram.total_gb} ГБ (${a.ram.pct}%)`;
+            document.getElementById('and-ram-bar').style.width = Math.min(100, a.ram.pct) + '%';
+          }
+
+          if (a.swap) {
+            document.getElementById('and-swap-text').textContent = `${a.swap.used_gb} / ${a.swap.total_gb} ГБ (${a.swap.pct}%)`;
+            document.getElementById('and-swap-bar').style.width = Math.min(100, a.swap.pct) + '%';
+          }
+
+          if (a.storage) {
+            document.getElementById('and-storage-text').textContent = `Занято ${a.storage.used_gb} из ${a.storage.total_gb} ГБ (свободно ${a.storage.free_gb} ГБ)`;
+            document.getElementById('and-storage-bar').style.width = Math.min(100, a.storage.pct) + '%';
+          }
+        }
+
+        // Update Windows
+        if (data.windows) {
+          const w = data.windows;
+          const badge = document.getElementById('win-status-badge');
+          if (w.online) {
+            badge.className = 'badge badge-online mono';
+            badge.textContent = '● ОНЛАЙН';
+          } else {
+            badge.className = 'badge badge-offline mono';
+            badge.textContent = '○ НЕТ СВЯЗИ';
+          }
+
+          document.getElementById('win-hostname').textContent = w.hostname || 'MateBook16';
+          document.getElementById('win-os').textContent = w.os || 'Windows 11';
+          document.getElementById('win-uptime').textContent = w.uptime || '--';
+
+          const cpuPct = Math.round(w.cpu_pct || 0);
+          document.getElementById('win-cpu-text').textContent = cpuPct + '%';
+          document.getElementById('win-cpu-pct').textContent = cpuPct + '%';
+          document.getElementById('win-cpu-bar').style.width = Math.min(100, cpuPct) + '%';
+
+          if (w.ram) {
+            const usedGb = (w.ram.used_mb / 1024).toFixed(1);
+            const totalGb = (w.ram.total_mb / 1024).toFixed(1);
+            document.getElementById('win-ram-text').textContent = `${usedGb} / ${totalGb} ГБ (${w.ram.pct}%)`;
+            document.getElementById('win-ram-bar').style.width = Math.min(100, w.ram.pct) + '%';
+          }
+
+          if (w.disks && w.disks.length >= 2) {
+            const c = w.disks[0];
+            const d = w.disks[1];
+            document.getElementById('win-disk-c-text').textContent = `Свободно ${c.free_gb} из ${c.total_gb} ГБ (${c.used_pct}% занято)`;
+            document.getElementById('win-disk-c-bar').style.width = Math.min(100, c.used_pct) + '%';
+
+            document.getElementById('win-disk-d-text').textContent = `Свободно ${d.free_gb} из ${d.total_gb} ГБ (${d.used_pct}% занято)`;
+            document.getElementById('win-disk-d-bar').style.width = Math.min(100, d.used_pct) + '%';
+          }
+
+          if (w.windows && w.windows.length > 0) {
+            const list = document.getElementById('win-windows-list');
+            list.innerHTML = '';
+            w.windows.forEach(win => {
+              const chip = document.createElement('div');
+              chip.className = 'chip';
+              chip.innerHTML = `<span class="chip-bullet"></span> <strong>${escapeHtml(win.name)}</strong>: ${escapeHtml(win.title)}`;
+              list.appendChild(chip);
+            });
+          }
+        }
+      } catch (err) {
+        console.error('Fetch error:', err);
+        document.getElementById('global-pulse').style.background = '#ef4444';
+      }
+    }
+
+    function escapeHtml(str) {
+      if (!str) return '';
+      return String(str).replace(/[&<>"']/g, function(m) {
+        return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m];
+      });
+    }
+
+    setInterval(updateDashboard, 2000);
+    updateDashboard();
+  </script>
+</body>
+</html>

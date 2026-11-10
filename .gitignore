@@ -36,3 +36,8 @@ dist/
 # a local `npm install` in a checkout must never be committed.
 node_modules/
 npm-debug.log*
+
+# The Windows status dashboard is code (index.html), but its payload is a live
+# snapshot of one machine: hostname, disks and open windows stay local.
+status_web/status.json
+status_web/status.txt
