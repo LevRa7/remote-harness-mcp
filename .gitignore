@@ -41,3 +41,5 @@ npm-debug.log*
 # snapshot of one machine: hostname, disks and open windows stay local.
 status_web/status.json
 status_web/status.txt
+# The personal Telegram pairing code is for one person, not for a public repo.
+telegram-brother-qr.png
