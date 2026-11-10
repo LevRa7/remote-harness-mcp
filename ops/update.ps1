@@ -294,6 +294,11 @@ if (-not (Test-File $Python)) {
 Write-Note ('updater start: install=' + $InstallDir + ' (' + $PayloadReason + ') interpreter=' + $Python + ' (' + $InterpreterReason + ') mode=' + $(if ($Check) { 'check' } else { 'apply' }))
 
 # --------------------------------------------------------------- run Python --
+# "python -m core.updater" resolves the package from the CURRENT directory, and
+# a Scheduled Task starts in %SystemRoot%\System32, where there is no core
+# package: the daily task used to fail with ModuleNotFoundError. chdir into the
+# payload first, so the wrapper works from any caller.
+Set-Location -LiteralPath $InstallDir
 # stdout and stderr are redirected to files by cmd.exe, not captured by
 # Start-Process: on Windows PowerShell 5.1 a process started that way reports an
 # empty ExitCode once it has exited, and mixing stderr into stdout would break
