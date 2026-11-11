@@ -1,7 +1,7 @@
 {
   "name": "remote-harness-mcp",
   "version": "0.4.8",
-  "description": "Turn your PC, Laptop, Server or Android phone into an autonomous execution node for Google Gemini via native MCP: 28 tools, write/edit/search, background jobs, a persistent chat goal, public file and page sharing, remote node settings (read-only, cd, isolated container), secure reverse tunnel, self-update, and a device branch (battery, signal, sensors, camera, microphone, notifications) for phones and laptops.",
+  "description": "Turn your PC, Laptop, Server or Android phone into an autonomous execution node for Google Gemini via native MCP: 30 tools, write/edit/search, background jobs, timers/cron and a persistent chat goal, public file and page sharing, remote node settings (read-only, cd, isolated container), secure reverse tunnel, self-update, and a device branch (battery, signal, sensors, camera, microphone, notifications) for phones and laptops.",
   "main": "bin/cli.js",
   "bin": {
     "remote-harness-mcp": "bin/cli.js",

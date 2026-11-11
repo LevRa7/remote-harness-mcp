@@ -92,6 +92,8 @@ def test_tools_surface_contains_all_tools():
         # The persistent objective, set from the chat: a note that outlives the
         # session, next to the switches it usually accompanies.
         "goal",
+        # Timers: long work continues after the chat's call budget ends.
+        "schedule",
         # The device branch (the node's own phone or laptop), added in the same
         # slot and for the same reason: after everything that existed when it
         # landed and before the share block, so neither the legacy surface nor the

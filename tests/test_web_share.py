@@ -40,7 +40,7 @@ DEVICE_TOOLS = ("device_info", "device_control", "device_capture", "device_messa
 #: (``goal``) landed next to self-update for the same reason the device branch
 #: did: after the legacy surface and before the device block, so no block that
 #: already had a position had to move.
-SETTINGS_TOOLS = ("node_control", "goal")
+SETTINGS_TOOLS = ("node_control", "goal", "schedule")
 
 #: The tool surface that existed before shares were added, in order. Self-update
 #: (mesh_update) was added in the same slot: before the share tools, after the
@@ -139,9 +139,9 @@ def test_the_share_tools_are_the_last_four_and_do_not_disturb_the_rest():
     assert names[settings_at:device_at] == list(SETTINGS_TOOLS)
     assert names[device_at:shares_at] == list(DEVICE_TOOLS)
     assert tuple(names[shares_at:]) == SHARE_TOOLS
-    assert len(names) == 27, (
+    assert len(names) == 28, (
         "the node must advertise 16 legacy tools, screen_capture, node_control, "
-        "goal, 4 device tools and 4 share tools")
+        "goal, schedule, 4 device tools and 4 share tools")
 
 
 def test_every_share_tool_has_a_handler_and_a_schema():

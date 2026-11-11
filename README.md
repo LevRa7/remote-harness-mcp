@@ -229,6 +229,21 @@ In `approval` mode a mutating call is not cut off: the node queues it, **waits f
 
 From the chat: ask for `node_control(action="mode", mode="full")` — that transition itself needs one confirmation, and after it nothing asks again. If a call still answers `approval_required`, it did **not** run: the model must say it is waiting and retry the same call, not end the task. Changing the access mode revokes "always allow", so switching to approval means approvals again.
 
+### Timers and cron from the chat (`schedule`)
+
+One tool call must answer within ~30 s, and an MCP server cannot wake the chat. So the model leaves long work to a timer on the node instead of waiting inside a call.
+
+| Action | What it does |
+| :--- | :--- |
+| `set` + `label` + one of `after_sec` / `every_sec` / `at` | one shot, every N seconds (>=10), or daily at `HH:MM` |
+| `command` | what to run when it fires: the command starts as a background job (`run_job`) and its `job_id` is kept in the continuation |
+| `note` | a reminder without a command |
+| `list` / `cancel` / `ack` | inspect, stop, acknowledge |
+
+A fired timer becomes a **continuation**: it appears in `mesh_status` and is injected into the session instructions on the next `initialize` as `SCHEDULED CONTINUATION: …`. The model collects the result with `job_output` and acknowledges it with `schedule(action="ack")`. The command runs on the node even without the chat; the chat gets the result on its next turn.
+
+From the console: `rhm schedule`, `rhm schedule cancel <id>`, `rhm schedule ack [id]`.
+
 ### Goal from the chat (`goal`)
 
 A chat has no memory of the previous session: the client closes and the next turn starts from nothing. The node holds the objective instead.
