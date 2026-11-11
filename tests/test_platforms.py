@@ -324,6 +324,51 @@ def test_android_capabilities_say_no_screenshot():
 
 
 # ---------------------------------------------------------------------------
+# Darwin backend (built anywhere, macOS-specific answers only on macOS)
+# ---------------------------------------------------------------------------
+
+def test_darwin_backend_satisfies_the_contract():
+    from core.platforms import darwin
+
+    backend = darwin.DarwinBackend()
+    assert backend.scenario == "darwin"
+    assert backend.label
+    name, argv = backend.shell()
+    assert name in ("bash", "sh") and argv
+    assert isinstance(backend.capabilities(), dict)
+    assert set(backend.capabilities()) >= {"shell", "vitals", "info_blocks",
+                                           "process_tree", "screenshot", "clipboard"}
+
+
+def test_darwin_telemetry_degrades_instead_of_raising():
+    """The suite runs this on Windows/Linux: unknown must be 0, not an exception."""
+    from core.platforms.darwin import telemetry
+
+    if sys.platform != "darwin":
+        # There is no sysctlbyname on this host, and inventing a number would be
+        # worse than the honest "unknown".
+        assert telemetry.sysctl("hw.memsize") is None
+        assert telemetry.total_bytes() == 0
+    vitals = telemetry.vitals()
+    assert set(vitals) >= {"hostname", "cpu_load", "ram", "disk"}
+    assert set(vitals["cpu_load"]) == {"1m", "5m", "15m"}
+    assert vitals["ram"]["total_mb"] >= 0
+    blocks = telemetry.info_blocks()
+    assert set(blocks) == {"disks", "memory", "load", "top_processes"}
+
+
+def test_darwin_wallpaper_walk_finds_a_file_url():
+    from core.platforms.darwin import _first_image_path
+
+    payload = {"Desktop": {"Content": [{"Choices": [
+        {"Provider": "com.apple.wallpaper.choice.image",
+         "Configuration": {"url": "file:///Library/Desktop%20Pictures/Hello.heic"}},
+    ]}]}}
+    assert _first_image_path(payload) == "/Library/Desktop%20Pictures/Hello.heic"
+    assert _first_image_path({"nothing": 1}) == ""
+
+
+# ---------------------------------------------------------------------------
 # PNG encoder (used by the Windows screenshot path)
 # ---------------------------------------------------------------------------
 

@@ -23,6 +23,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Optional
 
 import pytest
 
@@ -30,10 +31,31 @@ from core import paths
 
 REPO = Path(__file__).resolve().parent.parent
 
-BASH = shutil.which("bash")
+def _posix_shell() -> Optional[str]:
+    """A bash that runs POSIX scripts on THIS filesystem, or ``None``.
+
+    On Windows ``shutil.which("bash")`` normally finds
+    ``C:\\Windows\\System32\\bash.exe`` - the WSL launcher, not a POSIX shell for
+    this filesystem. It runs a Linux VM that cannot see these paths (and on a box
+    where WSL was never provisioned it fails with ``HCS/E_ACCESSDENIED``), which
+    made the alias checks fail for an environmental reason. The codebase already
+    refuses that binary for the node's own shell (see
+    ``test_windows_never_defaults_to_bash``); the tests do the same.
+    """
+    candidate = shutil.which("bash")
+    if not candidate:
+        return None
+    if os.name == "nt":
+        return None
+    return candidate
+
+
+BASH = _posix_shell()
 NODE = shutil.which("node")
 needs_shell = pytest.mark.skipif(
-    not (BASH and NODE), reason="bash and node are required for the alias publish checks")
+    not (BASH and NODE),
+    reason="bash (a real POSIX shell, not the Windows WSL launcher) and node are "
+           "required for the alias publish checks")
 
 
 def _read(relative: str) -> str:
@@ -153,7 +175,7 @@ def test_choose_asset_prefers_the_current_setup_name():
     assert chosen["name"] == "RemoteHarnessMCP-Setup-0.4.4.exe"
 
 
-@pytest.mark.skipif(sys.platform == "darwin", reason="the systemd branch is Linux-only")
+@pytest.mark.skipif(sys.platform != "linux", reason="the systemd branch is Linux-only")
 def test_restart_uses_the_pre_rename_systemd_unit(monkeypatch, tmp_path):
     from core import updater
 

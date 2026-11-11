@@ -24,6 +24,8 @@ from typing import Dict, List, Optional
 PROC_ALL_PIDS = 1
 #: ``proc_pidinfo`` flavor: ``struct proc_bsdinfo``.
 PROC_PIDTBSDINFO = 3
+#: ``proc_pidinfo`` flavor: ``struct proc_taskinfo`` (resident memory, threads).
+PROC_PIDTASKINFO = 4
 
 
 class ProcBsdInfo(ctypes.Structure):
@@ -55,9 +57,38 @@ class ProcBsdInfo(ctypes.Structure):
     ]
 
 
+class ProcTaskInfo(ctypes.Structure):
+    """``struct proc_taskinfo`` from ``libproc.h``: resident memory and threads.
+
+    The whole struct is declared, not just its first two fields: ``proc_pidinfo``
+    writes it through the pointer we hand it, so a short declaration would let
+    the kernel write past the end of the buffer.
+    """
+
+    _fields_ = [
+        ("pti_virtual_size", ctypes.c_uint64),
+        ("pti_resident_size", ctypes.c_uint64),
+        ("pti_total_user", ctypes.c_uint64),
+        ("pti_total_system", ctypes.c_uint64),
+        ("pti_threads_user", ctypes.c_uint64),
+        ("pti_threads_system", ctypes.c_uint64),
+        ("pti_policy", ctypes.c_int32),
+        ("pti_faults", ctypes.c_int32),
+        ("pti_pageins", ctypes.c_int32),
+        ("pti_cow_faults", ctypes.c_int32),
+        ("pti_messages_sent", ctypes.c_int32),
+        ("pti_messages_received", ctypes.c_int32),
+        ("pti_syscalls_mach", ctypes.c_int32),
+        ("pti_syscalls_unix", ctypes.c_int32),
+        ("pti_csw", ctypes.c_int32),
+        ("pti_threadnum", ctypes.c_int32),
+        ("pti_numrunning", ctypes.c_int32),
+        ("pti_priority", ctypes.c_int32),
+    ]
+
+
 _LIB = None
 _LOADED = False
-
 
 def load():
     """``libproc.dylib``, or ``None`` off macOS."""
@@ -114,6 +145,50 @@ def alive(pid: int, start_time: Optional[int] = None) -> bool:
 def start_time_of(pid: int) -> Optional[int]:
     info = info_for(pid)
     return int(info.pbi_start_tvsec) if info is not None else None
+
+
+def task_info(pid: int) -> Optional[ProcTaskInfo]:
+    """``proc_taskinfo`` for *pid* (resident size, thread count), or ``None``."""
+    lib = load()
+    if lib is None:
+        return None
+    try:
+        _prototype(lib)
+        info = ProcTaskInfo()
+        written = lib.proc_pidinfo(int(pid), PROC_PIDTASKINFO, 0,
+                                   ctypes.byref(info), ctypes.sizeof(ProcTaskInfo))
+        if written <= 0:
+            return None
+        return info
+    except Exception:
+        return None
+
+
+def resident_bytes(pid: int) -> Optional[int]:
+    """Resident (RSS) memory of *pid* in bytes, or ``None`` when it is gone."""
+    info = task_info(pid)
+    if info is None:
+        return None
+    try:
+        return int(info.pti_resident_size)
+    except (TypeError, ValueError):
+        return None
+
+
+def name_of(pid: int) -> str:
+    """The process name as libproc reports it (``pbi_name``, else ``pbi_comm``)."""
+    info = info_for(pid)
+    if info is None:
+        return ""
+    for field in ("pbi_name", "pbi_comm"):
+        try:
+            raw = getattr(info, field)
+        except AttributeError:
+            continue
+        text = bytes(raw).split(b"\x00", 1)[0].decode("utf-8", "replace").strip()
+        if text:
+            return text
+    return ""
 
 
 def pids() -> List[int]:
@@ -175,6 +250,7 @@ def kill_tree(pid: int) -> None:
 
 
 __all__ = [
-    "PROC_ALL_PIDS", "PROC_PIDTBSDINFO", "ProcBsdInfo", "alive", "descendants",
-    "info_for", "kill_tree", "load", "parent_map", "pids", "start_time_of",
+    "PROC_ALL_PIDS", "PROC_PIDTBSDINFO", "PROC_PIDTASKINFO", "ProcBsdInfo",
+    "ProcTaskInfo", "alive", "descendants", "info_for", "kill_tree", "load",
+    "name_of", "parent_map", "pids", "resident_bytes", "start_time_of", "task_info",
 ]

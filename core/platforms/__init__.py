@@ -140,7 +140,7 @@ def _build(scenario: str) -> PlatformBackend:
 
         return AndroidBackend()
     if scenario == "darwin":
-        from core.platforms.linux import DarwinBackend
+        from core.platforms.darwin import DarwinBackend
 
         return DarwinBackend()
     from core.platforms.linux import LinuxBackend
