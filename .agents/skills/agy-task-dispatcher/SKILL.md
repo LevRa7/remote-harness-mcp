@@ -36,6 +36,8 @@ description: Orchestrates distributed Linux hosts and compute nodes using Native
 | `system_info()` | Сводка по хосту одним вызовом |
 | `mesh_status()` | Подтверждение, что узел на связи (вызывать, если кажется, что хост офлайн) |
 | `run_job(command)` → `job_output(job_id)` / `job_kill` / `job_list` | Долгие команды в фоне |
+| `node_control(action)` | Настройки узла: `status`, `mode` (read-only/approval/full), `cd`, `pause`/`resume`, `sandbox` (изолированный контейнер), `remote_control` |
+| `goal(action)` | Цель, которая переживает сессию: `set`, `get`, `complete`, `blocked`, `clear` |
 | `get_orchestration_skill()` | Актуальный текст этого скилла |
 
 > ⚡ **Таймауты:** команда дольше ~25 с обрывается шлюзом. Всё долгое (сборки, установки, тесты,

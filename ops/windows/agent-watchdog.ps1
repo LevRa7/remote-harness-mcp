@@ -408,9 +408,12 @@ if ([string]::IsNullOrWhiteSpace($ConfigDir)) {
     $ConfigDir = Join-Path $profileDir '.config\remote-harness-mcp'
     # An upgraded node keeps the configuration directory its token already lives
     # in (the project shipped as "Antigravity Mesh"); core/paths.py resolves the
-    # same preference for the node itself.
+    # same preference for the node itself. The NEW directory can exist without
+    # being the node's - a cabinet database creates it - so what decides is
+    # whether that directory actually holds agent.env.
     $legacyConfigDir = Join-Path $profileDir '.config\antigravity-mesh'
-    if (-not (Test-Path -LiteralPath $ConfigDir) -and (Test-Path -LiteralPath $legacyConfigDir)) {
+    if (-not (Test-Path -LiteralPath (Join-Path $ConfigDir 'agent.env')) -and
+        (Test-Path -LiteralPath (Join-Path $legacyConfigDir 'agent.env'))) {
         $ConfigDir = $legacyConfigDir
     }
 }

@@ -59,15 +59,21 @@ except ImportError as _websockets_error:      # a launcher pinned a Python witho
 else:
     _WEBSOCKETS_IMPORT_ERROR = None
 
-from core import domain, mcp_tools, paths, updater
+from core import control, domain, mcp_tools, paths, updater
+from core import schedule as schedule_module
 from core import version as version_module
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("rhm-agent")
 
 #: Resolved through :mod:`core.paths`: a fresh install uses the new name, an
-#: upgraded node keeps the directory its token already lives in.
-CONFIG_DIR = paths.config_dir()
+#: upgraded node keeps the directory its token already lives in. It goes through
+#: ``control.control_dir`` - not ``paths.config_dir`` - because after the rename
+#: the heartbeat, the stop marker, the instance lock and the switches written by
+#: ``rhm``/the tray must all live in ONE directory: an agent that wrote its
+#: heartbeat to the new name while ``rhm`` and the watchdog read the old one
+#: looked dead while it was connected (and the watchdog then started a duplicate).
+CONFIG_DIR = control.control_dir()
 DEFAULT_CONFIG_FILE = os.path.join(CONFIG_DIR, "agent.env")
 
 #: Diagnostics that answer "why is this node offline?" without the tunnel. The
@@ -731,6 +737,47 @@ async def run_agent():
             await asyncio.sleep(delay)
 
 
+def fire_due_schedules() -> list:
+    """Run every timer that is due; returns the schedules that fired.
+
+    The ``command`` runs as a background job, so a long one never blocks the
+    scheduler; its job id is recorded in the continuation, and the model picks
+    the result up with ``job_output`` on its next turn. A timer that carries only
+    a note is a reminder.
+    """
+    fired = []
+    for entry in schedule_module.due():
+        job_id = ""
+        result = "reminder"
+        if entry.get("command"):
+            res = mcp_tools.call_tool(
+                "run_job", {"command": entry["command"], "_origin": "cli"})
+            if isinstance(res, dict):
+                job_id = str(res.get("job_id") or "")
+                result = (("started job %s" % job_id) if job_id
+                          else str(res.get("error") or "not started"))
+        schedule_module.mark_fired(entry["id"], job_id=job_id, result=result)
+        logger.info("Schedule '%s' fired (%s)", entry.get("label"), result)
+        fired.append(entry)
+    return fired
+
+
+def start_scheduler(interval: float = 5.0):
+    """Daemon thread that fires due timers; it must never keep the process alive."""
+
+    def _loop():
+        while True:
+            try:
+                fire_due_schedules()
+            except Exception as exc:            # a timer must never take the node down
+                logger.warning("Scheduler iteration failed: %s", exc)
+            time.sleep(max(1.0, interval))
+
+    thread = threading.Thread(target=_loop, name="mesh-scheduler", daemon=True)
+    thread.start()
+    return thread
+
+
 def main() -> None:
     # Fail fast on a configuration that can never work, instead of retrying the
     # gateway every 60 seconds forever from a Windows Startup launcher.
@@ -747,6 +794,7 @@ def main() -> None:
     if recovery:
         logger.warning("Self-update recovery: %s", recovery)
     start_heartbeat()
+    start_scheduler()
     if _WEBSOCKETS_IMPORT_ERROR is not None:
         # The banner above already named the interpreter and the missing module.
         logger.error("Refusing to start: this interpreter cannot import 'websockets'.")

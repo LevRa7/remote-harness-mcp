@@ -216,59 +216,93 @@ def test_system_info_reports_the_command_shell(monkeypatch):
 
 
 def test_system_info_uses_platform_branches(monkeypatch):
-    """Windows scripts run for Windows, POSIX commands everywhere else."""
-    import platform as _platform
+    """The four telemetry blocks come from the platform backend, in-process.
+
+    Before the platform split, ``system_info`` started PowerShell with four CIM
+    queries on Windows and ``df``/``free``/``ps``/``uptime`` elsewhere.  Those are
+    external programs (or OS services) the node cannot assume on a clean box, and
+    each one cost a process per call.  The backend answers from kernel calls or
+    ``/proc`` instead, so the wiring is what this test pins: whatever
+    ``info_blocks()`` returns ends up in the payload, and nothing is spawned.
+    """
     import subprocess as _sp
 
-    seen = []
+    spawned = []
 
-    class FakeProc:
-        stdout = "stub"
-        stderr = ""
+    class StubBackend(object):
+        def info_blocks(self):
+            return {
+                "disks": "D-TABLE",
+                "memory": "M-TABLE",
+                "load": "L-LINE",
+                "top_processes": "P-TABLE",
+            }
 
-    def fake_run(argv, **kwargs):
-        seen.append(argv)
-        return FakeProc()
+        def wallpaper(self):
+            return r"C:\wall.jpg"
 
-    monkeypatch.setattr(_platform, "system", lambda: "Windows")
-    monkeypatch.setattr(_sp, "run", fake_run)
-    monkeypatch.setattr(mcp_tools, "powershell_argv", lambda: ["pwsh", "-Command"])
-    monkeypatch.setattr(mcp_tools, "windows_wallpaper", lambda: r"C:\wall.jpg")
+    def refuse(*args, **kwargs):
+        spawned.append(args)
+        raise AssertionError("system_info must not spawn a program")
+
+    monkeypatch.setattr(mcp_tools.platforms, "backend", lambda scenario=None: StubBackend())
+    monkeypatch.setattr(mcp_tools, "_device_blocks", lambda quick=None: {})
+    monkeypatch.setattr(_sp, "run", refuse)
 
     info = mcp_tools.call_tool("system_info", {})
 
-    assert info["desktop"].startswith("Windows")
-    assert info["session_type"]
+    assert info["disks"] == "D-TABLE"
+    assert info["memory"] == "M-TABLE"
+    assert info["load"] == "L-LINE"
+    assert info["top_processes"] == "P-TABLE"
     assert info["wallpaper"] == r"C:\wall.jpg"
-    scripts = [" ".join(argv) for argv in seen]
-    assert any("Get-CimInstance" in script for script in scripts)
-    assert not any("df -h" in script for script in scripts)
+    assert spawned == []
 
 
-def test_system_info_windows_uses_cmd_when_powershell_missing(monkeypatch):
-    import platform as _platform
+def test_system_info_needs_no_powershell_when_it_is_missing(monkeypatch):
+    """A Windows box with PowerShell removed still answers every telemetry block.
+
+    The old path fell back to ``wmic``/``tasklist`` here - ``wmic`` is gone from
+    current Windows builds and ``tasklist`` prints localized text. The backend
+    never needed either, so the answer must be identical with PowerShell absent.
+    """
     import subprocess as _sp
 
-    seen = []
+    spawned = []
 
-    class FakeProc:
-        stdout = "stub"
-        stderr = ""
+    class StubBackend(object):
+        def info_blocks(self):
+            return {"disks": "D", "memory": "M", "load": "L", "top_processes": "P"}
 
-    def fake_run(argv, **kwargs):
-        seen.append(argv)
-        return FakeProc()
+        def wallpaper(self):
+            return ""
 
-    monkeypatch.setattr(_platform, "system", lambda: "Windows")
-    monkeypatch.setattr(_sp, "run", fake_run)
+    def refuse(*args, **kwargs):
+        spawned.append(args)
+        raise AssertionError("no program may be spawned")
+
     monkeypatch.setattr(mcp_tools, "powershell_argv", lambda: None)
-    monkeypatch.setattr(mcp_tools, "_SHELL_CACHE", ("cmd", ["cmd.exe", "/d", "/s", "/c"]))
-    # The injected cache is authoritative only when its key matches MESH_SHELL.
-    monkeypatch.setattr(mcp_tools, "_SHELL_CACHE_KEY", "")
     monkeypatch.setattr(mcp_tools, "windows_wallpaper", lambda: "")
+    monkeypatch.setattr(mcp_tools.platforms, "backend", lambda scenario=None: StubBackend())
+    monkeypatch.setattr(mcp_tools, "_device_blocks", lambda quick=None: {})
+    monkeypatch.setattr(_sp, "run", refuse)
 
-    mcp_tools.call_tool("system_info", {})
+    info = mcp_tools.call_tool("system_info", {})
 
-    scripts = [" ".join(argv) for argv in seen]
-    assert any("tasklist" in script for script in scripts)
-    assert not any("df -h" in script for script in scripts)
+    assert (info["disks"], info["memory"], info["load"], info["top_processes"]) == ("D", "M", "L", "P")
+    assert spawned == []
+
+
+@pytest.mark.skipif(not IS_WINDOWS, reason="exercises the real Win32 backend")
+def test_native_telemetry_answers_on_a_real_windows_host():
+    """The live path: no PowerShell, no WMI, and the numbers are real."""
+    from core.platforms import backend
+
+    blocks = backend("windows").info_blocks()
+    assert set(blocks) == {"disks", "memory", "load", "top_processes"}
+    for text in blocks.values():
+        assert text.strip()
+    vitals = backend("windows").vitals()
+    assert vitals["ram"]["total_mb"] > 0
+    assert vitals["disk"]["total_gb"] > 0
+    assert 0.0 <= vitals["ram"]["used_pct"] <= 100.0

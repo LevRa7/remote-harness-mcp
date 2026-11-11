@@ -54,6 +54,7 @@ description: Multi-device subagent orchestration mesh where Web-Gemini acts as c
 | `grep_search(pattern, path)` / `glob_find(pattern, path)` | Поиск по содержимому / по именам файлов |
 | `system_vitals()` | CPU, RAM, диск |
 | `system_info()` | Сводка по хосту одним вызовом |
+| `screen_capture(path)` | PNG-снимок экрана хоста (Windows — GDI; на headless-хосте и на телефоне — причина, почему снимка нет) |
 | `mesh_status()` | Подтверждение, что узел на связи (вызывать, если кажется, что хост офлайн) |
 | `run_job(command)` → `job_output(job_id)` / `job_kill` / `job_list` | Долгие команды в фоне |
 | `get_orchestration_skill()` | Актуальный текст этого скилла |

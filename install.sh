@@ -897,10 +897,10 @@ if [ ! -f "$SCRIPT_DIR/core/agent.py" ]; then
     # while the branch was advertised - the tool was there, its module was not.
     # tests/test_installer_bootstrap.py fails when a core module is missing here.
     for f in core/__init__.py core/agent.py core/agent_harness.py core/code_cache.py \
-             core/device.py core/domain.py core/hooks.py core/mcp_tools.py core/paths.py \
-             core/policies.py core/rekey.py \
-             core/redact.py core/schemas.py core/server.py core/subagents.py core/termux.py \
-             core/triggers.py core/updater.py core/version.py core/vitals.py core/web_share.py \
+             core/control.py core/device.py core/domain.py core/goal.py core/hooks.py core/mcp_tools.py core/menu.py core/paths.py \
+             core/policies.py core/policy.py core/rekey.py \
+             core/redact.py core/rescue.py core/sandbox.py core/schedule.py core/schemas.py core/server.py core/settings.py core/subagents.py core/termux.py \
+             core/triggers.py core/updater.py core/usage.py core/version.py core/vitals.py core/web_share.py core/web_settings.py \
              skills/orchestrator.md; do
         bootstrap_tmp="$BOOTSTRAP_DIR/${f}.part"
         if curl -fsSL "https://${GATEWAY}/${f}" -o "$bootstrap_tmp" 2>/dev/null \
@@ -1596,6 +1596,15 @@ if [ "$MODE" = "standalone" ]; then
     STANDALONE_ENV_FILE="$CONFIG_DIR/standalone.env"
     ENV_FILE_LINE=""
     PLIST_ENV_BLOCK=""
+    GENERATED_STANDALONE_TOKEN=false
+    if [ -z "$TOKEN" ]; then
+        # A standalone server must never run without authentication. Generate a
+        # token here (instead of letting core.server write an unknown one) so the
+        # operator can read it from the 0600 env file and configure the client.
+        TOKEN=$("$PYTHON_BIN" -c 'import secrets; print(secrets.token_hex(16))' 2>/dev/null \
+            || openssl rand -hex 16 2>/dev/null || true)
+        GENERATED_STANDALONE_TOKEN=true
+    fi
     if [ -n "$TOKEN" ]; then
         printf 'MESH_TOKEN=%s\n' "$TOKEN" > "$STANDALONE_ENV_FILE"
         chmod 600 "$STANDALONE_ENV_FILE"
@@ -1608,16 +1617,23 @@ if [ "$MODE" = "standalone" ]; then
     </dict>"
         if [ "$LANG_CHOICE" = "ru" ]; then
             echo -e "${GREEN}[✓] Токен авторизации включён (chmod 600).${RESET}"
+            if [ "$GENERATED_STANDALONE_TOKEN" = true ]; then
+                echo -e "    Сгенерированный токен: ${CYAN}${TOKEN}${RESET} (файл: ${STANDALONE_ENV_FILE})"
+            fi
         else
             echo -e "${GREEN}[OK] Authorization token enabled (chmod 600).${RESET}"
+            if [ "$GENERATED_STANDALONE_TOKEN" = true ]; then
+                echo -e "    Generated token: ${CYAN}${TOKEN}${RESET} (file: ${STANDALONE_ENV_FILE})"
+            fi
         fi
     else
         rm -f "$STANDALONE_ENV_FILE" 2>/dev/null || true
         if [ "$LANG_CHOICE" = "ru" ]; then
-            echo -e "${YELLOW}[!] Токен не задан (--token): сервер доступен без авторизации на 127.0.0.1.${RESET}"
+            echo -e "${RED}[!] Не удалось создать токен: standalone-сервер не будет запущен.${RESET}" >&2
         else
-            echo -e "${YELLOW}[!] No --token given: server is unauthenticated on 127.0.0.1.${RESET}"
+            echo -e "${RED}[!] Could not create a token: the standalone server will not start.${RESET}" >&2
         fi
+        exit 1
     fi
 
     if [ "$LANG_CHOICE" = "ru" ]; then

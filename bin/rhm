@@ -1,0 +1,13 @@
+#!/usr/bin/env sh
+# rhm - Remote Harness MCP console menu (POSIX launcher).
+set -eu
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+if [ -n "${MESH_PYTHON:-}" ]; then
+    PY=$MESH_PYTHON
+elif command -v python3 >/dev/null 2>&1; then
+    PY=python3
+else
+    PY=python
+fi
+cd "$ROOT"
+exec "$PY" -m core.menu "$@"

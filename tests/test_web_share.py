@@ -36,6 +36,12 @@ SHARE_TOOLS = ("share_file", "serve_dir", "share_list", "unshare")
 #: and swallowing the device tools into them would make that name a lie.
 DEVICE_TOOLS = ("device_info", "device_control", "device_capture", "device_messages")
 
+#: The node's own switches (``node_control``) and the persistent objective
+#: (``goal``) landed next to self-update for the same reason the device branch
+#: did: after the legacy surface and before the device block, so no block that
+#: already had a position had to move.
+SETTINGS_TOOLS = ("node_control", "goal")
+
 #: The tool surface that existed before shares were added, in order. Self-update
 #: (mesh_update) was added in the same slot: before the share tools, after the
 #: surface that existed when shares landed.
@@ -57,6 +63,15 @@ PRE_EXISTING_TOOLS = (
     "job_list",
     "mesh_update",
 )
+
+#: Desktop capture, added next to the telemetry tools it answers with. It is its
+#: own group because a screenshot is not "pre-existing", but it sits *inside* the
+#: legacy block: `mesh_status`, `system_info`, `system_vitals`, then this one.
+DESKTOP_TOOLS = ("screen_capture",)
+
+#: The legacy block as it is advertised now: the pre-existing order with the
+#: desktop tool inserted at the position it was added to.
+LEGACY_ORDER = PRE_EXISTING_TOOLS[:3] + DESKTOP_TOOLS + PRE_EXISTING_TOOLS[3:]
 
 
 def _opener():
@@ -115,14 +130,18 @@ def isolated_shares(tmp_path, monkeypatch):
 
 def test_the_share_tools_are_the_last_four_and_do_not_disturb_the_rest():
     names = [tool["name"] for tool in mcp_tools.TOOLS]
-    # Three blocks, in the order they were added: legacy, device branch, shares.
-    device_at = len(PRE_EXISTING_TOOLS)
+    # Five blocks, in the order they were added: legacy (with desktop capture in
+    # its slot), node settings, device branch, shares.
+    settings_at = len(LEGACY_ORDER)
+    device_at = settings_at + len(SETTINGS_TOOLS)
     shares_at = device_at + len(DEVICE_TOOLS)
-    assert names[:device_at] == list(PRE_EXISTING_TOOLS)
+    assert names[:settings_at] == list(LEGACY_ORDER)
+    assert names[settings_at:device_at] == list(SETTINGS_TOOLS)
     assert names[device_at:shares_at] == list(DEVICE_TOOLS)
     assert tuple(names[shares_at:]) == SHARE_TOOLS
-    assert len(names) == 24, (
-        "the node must advertise 16 legacy tools, 4 device tools and 4 share tools")
+    assert len(names) == 27, (
+        "the node must advertise 16 legacy tools, screen_capture, node_control, "
+        "goal, 4 device tools and 4 share tools")
 
 
 def test_every_share_tool_has_a_handler_and_a_schema():

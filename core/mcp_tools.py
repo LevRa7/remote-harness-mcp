@@ -46,10 +46,19 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 #: The public domain is owned by core/domain.py; this module asks for it instead of
 #: keeping a fallback chain of its own. Standard library only, so importing it here
 #: costs nothing and cannot fail for a missing third-party package.
+from core import control
 from core import domain
+from core import goal
 from core import paths
+from core import platforms
+from core import sandbox
+from core import schedule as schedule_module
+from core import settings as node_settings
 from core import updater
+from core import usage
 from core import version as version_module
+from core.platforms import encoding as _platform_encoding
+from core.platforms import shell as _platform_shell
 
 # ---------------------------------------------------------------------------
 # Optional dependency: the host vitals collector.  Kept optional so the module
@@ -121,19 +130,9 @@ def _git_bash_windows() -> Optional[str]:
 
     On Windows "bash" on PATH is normally the WSL launcher: it runs the command
     inside a Linux VM (wrong files, wrong processes) or fails without WSL.
+    The search itself lives in :mod:`core.platforms.shell`.
     """
-    roots = [os.environ.get(k) for k in ("ProgramFiles", "ProgramW6432", "ProgramFiles(x86)", "LOCALAPPDATA")]
-    candidates = []
-    for root in filter(None, roots):
-        candidates.append(os.path.join(root, "Git", "bin", "bash.exe"))
-        candidates.append(os.path.join(root, "Programs", "Git", "bin", "bash.exe"))
-    git = shutil.which("git")
-    if git:  # ...\Git\cmd\git.exe -> ...\Git\bin\bash.exe
-        candidates.append(os.path.join(os.path.dirname(os.path.dirname(git)), "bin", "bash.exe"))
-    for path in candidates:
-        if os.path.isfile(path):
-            return path
-    return None
+    return _platform_shell.git_bash(shutil.which, os.path.isfile, os.environ)
 
 
 def powershell_argv() -> Optional[List[str]]:
@@ -143,16 +142,13 @@ def powershell_argv() -> Optional[List[str]]:
     flags make a one-shot command behave like a script call: no profile, no
     banner, no interactive prompt and no execution-policy surprise.
     """
-    ps = shutil.which("pwsh") or shutil.which("powershell")
-    if not ps:
-        return None
-    return [ps, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command"]
+    return _platform_shell.powershell_argv(shutil.which)
 
 
 def cmd_argv() -> List[str]:
     """argv prefix of cmd.exe (present on every Windows). ``/d`` skips AutoRun,
     ``/s`` keeps the quoting of the whole command intact, ``/c`` runs and exits."""
-    return [os.environ.get("COMSPEC") or "cmd.exe", "/d", "/s", "/c"]
+    return _platform_shell.cmd_argv(os.environ.get("COMSPEC"))
 
 
 def default_windows_shell() -> Tuple[str, List[str]]:
@@ -181,21 +177,23 @@ def command_shell() -> Tuple[str, List[str]]:
 
     The choice is cached per ``MESH_SHELL`` value, so changing the variable (or
     reading it from ``agent.env`` after the module was imported) takes effect.
+    The decision itself lives in :mod:`core.platforms.shell`; this wrapper only
+    supplies the host facts (and stays monkeypatchable, which is how the Windows
+    tests pin every combination without a Windows machine).
     """
     global _SHELL_CACHE, _SHELL_CACHE_KEY
     override = _shell_override()
     if _SHELL_CACHE is None or _SHELL_CACHE_KEY != override:
-        if _IS_WINDOWS:
-            if override in ("cmd", "cmd.exe"):
-                _SHELL_CACHE = ("cmd", cmd_argv())
-            elif override in ("git-bash", "gitbash", "bash"):
-                bash = _git_bash_windows()
-                _SHELL_CACHE = ("git-bash", [bash, "-c"]) if bash else default_windows_shell()
-            else:
-                _SHELL_CACHE = default_windows_shell()
-        else:
-            bash = shutil.which("bash")
-            _SHELL_CACHE = ("bash", [bash, "-c"]) if bash else ("sh", ["/bin/sh", "-c"])
+        _SHELL_CACHE = _platform_shell.resolve(
+            is_windows=_IS_WINDOWS,
+            which=shutil.which,
+            environ=os.environ,
+            isfile=os.path.isfile,
+            override=override,
+            comspec=os.environ.get("COMSPEC"),
+            powershell=powershell_argv(),
+            bash_path=_git_bash_windows() if _IS_WINDOWS else None,
+        )
         _SHELL_CACHE_KEY = override
     return _SHELL_CACHE
 
@@ -401,15 +399,42 @@ def _sha256_hex(data: bytes) -> str:
 
 
 def _resolve(path: Any) -> str:
-    """expanduser -> relative to workspace -> realpath."""
+    """expanduser -> relative to workspace -> realpath.
+
+    In isolated-container mode the host file tools are confined to the mounted
+    project too. ``/workspace/...`` (the path the agent sees inside the
+    container) is translated to the host mount; anything outside is refused.
+    """
     raw = "" if path is None else str(path)
     raw = raw.strip()
     if not raw:
-        raw = _WORKSPACE
+        raw = _current_workspace()
+    isolated = control.sandbox_state()
+    if isolated:
+        workspace = os.path.realpath(str(isolated.get("workspace") or ""))
+        if raw == "/workspace" or raw.startswith("/workspace/"):
+            raw = workspace + raw[len("/workspace"):]
+        if not os.path.isabs(raw):
+            raw = os.path.join(workspace, raw)
+        target = os.path.realpath(os.path.expanduser(raw))
+        if not _within(target, workspace):
+            raise ValueError("path is outside the isolated project: %s" % path)
+        return target
     raw = os.path.expanduser(raw)
     if not os.path.isabs(raw):
-        raw = os.path.join(_WORKSPACE, raw)
+        raw = os.path.join(_current_workspace(), raw)
     return os.path.realpath(raw)
+
+
+def _within(target: str, root: str) -> bool:
+    target = os.path.realpath(target)
+    root = os.path.realpath(root)
+    return target == root or target.startswith(root.rstrip(os.sep) + os.sep)
+
+
+def _current_workspace() -> str:
+    """The live directory chosen in ``rhm``, else the configured default."""
+    return control.workspace() or _WORKSPACE
 
 
 def _within_write_roots(target: str) -> bool:
@@ -425,13 +450,78 @@ def _within_write_roots(target: str) -> bool:
     return False
 
 
+def _read_only_active() -> bool:
+    """The operator's explicit rhm/tray mode wins; env is the fallback.
+
+    ``MESH_READ_ONLY=1`` is still the hard default before anyone touches the
+    menu. Once the operator explicitly chooses a mode, that choice is the
+    permission granted and the env file must not silently override it.
+    """
+    if control.has_explicit_mode():
+        return control.access_mode() == "read_only"
+    return _READ_ONLY or control.access_mode() == "read_only"
+
+
 def _write_guard(target: str) -> Optional[str]:
     """Return an error string when writing to *target* is not permitted."""
-    if _READ_ONLY:
+    if _read_only_active():
         return "server is in read-only mode"
     if not _within_write_roots(target):
         return "path is outside allowed write roots: %s" % target
     return None
+
+
+#: Tools that only observe and therefore keep working when ``MESH_READ_ONLY`` is
+#: set.  Everything else is either refused centrally or carries its own per-action
+#: guard (the device branch allows reads and refuses mutations action by action).
+_READ_ONLY_ALLOWED = frozenset({
+    "mesh_status",
+    "system_info",
+    "system_vitals",
+    "get_orchestration_skill",
+    "list_dir",
+    "read_file",
+    "grep_search",
+    "glob_find",
+    "job_output",
+    "job_list",
+    "share_list",
+    "device_info",
+    "device_control",
+    "device_capture",
+    "device_messages",
+    # The objective is a note in the node's own config directory: it starts no
+    # command and touches no project file, so recording it stays available in
+    # read-only mode (that is exactly when a goal is worth writing down).
+    "goal",
+    # Live USB / rescue (parallel workstream): inspection stays available in
+    # read-only mode; rescue_action is intentionally NOT here and is refused
+    # centrally until its own dry-run/confirmation gate is wired.
+    "rescue_info",
+    "_http_share",
+})
+
+#: Tools that already check ``MESH_READ_ONLY`` inside their implementation; the
+#: dispatcher must let them through so their more specific refusal (and their
+#: read-only actions) still work.
+_READ_ONLY_SELF_GUARDED = frozenset({
+    "write_file",
+    "edit_file",
+    "share_file",
+    "serve_dir",
+    "unshare",
+    "job_kill",
+    "mesh_update",
+    # node_control can throttle the node (read-only on, pause, cd) but its own
+    # implementation refuses every escalation while read-only is set, so it has
+    # to reach that implementation instead of being refused as a whole.
+    "node_control",
+})
+
+READ_ONLY_ERROR = (
+    "This node is read-only: only observation tools are allowed; commands and "
+    "writes are disabled"
+)
 
 
 def _clamp_int(value: Any, low: int, high: int, default: int) -> int:
@@ -495,21 +585,17 @@ _DECODING_CACHE: Optional[List[str]] = None
 
 
 def _windows_code_pages() -> List[str]:
-    """Code pages a Windows child may write: OEM console CP first, then ANSI."""
-    pages: List[str] = []
-    try:
-        import ctypes
+    """Code pages a Windows child may write: OEM console CP first, then ANSI.
 
-        for getter in ("GetOEMCP", "GetACP"):
-            try:
-                code_page = int(getattr(ctypes.windll.kernel32, getter)())
-            except Exception:
-                continue
-            if code_page > 0:
-                pages.append("cp%d" % code_page)
+    The probe lives in :mod:`core.platforms.windows` with the rest of the Win32
+    declarations; this name stays because the decoder and the tests use it.
+    """
+    from core.platforms.windows import code_pages
+
+    try:
+        return code_pages()
     except Exception:
-        pass
-    return pages
+        return []
 
 
 def _output_decodings() -> List[str]:
@@ -523,26 +609,14 @@ def _output_decodings() -> List[str]:
        their own messages and for the native console tools they launch.
     3. The ANSI code page - the last resort for a program using the ANSI API.
     """
-    candidates = ["utf-8"]
-    if _IS_WINDOWS:
-        candidates.extend(_windows_code_pages())
-    else:
+    preferred = ""
+    if not _IS_WINDOWS:
         try:
-            candidates.append(locale.getpreferredencoding(False))
+            preferred = locale.getpreferredencoding(False)
         except Exception:
-            pass
-
-    unique: List[str] = []
-    seen = set()
-    for name in candidates:
-        if not name:
-            continue
-        key = name.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        unique.append(name)
-    return unique
+            preferred = ""
+    return _platform_encoding.candidate_encodings(
+        is_windows=_IS_WINDOWS, code_pages=_windows_code_pages, preferred=preferred)
 
 
 def _child_env() -> Dict[str, str]:
@@ -555,8 +629,13 @@ def _child_env() -> Dict[str, str]:
     """
     env = dict(os.environ)
     if _IS_WINDOWS:
-        env.setdefault("PYTHONIOENCODING", "utf-8")
-        env.setdefault("PYTHONUTF8", "1")
+        env.update(platforms.backend("windows").child_env())
+    # A Python child whose stdout is a pipe block-buffers its prints. A long job
+    # (a model download, a migration) then reports NOTHING for minutes while
+    # job_output polls, and the model reads "no output" as "the job is stuck, ask
+    # the user". Unbuffered stdout makes progress visible as it happens; an
+    # explicit operator setting still wins.
+    env.setdefault("PYTHONUNBUFFERED", "1")
     return env
 
 
@@ -758,10 +837,17 @@ def _spool_output(text: str) -> Optional[str]:
 def host_uptime_seconds() -> Optional[float]:
     """Host uptime in seconds, or None when the platform cannot report it.
 
-    ``/proc/uptime`` only exists on Linux; Windows answers through
+    Linux and Android answer from ``/proc/uptime``, Windows from
     ``GetTickCount64`` (milliseconds since boot, immune to the 49-day wrap of the
-    32-bit variant).
+    32-bit variant).  The probe lives in the platform backend; the direct reads
+    below are the fallback for a checkout where that package is missing.
     """
+    try:
+        value = platforms.backend().uptime_seconds()
+    except Exception:
+        value = None
+    if value is not None:
+        return value
     try:
         with open("/proc/uptime", "r") as handle:
             return float(handle.read().split()[0])
@@ -844,6 +930,20 @@ def _tool_mesh_status(args: Dict[str, Any]) -> Dict[str, Any]:
         }
     except Exception as exc:                   # diagnostics never break the answer
         payload["update"] = {"error": str(exc)}
+    try:
+        # The objective a previous chat left behind, so a fresh session resumes
+        # it instead of asking what was being done.
+        goal_state = goal.get()
+        payload["goal"] = goal_state.get("goal")
+        payload["goal_active"] = bool(goal_state.get("active"))
+    except Exception:                          # the note must never break status
+        payload["goal"] = None
+    try:
+        # Timers that fired while nobody was looking: the continuation is the
+        # reason the next turn must not start from scratch.
+        payload["schedule"] = schedule_module.summary()
+    except Exception:
+        payload["schedule"] = {}
     return payload
 
 
@@ -870,13 +970,156 @@ def _tool_mesh_update(args: Dict[str, Any]) -> Dict[str, Any]:
     if action in ("check", "check_update", "latest"):
         return updater.check_for_update(force=force, offline=_parse_flag(args.get("offline")))
     if action in ("apply", "install", "update", "upgrade"):
-        if _READ_ONLY:
+        if _read_only_active():
             return {"error": "this node is read-only (MESH_READ_ONLY=1); "
                              "self-update is disabled"}
         restart = args.get("restart")
         return updater.apply_update(force=force,
                                     restart=None if restart is None else _parse_flag(restart))
     return {"error": "unknown action %r: use status, check or apply" % action}
+
+
+def _tool_node_control(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Read or change this node's own switches (the remote-control surface).
+
+    One tool for read-only / access mode, working directory, pause, the
+    isolated container and the remote-control lock, because the cabinet, the
+    console menu and ``rhm`` subcommands must not diverge: all of them call
+    :func:`core.settings.apply`.
+
+    ``_origin`` is stamped by the gateway for a cabinet call (``web``) and
+    stripped from a model's arguments, so the model cannot claim to be the
+    logged-in person.
+    """
+    actor = str(args.get("_origin") or "mcp").strip().lower()
+    result = node_settings.apply(args, actor=actor)
+    if isinstance(result, dict) and "error" not in result:
+        # Keep the flat, predictable keys a model reads directly, next to the
+        # full snapshot used by the cabinet page.
+        state = result.get("state") or {}
+        for key in ("access_mode", "paused", "workspace"):
+            if key in state:
+                result.setdefault(key, state[key])
+        if "sandbox" in state:
+            result.setdefault("isolation", state["sandbox"])
+    return result
+
+
+def _tool_goal(args: Dict[str, Any]) -> Dict[str, Any]:
+    """The node's persistent objective, set from the chat.
+
+    A client cannot keep a model working between sessions, so the node holds the
+    objective: it survives a restart and a new chat, and ``mesh_status`` plus the
+    gateway's session instructions carry it back to the model. The note touches
+    no project file and runs nothing, which is why it is allowed in read-only
+    mode.
+    """
+    action = str(args.get("action") or "get").strip().lower()
+    actor = str(args.get("_origin") or "mcp").strip().lower()
+    note = str(args.get("note") or "")
+    try:
+        if action in ("get", "status", "show"):
+            data = goal.get()
+        elif action in ("set", "start", "add"):
+            data = goal.set_goal(str(args.get("text") or ""), actor=actor, note=note)
+        elif action in ("complete", "done", "finish"):
+            data = goal.finish("done", actor=actor, note=note)
+        elif action == "blocked":
+            data = goal.finish("blocked", actor=actor, note=note)
+        elif action in ("clear", "reset", "forget"):
+            data = goal.clear(actor=actor)
+        else:
+            return {"error": "unknown action %r: use get, set, complete, blocked or clear"
+                             % action}
+    except ValueError as exc:
+        return {"error": str(exc)}
+    current = data.get("goal")
+    result: Dict[str, Any] = {
+        "ok": True,
+        "action": action,
+        "goal": current,
+        "active": bool(data.get("active")),
+        "history": (data.get("history") or [])[:5],
+    }
+    if current and current.get("status") == "active":
+        result["message"] = (
+            "goal: %s — the operator's instruction stands: proceed with its steps and do not "
+            "ask again whether to start or continue." % current.get("text")
+        )
+    elif action in ("complete", "done", "finish"):
+        result["message"] = "goal completed"
+    elif action == "blocked":
+        result["message"] = "goal marked blocked"
+    elif action in ("clear", "reset", "forget"):
+        result["message"] = "goal cleared"
+    else:
+        result["message"] = "no active goal"
+    return result
+
+
+def _tool_schedule(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Timers on the node: the model comes back to a finished long task.
+
+    A long command outlives the client's ~30 s call budget, and an MCP server
+    cannot start a chat turn. So the timer runs ON the node; when it fires, the
+    command starts as a background job and the firing becomes a *continuation*
+    that survives until acknowledged. ``mesh_status`` and the gateway's session
+    instructions show it, so the next turn continues with the result.
+    """
+    action = str(args.get("action") or "list").strip().lower()
+    actor = str(args.get("_origin") or "mcp").strip().lower()
+    try:
+        if action in ("list", "status", "get"):
+            data = schedule_module.list_all()
+            return {
+                "ok": True,
+                "action": "list",
+                "schedules": data["items"],
+                "pending": data["continuations"],
+                "summary": schedule_module.summary(),
+                "message": ("%d active timer(s), %d pending continuation(s)"
+                            % (len([i for i in data["items"] if i.get("status") == "active"]),
+                               len(data["continuations"]))),
+            }
+        if action in ("set", "add", "create"):
+            entry = schedule_module.add(
+                label=str(args.get("label") or ""),
+                command=str(args.get("command") or ""),
+                note=str(args.get("note") or ""),
+                after_sec=args.get("after_sec"),
+                every_sec=args.get("every_sec"),
+                at=str(args.get("at") or ""),
+                actor=actor,
+            )
+            upcoming = entry.get("due_at") or 0
+            return {
+                "ok": True,
+                "action": "set",
+                "schedule": entry,
+                "message": "timer '%s' set for %s"
+                           % (entry.get("label"),
+                              time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(upcoming))),
+            }
+        if action in ("cancel", "delete", "remove"):
+            schedule_id = str(args.get("id") or "").strip()
+            cancelled = schedule_module.cancel(schedule_id)
+            return {
+                "ok": cancelled,
+                "action": "cancel",
+                "message": "timer cancelled" if cancelled else "no active timer with that id",
+            }
+        if action in ("ack", "done", "acknowledge"):
+            removed = schedule_module.ack(str(args.get("id") or ""))
+            return {
+                "ok": True,
+                "action": "ack",
+                "removed": removed,
+                "message": ("acknowledged %d continuation(s)" % removed) if removed
+                           else "nothing was pending",
+            }
+    except ValueError as exc:
+        return {"error": str(exc)}
+    return {"error": "unknown action %r: use set, list, cancel or ack" % action}
 
 
 # ---------------------------------------------------------------------------
@@ -972,46 +1215,13 @@ def largest_wallpaper_image(path: str) -> str:
 
 
 def windows_wallpaper() -> str:
-    """Current wallpaper on Windows, read from the registry with ``winreg``.
+    """Current wallpaper on Windows, read from the registry.
 
-    No shell and no extra process: the path lives in
-    ``HKCU\\Control Panel\\Desktop\\WallPaper`` for a single image, while a
-    slideshow leaves that value empty and records the rotation in
-    ``...\\Explorer\\Wallpapers\\BackgroundHistoryPathList``. When the source file
-    is gone the desktop still shows the transcoded copy of it, which is what is
-    reported last.
+    The implementation (single image, slideshow history, transcoded fallback)
+    lives in :mod:`core.platforms.windows`; this name stays because
+    ``system_info`` and the tests call it.
     """
-    try:
-        import winreg  # Windows only; import guarded so this module loads anywhere
-    except Exception:
-        return ""
-    path = ""
-    try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Control Panel\Desktop") as key:
-            value, _kind = winreg.QueryValueEx(key, "WallPaper")
-            path = str(value or "").strip().strip('"')
-    except Exception:
-        path = ""
-    if not path:
-        try:
-            with winreg.OpenKey(
-                winreg.HKEY_CURRENT_USER,
-                r"Software\Microsoft\Windows\CurrentVersion\Explorer\Wallpapers",
-            ) as key:
-                history, _kind = winreg.QueryValueEx(key, "BackgroundHistoryPathList")
-                for candidate in reversed(list(history or [])):
-                    candidate = str(candidate).strip().strip('"')
-                    if candidate and os.path.isfile(candidate):
-                        path = candidate
-                        break
-        except Exception:
-            pass
-    if not path:
-        transcoded = os.path.join(
-            os.environ.get("APPDATA", ""), "Microsoft", "Windows", "Themes", "TranscodedWallpaper")
-        if os.path.isfile(transcoded):
-            path = transcoded
-    return os.path.expandvars(path) if path else ""
+    return platforms.backend("windows").wallpaper()
 
 
 def _device_scenario() -> str:
@@ -1170,16 +1380,32 @@ def _tool_system_info(args: Dict[str, Any]) -> Dict[str, Any]:
         info["desktop"] = " ".join(
             part for part in ("Windows", platform.release(), edition) if part)
         info["session_type"] = (os.environ.get("SESSIONNAME") or "console").strip().lower()
-        if powershell_argv():
-            scripts = system_info_windows_scripts()
-            info.update({name: run_powershell(script) for name, script in scripts.items()})
-        else:
-            # No PowerShell at all: cmd.exe still answers most of it.
-            info.update({name: run_shell(cmd) for name, cmd in system_info_cmd_commands().items()})
     else:
         info["desktop"] = os.environ.get("XDG_CURRENT_DESKTOP") or os.environ.get("DESKTOP_SESSION") or ""
         info["session_type"] = os.environ.get("XDG_SESSION_TYPE", "")
-        info.update({name: run_shell(cmd) for name, cmd in system_info_posix_commands().items()})
+
+    # The four telemetry blocks come from the platform backend: kernel calls on
+    # Windows, /proc on Linux and Android. That is what makes `system_info` answer
+    # on a clean box with no PowerShell, no WMI, no df/free and no ps - and it
+    # answers in milliseconds instead of one process per block.
+    blocks: Dict[str, str] = {}
+    try:
+        blocks = platforms.backend("windows" if system == "Windows" else None).info_blocks()
+    except Exception:
+        blocks = {}
+    if not blocks:
+        # Last resort for a host the backend does not cover (an exotic POSIX box,
+        # or a partial checkout): the command-based collectors still work.
+        if system == "Windows":
+            if powershell_argv():
+                scripts = system_info_windows_scripts()
+                blocks = {name: run_powershell(script) for name, script in scripts.items()}
+            else:
+                # No PowerShell at all: cmd.exe still answers most of it.
+                blocks = {name: run_shell(cmd) for name, cmd in system_info_cmd_commands().items()}
+        else:
+            blocks = {name: run_shell(cmd) for name, cmd in system_info_posix_commands().items()}
+    info.update(blocks)
 
     # Device telemetry (core/device.py): battery and charging state, network and
     # signal strength, locale, language, time, timezone, CPU, RAM, storage,
@@ -1189,27 +1415,14 @@ def _tool_system_info(args: Dict[str, Any]) -> Dict[str, Any]:
     # when the platform has no source for it instead of reporting a fake zero.
     info.update(_device_blocks())
 
-    # Current wallpaper, the usual first question for a desktop node.
-    wallpaper = windows_wallpaper() if system == "Windows" else ""
-    if not wallpaper and system != "Windows":
-        # KDE keeps the last applied value in the appletsrc as
-        # `Image=<path-or-dir>` (sometimes with a file:// prefix); GNOME uses
-        # gsettings. A directory means a wallpaper package, so resolve the image
-        # inside it the same way Plasma does.
-        kde_cfg = os.path.expanduser("~/.config/plasma-org.kde.plasma.desktop-appletsrc")
-        if os.path.isfile(kde_cfg):
-            try:
-                with open(kde_cfg, "r", encoding="utf-8", errors="replace") as handle:
-                    for line in handle:
-                        if line.startswith("Image="):
-                            wallpaper = line.strip()[len("Image="):]
-            except Exception:
-                wallpaper = ""
-        wallpaper = wallpaper.replace("file://", "")
-        if not wallpaper:
-            gnome = run_shell("gsettings get org.gnome.desktop.background picture-uri 2>/dev/null")
-            if gnome and "file://" in gnome:
-                wallpaper = gnome.split("file://", 1)[1].strip().strip("'\"")
+    # Current wallpaper, the usual first question for a desktop node. Windows
+    # reads it from the registry, Linux from the KDE config or gsettings; a phone
+    # has none. A directory means a wallpaper package, so the image inside it is
+    # resolved the way Plasma resolves it.
+    try:
+        wallpaper = platforms.backend().wallpaper()
+    except Exception:
+        wallpaper = windows_wallpaper() if system == "Windows" else ""
     if wallpaper:
         wallpaper = largest_wallpaper_image(wallpaper)
         info["wallpaper"] = wallpaper
@@ -1242,6 +1455,79 @@ def _tool_system_vitals(args: Dict[str, Any]) -> Any:
         if thermal:
             vitals["thermal"] = thermal
     return vitals
+
+
+# ---------------------------------------------------------------------------
+# Screen capture: a desktop capability that lives in the platform layer
+# ---------------------------------------------------------------------------
+
+def _screen_capture_path(args: Dict[str, Any]) -> str:
+    """Where the PNG goes: an explicit ``path`` or a timestamped cache file."""
+    requested = args.get("path")
+    if isinstance(requested, str) and requested.strip():
+        return _resolve(requested)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    return paths.cache_path("captures", "screen-%s.png" % stamp)
+
+
+def _tool_screen_capture(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Capture the desktop and save it as a PNG the operator can open or share.
+
+    A desktop node's most direct answer to "what is on my screen?" - and the one
+    capability that has to live in the platform layer, because it is a kernel API
+    on Windows (GDI) and genuinely impossible on a headless server or inside the
+    Android sandbox. Every platform answers, but only the one with a framebuffer
+    returns an image; the others say why.
+    """
+    backend = platforms.backend()
+    try:
+        data = backend.screenshot_png()
+    except Exception as exc:  # pragma: no cover - defensive
+        return {"available": False, "scenario": backend.scenario, "reason": str(exc)}
+    if not data:
+        return {
+            "available": False,
+            "scenario": backend.scenario,
+            "reason": ("this platform has no screen a node process may read: a server has "
+                       "no framebuffer and Android gives an app no access to the display"),
+            "fix": ("run the node in an interactive desktop session (Windows: the user's "
+                    "own session, not a service)"),
+        }
+
+    target = _screen_capture_path(args)
+    guard = _write_guard(target)
+    if guard:
+        return {"error": guard}
+    try:
+        directory = os.path.dirname(target)
+        if directory and not os.path.isdir(directory):
+            os.makedirs(directory, exist_ok=True)
+        _atomic_write_bytes(target, data)
+    except Exception as exc:
+        return {"error": "cannot save the screenshot to %s: %s" % (target, exc)}
+
+    # Width/height come from the PNG's own IHDR, so the answer describes the file
+    # that was actually written instead of the screen size the capture intended.
+    width = height = 0
+    try:
+        import struct
+
+        if data[:8] == b"\x89PNG\r\n\x1a\n" and data[12:16] == b"IHDR":
+            width, height = struct.unpack(">II", data[16:24])
+    except Exception:
+        pass
+
+    return {
+        "ok": True,
+        "path": target,
+        "bytes": len(data),
+        "width": width,
+        "height": height,
+        "mime": "image/png",
+        "scenario": backend.scenario,
+        "hint": ("share_file(path=...) publishes it as a link; the file also exists on "
+                 "the host for the operator to open"),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1314,7 +1600,7 @@ def _android_only(action: str) -> Optional[Dict[str, Any]]:
 
 
 def _read_only_refusal(action: str) -> Optional[Dict[str, Any]]:
-    if not _READ_ONLY:
+    if not _read_only_active():
         return None
     return {"available": False, "action": action,
             "reason": ("this node is read-only (MESH_READ_ONLY=1): only observation is "
@@ -1808,11 +2094,14 @@ def _tool_list_dir(args: Dict[str, Any]) -> Dict[str, Any]:
 def _run_bash(command: str, timeout: int) -> Tuple[str, str, int, float]:
     started = time.time()
     try:
-        # Bytes, not text: the child's encoding is discovered with
-        # _decode_output() instead of assumed from the locale (see above).
+        isolated = control.sandbox_state()
+        argv = sandbox.exec_argv(command, isolated) if isolated else _shell_argv(command)
+        cwd = None
+        if not isolated:
+            cwd = _current_workspace() if os.path.isdir(_current_workspace()) else None
         proc = subprocess.run(
-            _shell_argv(command),
-            cwd=_WORKSPACE if os.path.isdir(_WORKSPACE) else None,
+            argv,
+            cwd=cwd,
             stdin=subprocess.DEVNULL,
             capture_output=True,
             timeout=timeout,
@@ -1845,6 +2134,8 @@ def _background_hint() -> str:
 
 
 def _tool_bash_exec(args: Dict[str, Any]) -> Dict[str, Any]:
+    if _read_only_active():
+        return {"error": READ_ONLY_ERROR}
     command = args.get("command")
     if not isinstance(command, str) or not command.strip():
         return {"error": "command is required and must be a non-empty string"}
@@ -2270,12 +2561,14 @@ def _update_meta(job_id: str, **fields: Any) -> Optional[Dict[str, Any]]:
 
 
 def _proc_start_time(pid: Any) -> Optional[int]:
-    """Start time of a process (field 22 of /proc/<pid>/stat), used to detect PID reuse."""
+    """Start marker of a process, used to detect PID reuse.
+
+    Linux/Android answer with field 22 of ``/proc/<pid>/stat``; Windows with the
+    creation time from ``GetProcessTimes``. Both are opaque integers, which is all
+    the reuse check needs.
+    """
     try:
-        with open("/proc/%d/stat" % int(pid), "rb") as handle:
-            data = handle.read()
-        rest = data.rsplit(b")", 1)[1].split()
-        return int(rest[19])
+        return platforms.backend().pid_start_time(int(pid))
     except Exception:
         return None
 
@@ -2289,64 +2582,26 @@ def _pid_alive(pid: Any, start_time: Any = None) -> bool:
         return False
     # After a restart the in-memory entry is gone; without the start time a
     # recycled PID would keep a finished job looking "running" forever.
+    marker: Optional[int] = None
     if start_time is not None:
-        current = _proc_start_time(pid_int)
-        if current is None:
-            return False
         try:
-            if int(start_time) != current:
-                return False
+            marker = int(start_time)
         except (TypeError, ValueError):
-            pass
-    if _IS_WINDOWS:
-        return _pid_alive_windows(pid_int)
+            marker = None
     try:
-        os.kill(pid_int, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
+        return bool(platforms.backend().pid_alive(pid_int, marker))
     except Exception:
         return False
-    return True
 
 
 def _pid_alive_windows(pid: int) -> bool:
     """Liveness probe for Windows.
 
-    os.kill(pid, 0) must never be used there: any signal other than
+    ``os.kill(pid, 0)`` must never be used there: any signal other than
     CTRL_C/CTRL_BREAK goes to TerminateProcess, so the "probe" would kill the
     very job it checks.
     """
-    try:
-        import ctypes
-        from ctypes import wintypes
-
-        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
-        # Declare the signatures: a HANDLE is pointer-sized, and letting ctypes
-        # default to c_int truncates it on 64-bit, so CloseHandle would receive a
-        # value that is not the handle OpenProcess returned.
-        kernel32.OpenProcess.restype = wintypes.HANDLE
-        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-        kernel32.GetExitCodeProcess.restype = wintypes.BOOL
-        kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
-        kernel32.CloseHandle.restype = wintypes.BOOL
-        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-
-        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-        STILL_ACTIVE = 259
-        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
-        if not handle:
-            return False
-        try:
-            code = wintypes.DWORD()
-            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
-                return False
-            return code.value == STILL_ACTIVE
-        finally:
-            kernel32.CloseHandle(handle)
-    except Exception:
-        return False
+    return platforms.backend("windows").pid_alive(int(pid))
 
 
 def _duration_from_meta(meta: Dict[str, Any]) -> Optional[float]:
@@ -2551,6 +2806,8 @@ def _reap(job_id: str, proc: "subprocess.Popen", started_mono: float) -> None:
 
 
 def _tool_run_job(args: Dict[str, Any]) -> Dict[str, Any]:
+    if _read_only_active():
+        return {"error": READ_ONLY_ERROR}
     try:
         command = args.get("command")
         if not isinstance(command, str) or not command.strip():
@@ -2565,7 +2822,7 @@ def _tool_run_job(args: Dict[str, Any]) -> Dict[str, Any]:
             if not os.path.isdir(cwd):
                 return {"error": "cwd is not a directory: %s" % cwd}
         if cwd is None:
-            cwd = _WORKSPACE if os.path.isdir(_WORKSPACE) else None
+            cwd = _current_workspace() if os.path.isdir(_current_workspace()) else None
 
         job_id = uuid.uuid4().hex
         job_dir = _job_dir(job_id)
@@ -2577,9 +2834,11 @@ def _tool_run_job(args: Dict[str, Any]) -> Dict[str, Any]:
                 pass
 
         try:
+            isolated = control.sandbox_state()
+            argv = sandbox.exec_argv(command, isolated) if isolated else _shell_argv(command)
             proc = subprocess.Popen(
-                _shell_argv(command),
-                cwd=cwd,
+                argv,
+                cwd=None if isolated else cwd,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -2746,28 +3005,26 @@ if _IS_WINDOWS:
 
 
 def _kill_tree_windows(pid: int) -> None:
-    """End a job and its children on Windows (there are no process groups to signal)."""
-    proc = subprocess.run(
-        ["taskkill", "/T", "/F", "/PID", str(int(pid))],
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        timeout=15,
-        creationflags=_POPEN_FLAGS,
-    )
-    if proc.returncode == 0:
+    """End a job and its children on Windows.
+
+    Windows has no process groups to signal, so the tree is walked through
+    ``Toolhelp32`` and terminated children-first with ``TerminateProcess``
+    (:mod:`core.platforms.windows.process`). No ``taskkill``: it is missing from
+    some images, and its localized errors were the reason this function had to
+    parse stderr at all.
+
+    A tree that is already gone is success - that is the normal race between a
+    short-lived job finishing and ``job_kill`` arriving.
+    """
+    try:
+        platforms.backend("windows").kill_tree(int(pid))
+    except Exception:
         return
-    detail = (_decode_output(proc.stderr) or _decode_output(proc.stdout)).strip()
-    # "ERROR: The process "1234" not found." means the tree is already gone —
-    # the usual case when a short-lived job finishes between job_output and
-    # job_kill. That is success for the caller, not a failure to report.
-    if "not found" in detail.lower() or "не найдено" in detail.lower() or not detail:
-        return
-    raise OSError(detail)
 
 
 def _tool_job_kill(args: Dict[str, Any]) -> Dict[str, Any]:
     try:
-        if _READ_ONLY:
+        if _read_only_active():
             return {"error": "server is in read-only mode"}
         job_id = args.get("job_id")
         if not isinstance(job_id, str) or not job_id.strip():
@@ -2875,7 +3132,7 @@ def _web_share_error() -> Dict[str, Any]:
 
 
 def _tool_share_file(args: Dict[str, Any]) -> Dict[str, Any]:
-    if _READ_ONLY:
+    if _read_only_active():
         return {"error": "MESH_READ_ONLY is set: publishing files is disabled on this node"}
     if _web_share is None:
         return _web_share_error()
@@ -2883,7 +3140,7 @@ def _tool_share_file(args: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _tool_serve_dir(args: Dict[str, Any]) -> Dict[str, Any]:
-    if _READ_ONLY:
+    if _read_only_active():
         return {"error": "MESH_READ_ONLY is set: publishing directories is disabled on this node"}
     if _web_share is None:
         return _web_share_error()
@@ -2897,6 +3154,8 @@ def _tool_share_list(args: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _tool_unshare(args: Dict[str, Any]) -> Dict[str, Any]:
+    if _read_only_active():
+        return {"error": READ_ONLY_ERROR}
     if _web_share is None:
         return _web_share_error()
     target = args.get("name") or args.get("slug") or args.get("url")
@@ -3000,12 +3259,25 @@ TOOL_ANNOTATIONS: Dict[str, Dict[str, Any]] = {
     # --- local work: writes and commands, but no install and no delete -------
     "bash_exec": _ANNOTATIONS_LOCAL_WRITE,
     "run_job": _ANNOTATIONS_LOCAL_WRITE,
+    # Changing the node's own switches: an ordinary, reversible local write. It
+    # is not read-only (it changes real behaviour) and not destructive (every
+    # switch is set back by the same tool or by `rhm`).
+    "node_control": _ANNOTATIONS_LOCAL_WRITE,
+    # The persistent objective writes one note in the node's config directory and
+    # starts nothing; the client may still ask, so the hint stays honest.
+    "goal": _ANNOTATIONS_LOCAL_WRITE,
+    # A timer may run a command later, without a client dialog at that moment:
+    # honest local write, and in approval mode creating it needs one approval.
+    "schedule": _ANNOTATIONS_LOCAL_WRITE,
     # Stopping a background job is not an install and not a delete, and
     # bash_exec can terminate the same process anyway; a prompt here would only
     # add noise, so it carries the same profile as the rest of the local work.
     "job_kill": _ANNOTATIONS_LOCAL_WRITE,
     "write_file": _ANNOTATIONS_LOCAL_WRITE,
     "edit_file": _ANNOTATIONS_LOCAL_WRITE,
+    # A screenshot writes one PNG (in the node's cache unless a path is given) and
+    # changes nothing else on the host: ordinary local work, never destructive.
+    "screen_capture": _ANNOTATIONS_LOCAL_WRITE,
     # --- device branch: the node's own phone or laptop -----------------------
     # Reading the device changes nothing; every action tool is ordinary local
     # work, camera and SMS included. Nothing here installs, removes or replaces
@@ -3057,6 +3329,23 @@ TOOLS: List[Dict[str, Any]] = [
         "description": ("Retrieve CPU, RAM and disk metrics of the local host, plus the "
                         "battery block (and thermal sensors where the platform exposes them)."),
         "inputSchema": _schema({}),
+    },
+    {
+        "name": "screen_capture",
+        "title": "Screen Capture",
+        "description": (
+            "Take a PNG screenshot of the host's desktop and save it on the host. "
+            "Windows captures through GDI (works on a clean install, no PowerShell "
+            "needed); a headless Linux server and an Android app session have no "
+            "accessible display, so they answer available=false with the reason "
+            "instead of returning a black image. Use share_file on the returned path "
+            "when the picture has to reach the chat."
+        ),
+        "inputSchema": _schema({
+            "path": {"type": "string",
+                     "description": ("Optional destination file (default: a timestamped "
+                                     "PNG in the node's cache directory).")},
+        }),
     },
     {
         "name": "get_orchestration_skill",
@@ -3245,6 +3534,108 @@ TOOLS: List[Dict[str, Any]] = [
             "restart": {"type": "boolean",
                         "description": "apply: restart the node afterwards (default true)."},
         }),
+    },
+    {
+        "name": "node_control",
+        "title": "Node Control (settings)",
+        "description": (
+            "Read or change this node's own switches: the access mode (read_only / "
+            "approval / full), pause and resume, the working directory (the `cd` of "
+            "every other tool - follow it with list_dir), the isolated container "
+            "(Docker/Podman with only the project mounted) and the remote-control "
+            "lock. Use action=status first: it answers the current mode, paused, "
+            "workspace, isolation and remote_control without changing anything. A "
+            "node in read-only mode cannot be lifted by a remote caller, and remote "
+            "control must be switched back on at the machine - both refusals say so."
+        ),
+        "inputSchema": _schema(
+            {
+                "action": {"type": "string",
+                           "enum": ["status", "mode", "pause", "resume", "cd", "sandbox",
+                                    "remote_control"],
+                           "description": "What to do (status reports without changing anything)."},
+                "mode": {"type": "string", "enum": ["read_only", "approval", "full"],
+                         "description": "mode: the access mode to apply."},
+                "path": {"type": "string",
+                         "description": "cd: the directory that becomes the working directory."},
+                "workspace": {"type": "string",
+                              "description": "sandbox: project directory to mount (default: the "
+                                             "current working directory)."},
+                "enabled": {"type": "boolean",
+                            "description": "sandbox: start (true) or stop (false) the isolated "
+                                           "container; remote_control: allow or forbid remote "
+                                           "settings changes."},
+                "network": {"type": "boolean",
+                            "description": "sandbox: allow network access inside the container "
+                                           "(default false; in approval mode this asks the "
+                                           "operator first)."},
+            },
+            ["action"],
+        ),
+    },
+    {
+        "name": "goal",
+        "title": "Goal (persistent objective)",
+        "description": (
+            "Record the objective this chat is working on, so it survives a "
+            "reconnect, an agent restart or a new session: the node stores it and "
+            "the gateway puts it back into the session instructions (and into "
+            "mesh_status). action=set with text starts or replaces the objective; "
+            "get reads it; complete or blocked closes it (note optional); clear "
+            "forgets it. Use it when the user states a goal that outlives this "
+            "turn, not for every message. The note is metadata: it runs nothing "
+            "and works in read-only mode."
+        ),
+        "inputSchema": _schema(
+            {
+                "action": {"type": "string",
+                           "enum": ["set", "get", "complete", "blocked", "clear"],
+                           "description": "What to do (default: get)."},
+                "text": {"type": "string",
+                         "description": "set: the objective, as one sentence."},
+                "note": {"type": "string",
+                         "description": "complete/blocked: what was achieved, or what stops it."},
+            },
+            ["action"],
+        ),
+    },
+    {
+        "name": "schedule",
+        "title": "Schedule (timer / cron on the node)",
+        "description": (
+            "Set a timer on the node and continue when it fires - the way to survive "
+            "a long task, because a tool call must answer within ~30 s and the chat "
+            "cannot be woken by the server. action=set needs a label and exactly one "
+            "of after_sec (once), every_sec (repeat, >=10) or at (\"HH:MM\" daily); "
+            "an optional command runs as a background job at that moment (job id is "
+            "kept in the continuation), a note-only timer is a reminder. When it "
+            "fires, the firing appears in mesh_status and in the session "
+            "instructions as a pending continuation: read it, collect the job with "
+            "job_output if there is one, and acknowledge it with action=ack. "
+            "action=list shows timers and pending continuations, action=cancel "
+            "stops one by id."
+        ),
+        "inputSchema": _schema(
+            {
+                "action": {"type": "string",
+                           "enum": ["set", "list", "cancel", "ack"],
+                           "description": "What to do (default: list)."},
+                "label": {"type": "string", "description": "set: short name for the timer."},
+                "command": {"type": "string",
+                            "description": "set: optional shell command to run when it fires."},
+                "note": {"type": "string",
+                         "description": "set: what to remember/continue with."},
+                "after_sec": {"type": "integer",
+                              "description": "set: fire once after this many seconds."},
+                "every_sec": {"type": "integer",
+                              "description": "set: repeat every this many seconds (>=10)."},
+                "at": {"type": "string",
+                       "description": "set: fire every day at this local time, e.g. 09:30."},
+                "id": {"type": "string",
+                       "description": "cancel/ack: the timer id, or the continuation id."},
+            },
+            ["action"],
+        ),
     },
     {
         "name": "device_info",
@@ -3454,8 +3845,12 @@ _attach_annotations(TOOLS)
 _HANDLERS: Dict[str, Callable[[Dict[str, Any]], Any]] = {
     "mesh_status": _tool_mesh_status,
     "mesh_update": _tool_mesh_update,
+    "node_control": _tool_node_control,
+    "goal": _tool_goal,
+    "schedule": _tool_schedule,
     "system_info": _tool_system_info,
     "system_vitals": _tool_system_vitals,
+    "screen_capture": _tool_screen_capture,
     "device_info": _tool_device_info,
     "device_control": _tool_device_control,
     "device_capture": _tool_device_capture,
@@ -3482,19 +3877,187 @@ _HANDLERS: Dict[str, Callable[[Dict[str, Any]], Any]] = {
 }
 
 
+def _approval_summary(name: str, args: Any) -> str:
+    """Short, human-readable request for the console menu (never the token)."""
+    if not isinstance(args, dict):
+        return str(name)
+    for key in ("command", "path", "name", "action"):
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()[:200]
+    return str(name)
+
+
+def _usage_status(result: Any) -> Tuple[str, Optional[str]]:
+    """(status, error_code) for the local journal; never includes the error text."""
+    if not isinstance(result, dict) or "error" not in result:
+        return "ok", None
+    error = str(result.get("error") or "")
+    if error.startswith("node_paused"):
+        return "denied", "node_paused"
+    if error.startswith("approval_required"):
+        return "denied", "approval_required"
+    if error.startswith("remote_control_disabled"):
+        return "denied", "remote_control_disabled"
+    if error.startswith("MESH_READ_ONLY") or "read-only" in error.lower():
+        return "denied", "read_only"
+    if error.startswith("Unknown tool"):
+        return "error", "unknown_tool"
+    if "not found" in error.lower():
+        return "error", "not_found"
+    return "error", "tool_error"
+
+
+def _dispatch_tool(name: str, args: Any) -> Any:
+    handler = _HANDLERS.get(name) if isinstance(name, str) else None
+    if handler is None:
+        return {"error": "Unknown tool: %s" % (name,)}
+    if args is None:
+        result = handler({})
+    elif not isinstance(args, dict):
+        return {"error": "arguments must be an object"}
+    else:
+        result = handler(args)
+    if result is None:
+        return {"error": "tool %s returned no result" % name}
+    return result
+
+
+def _approval_wait_seconds() -> float:
+    """How long one call waits for the operator after being queued.
+
+    The MCP client gives a call roughly 30 s end to end, so the wait is bounded
+    well below that: the point is that an approval continues the SAME call
+    instead of turning it into "waiting, tell the user and stop".
+    """
+    raw = os.environ.get("MESH_APPROVAL_WAIT", "12")
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        value = 12.0
+    if value != value:                                  # NaN
+        value = 12.0
+    return max(0.0, min(20.0, value))
+
+
+def _clamp_timeout_after_wait(name: str, args: Any, waited: float) -> Any:
+    """Keep an approved call inside the client's ~30 s budget.
+
+    After an approval the command may still take its own timeout; if the badge
+    ate 8 s of a 25 s ``bash_exec``, the call would be cut by the gateway before
+    the node answers. Long work belongs in ``run_job`` anyway.
+    """
+    if name != "bash_exec" or not isinstance(args, dict) or waited <= 0:
+        return args
+    try:
+        current = int(args.get("timeout_sec") or 25)
+    except (TypeError, ValueError):
+        current = 25
+    limit = max(5, int(25 - waited))
+    if current <= limit:
+        return args
+    clamped = dict(args)
+    clamped["timeout_sec"] = limit
+    return clamped
+
+
+def _run_after_approval(name: str, args: Any, request: Dict[str, Any],
+                        summary: str) -> Any:
+    """Wait for the operator, then run the SAME call (or report it is pending)."""
+    wait = _approval_wait_seconds()
+    waited = 0.0
+    step = 0.2
+    while wait > 0 and waited < wait:
+        if control.approval_granted(name):
+            result = _dispatch_tool(name, _clamp_timeout_after_wait(name, args, waited))
+            if isinstance(result, dict) and "error" not in result:
+                result.setdefault("approved", True)
+                result.setdefault("approved_after_sec", round(waited, 1))
+            return result
+        time.sleep(step)
+        waited += step
+    if wait > 0 and control.approval_granted(name):
+        return _dispatch_tool(name, args)
+    return {
+        "error": (
+            "approval_required: %s was NOT executed; it is waiting for the operator "
+            "(request %s). Do not end the task: say you are waiting for the "
+            "confirmation and retry this exact call once it is approved in rhm "
+            "(a = once, A = always, or `rhm mode full`)."
+            % (summary or name, request.get("id", "?"))
+        ),
+        "pending_approval": True,
+        "approval_id": request.get("id"),
+    }
+
+
+_SCHEDULE_READ_ACTIONS = frozenset({
+    "list", "status", "get", "ack", "done", "acknowledge", "cancel", "delete", "remove",
+})
+
+
+def _is_ungated_read(name: Any, args: Dict[str, Any]) -> bool:
+    """Reading or cancelling timers is observation; creating one is not.
+
+    ``schedule(set)`` may run a command later, so it goes through read-only and
+    approval like any other mutation; seeing what is pending or cancelling it
+    must never be blocked by the very gate it exists to describe.
+    """
+    if name != "schedule" or not isinstance(args, dict):
+        return False
+    return str(args.get("action") or "list").strip().lower() in _SCHEDULE_READ_ACTIONS
+
+
 def call_tool(name: str, args: Any = None) -> Any:
     """Dispatch a tool call.  Never raises: any failure becomes ``{"error": ...}``."""
+    started = time.perf_counter()
+    call_id = uuid.uuid4().hex
+    control_args = args if isinstance(args, dict) else {}
+    control_action = str(control_args.get("action") or "status").strip().lower()
+    # The gateway stamps _origin=web for the logged-in cabinet and strips the key
+    # from a model's arguments, so "web" here is the operator, not the model.
+    actor = str(control_args.get("_origin") or "mcp").strip().lower()
+    if actor not in ("web", "cli", "tui", "mcp"):
+        actor = "mcp"
     try:
-        handler = _HANDLERS.get(name) if isinstance(name, str) else None
-        if handler is None:
-            return {"error": "Unknown tool: %s" % (name,)}
-        if args is None:
-            args = {}
-        if not isinstance(args, dict):
-            return {"error": "arguments must be an object"}
-        result = handler(args)
-        if result is None:
-            return {"error": "tool %s returned no result" % name}
-        return result
+        # A paused node refuses everything, except reading its own settings and
+        # lifting the pause: otherwise pausing from the cabinet would leave no
+        # way back but a walk to the machine.
+        if control.paused() and not (
+                name == "node_control" and control_action in ("status", "resume")):
+            result: Any = {
+                "error": "node_paused: commands are paused by the operator; "
+                         "resume them from the tray"
+            }
+        elif (_read_only_active() and isinstance(name, str)
+                and name not in _READ_ONLY_ALLOWED
+                and name not in _READ_ONLY_SELF_GUARDED
+                and not _is_ungated_read(name, control_args)):
+            result = {"error": READ_ONLY_ERROR}
+        elif (control.access_mode() == "approval" and actor == "mcp"
+                and isinstance(name, str)
+                and name not in _READ_ONLY_ALLOWED
+                and not _is_ungated_read(name, control_args)
+                and (name != "node_control"
+                     or node_settings.requires_approval(control_args))
+                and not control.approval_granted(name)):
+            summary = (node_settings.summary(control_args) if name == "node_control"
+                       else _approval_summary(name, args))
+            request = control.request_approval(name, summary)
+            result = _run_after_approval(name, args, request, summary)
+        else:
+            result = _dispatch_tool(name, args)
     except Exception as exc:  # pragma: no cover - defensive
-        return {"error": "%s: %s" % (type(exc).__name__, exc)}
+        result = {"error": "%s: %s" % (type(exc).__name__, exc)}
+    try:
+        status, error_code = _usage_status(result)
+        usage.record(
+            str(name)[:80],
+            status,
+            int((time.perf_counter() - started) * 1000),
+            call_id=call_id,
+            error_code=error_code,
+        )
+    except Exception:  # pragma: no cover - journal must never break a call
+        pass
+    return result

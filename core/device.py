@@ -417,15 +417,13 @@ def scenario() -> str:
     ``os.path.isdir``, and a cached answer would make a node that was restarted
     with a changed environment - and every scenario test - lie.
     """
-    if os.name == "nt":
-        return "windows"
-    signals = _platform_signals()
-    if (signals["TERMUX_VERSION"] or "com.termux" in signals["PREFIX"]
-            or signals["termux_data_dir"]):
-        return "termux"
-    if signals["platform_system"] == "Darwin":
-        return "darwin"
-    return "linux"
+    # The rule itself lives in core/platforms, which every other platform decision
+    # already asks; this module only supplies the evidence it has already probed.
+    # One decision point is the whole reason a Linux box cannot end up answering
+    # like a phone.
+    from core import platforms
+
+    return platforms.detect(termux_data_dir=_termux_data_dir(), system=platform.system())
 
 
 def scenario_report() -> Dict[str, Any]:

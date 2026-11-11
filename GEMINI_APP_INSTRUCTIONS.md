@@ -16,7 +16,7 @@
 `bash_exec(command)` · `list_dir(path)` · `read_file(path, start_line, end_line)` ·
 `write_file(path, content)` · `edit_file(path, old_string, new_string)` ·
 `grep_search(pattern, path)` · `glob_find(pattern, path)` ·
-`system_vitals()` · `system_info()` · `mesh_status()` ·
+`system_vitals()` · `system_info()` · `screen_capture(path)` · `mesh_status()` ·
 `run_job(command)` → `job_output(job_id)` / `job_kill(job_id)` / `job_list()` ·
 `get_orchestration_skill()`
 

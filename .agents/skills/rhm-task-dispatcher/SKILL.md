@@ -36,7 +36,11 @@ description: Orchestrates distributed Linux hosts and compute nodes using Native
 | `system_info()` | Сводка по хосту одним вызовом |
 | `mesh_status()` | Подтверждение, что узел на связи (вызывать, если кажется, что хост офлайн) |
 | `run_job(command)` → `job_output(job_id)` / `job_kill` / `job_list` | Долгие команды в фоне |
+| `node_control(action)` | Настройки узла: `status`, `mode` (read-only/approval/full), `cd`, `pause`/`resume`, `sandbox` (изолированный контейнер), `remote_control` |
+| `goal(action)` | Цель, которая переживает сессию: `set`, `get`, `complete`, `blocked`, `clear`; шлюз возвращает её в инструкциях при переподключении |
 | `get_orchestration_skill()` | Актуальный текст этого скилла |
+
+> 🔒 **`node_control`:** `cd` меняет рабочую папку для всех остальных инструментов (следующий `list_dir` — это и есть `ls`). Модель может **ужесточить** режим (включить read-only), но не снять его: это делают человек в кабинете `/account` или командой `rhm`. Если пришёл отказ `remote_control_disabled`, значит удалённое управление выключено на узле — включить его можно только на машине (`rhm remote-control on`), повторять вызов бессмысленно.
 
 > ⚡ **Таймауты:** команда дольше ~25 с обрывается шлюзом. Всё долгое (сборки, установки, тесты,
 > скачивания) запускать через `run_job` и забирать результат через `job_output`.

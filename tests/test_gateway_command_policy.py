@@ -345,7 +345,9 @@ def test_system_change_is_advertised_as_destructive(tmp_path, monkeypatch):
     # left carrying destructiveHint, and they are the only ones that interrupt.
     for name in ("bash_exec", "run_job", "write_file", "edit_file", "job_kill",
                  "share_file", "serve_dir", "unshare", "device_info",
-                 "device_control", "device_capture", "device_messages"):
+                 "device_control", "device_capture", "device_messages",
+                 "read_file", "list_dir", "grep_search", "glob_find",
+                 "system_info", "system_vitals", "job_output", "job_list"):
         assert tools[name]["annotations"]["readOnlyHint"] is True, name
         assert tools[name]["annotations"]["destructiveHint"] is False, name
     for name in ("system_change", "system_write", "mesh_update"):

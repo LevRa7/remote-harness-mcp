@@ -26,11 +26,11 @@ SECURITY
 --------
 ``--host`` defaults to loopback (``127.0.0.1``) and must NEVER be changed to
 ``0.0.0.0`` for a default install: this server can execute arbitrary shell
-commands (``bash_exec``) and read arbitrary files (``read_file``). Binding it to
-a public interface without ``--token`` (or ``MESH_TOKEN``) plus a firewall
-exposes remote code execution to the whole network. If binding a public
-interface is really required, always configure a token and restrict access at
-the firewall level.
+commands (``bash_exec``) and read arbitrary files (``read_file``). A token is
+always required; when ``--token``/``MESH_TOKEN`` is absent the server generates
+one and writes it 0600 to the config directory. Binding a public interface still
+requires a firewall - a generated token is a credential, not a substitute for
+network isolation.
 
 The module depends only on the Python standard library plus the pre-existing
 local helpers ``core.schemas`` (pydantic) and ``core.vitals``. Both are treated
@@ -48,6 +48,7 @@ import logging
 import os
 import platform
 import re
+import secrets
 import shutil
 import socket
 import subprocess
@@ -57,7 +58,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlparse, urlsplit
 
 logger = logging.getLogger("remote-harness-mcp.standalone")
 
@@ -570,6 +571,11 @@ class RemoteHarnessMCPServer(object):
             arguments = {}
         if not isinstance(arguments, dict):
             return 200, self._error(req_id, -32602, "Invalid params: 'arguments' must be an object")
+        # Underscore keys are gateway-owned (``_origin=web`` tells the node a
+        # logged-in cabinet asked). A client of this standalone server is not the
+        # gateway, so it may not claim them.
+        arguments = {key: value for key, value in arguments.items()
+                     if not str(key).startswith("_")}
 
         try:
             self._validate_arguments(name, arguments)
@@ -680,6 +686,119 @@ _JSONRPC_POST_PATHS = ("/messages", "/sse", "/mcp")
 # Matches a ?token=... / &token=... query value so it can be masked in logs.
 _TOKEN_QUERY_RE = re.compile(r"([?&]token=)[^&\s\"]*", re.IGNORECASE)
 
+#: Hosts that identify this machine without naming a network interface.
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def _split_host_header(value: str) -> Tuple[str, str]:
+    """Return (hostname, port) from a Host header; never raises."""
+    raw = (value or "").strip().lower()
+    if not raw:
+        return "", ""
+    if raw.startswith("["):
+        end = raw.find("]")
+        if end == -1:
+            return raw, ""
+        host = raw[1:end]
+        rest = raw[end + 1:]
+        port = rest[1:] if rest.startswith(":") else ""
+        return host, port
+    if raw.count(":") == 1:
+        host, _, port = raw.partition(":")
+        return host, port
+    return raw, ""
+
+
+def host_allowed(host_header: str, bind_host: str = "127.0.0.1", port: int = 8096) -> bool:
+    """True when *host_header* names this loopback server and the right port.
+
+    A DNS-rebinding page reaches ``127.0.0.1`` with its own ``Host`` (and often its
+    own ``Origin``).  Requiring the loopback name and the exact port makes that
+    request fail before it reaches authentication.
+    """
+    host, header_port = _split_host_header(host_header)
+    if not host:
+        return False
+    allowed = set(_LOOPBACK_HOSTS)
+    if bind_host:
+        allowed.add(bind_host.strip().lower())
+    if host not in allowed:
+        return False
+    if header_port and str(port) != header_port:
+        return False
+    return True
+
+
+def origin_allowed(origin: str, bind_host: str = "127.0.0.1", port: int = 8096) -> bool:
+    """True when the browser Origin is this loopback server (or absent)."""
+    if not origin:
+        return True
+    if origin.strip().lower() == "null":
+        return False
+    try:
+        parts = urlsplit(origin)
+    except Exception:
+        return False
+    if parts.scheme not in ("http", "https"):
+        return False
+    host = (parts.hostname or "").lower()
+    allowed = set(_LOOPBACK_HOSTS)
+    if bind_host:
+        allowed.add(bind_host.strip().lower())
+    if host not in allowed:
+        return False
+    if parts.port is not None and int(parts.port) != int(port):
+        return False
+    return True
+
+
+def json_content_type(value: str) -> bool:
+    """True for ``application/json`` with optional parameters."""
+    if not value:
+        return False
+    return value.split(";", 1)[0].strip().lower() == "application/json"
+
+
+def ensure_auth_token(token: Optional[str] = None, path: Optional[str] = None) -> str:
+    """Return *token*, or generate and persist one when auth was left unset.
+
+    An empty token used to mean "authentication disabled", which made every
+    browser page on the machine a potential remote-code-execution client.  The
+    server now always has a token; a generated one is written 0600 to the node's
+    config directory (never to the log).
+    """
+    if token:
+        return str(token)
+    if path is None:
+        from core import paths as _paths
+
+        path = os.path.join(_paths.config_dir(), "standalone.token")
+    # Reuse a token from a previous start: regenerating it on every service
+    # restart would silently invalidate every configured client.
+    try:
+        if os.path.exists(path):
+            existing = open(path, "r", encoding="utf-8").read().strip()
+            if len(existing) >= 16:
+                return existing
+    except OSError:
+        pass
+    generated = secrets.token_urlsafe(32)
+    try:
+        os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+        tmp = path + ".tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(generated + "\n")
+        os.replace(tmp, path)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+        logger.info("Generated a standalone MCP token at %s (mode 0600)", path)
+    except Exception as exc:  # pragma: no cover - filesystem failure
+        logger.error("Could not persist the standalone token: %s", exc)
+    return generated
+
 
 class StandaloneMCPHandler(BaseHTTPRequestHandler):
     """Threaded HTTP handler exposing the MCP endpoints of the standalone server."""
@@ -693,6 +812,8 @@ class StandaloneMCPHandler(BaseHTTPRequestHandler):
     # Set by ``run_standalone_server`` (class-level so each request thread sees it).
     server_mcp: Optional[RemoteHarnessMCPServer] = None
     auth_token: str = ""
+    bind_host: str = "127.0.0.1"
+    bind_port: int = 8096
 
     # -- plumbing ---------------------------------------------------------
     def _clean_path(self) -> str:
@@ -705,9 +826,26 @@ class StandaloneMCPHandler(BaseHTTPRequestHandler):
         return path
 
     def _cors_headers(self) -> None:
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS, HEAD")
-        self.send_header("Access-Control-Allow-Headers", "*")
+        """Reflect only this loopback origin; never ``*``.
+
+        A wildcard made every page on the machine able to read authenticated
+        responses.  Requests without an Origin (curl, the node's own probes) get
+        no CORS headers at all, which is correct: CORS is a browser mechanism.
+        """
+        origin = self.headers.get("Origin") or ""
+        self.send_header("Vary", "Origin")
+        if origin and origin_allowed(origin, self.bind_host, self.bind_port):
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS, HEAD")
+            self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Mesh-Token")
+            self.send_header("Access-Control-Max-Age", "600")
+
+    def _request_allowed(self) -> bool:
+        """Host/Origin gate that runs before auth and before any body read."""
+        if not host_allowed(self.headers.get("Host", ""), self.bind_host, self.bind_port):
+            return False
+        origin = self.headers.get("Origin") or ""
+        return origin_allowed(origin, self.bind_host, self.bind_port)
 
     def _send_headers(self, status: int, content_type: str = "application/json") -> None:
         self.send_response(status)
@@ -734,29 +872,38 @@ class StandaloneMCPHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _provided_token(self) -> Optional[str]:
-        try:
-            query = parse_qs(urlparse(self.path).query)
-        except Exception:
-            query = {}
-        token = query.get("token", [None])[0]
-        if not token:
-            token = self.headers.get("X-Mesh-Token") or None
+        # Header first.  A query token is accepted only from a loopback client:
+        # the standalone UI (Gemini's connector field) cannot set headers, but a
+        # remote caller must never put a secret in a URL.
+        token = self.headers.get("X-Mesh-Token") or None
         if token:
             return str(token)
         auth = self.headers.get("Authorization", "") or ""
         if auth.lower().startswith("bearer "):
             return auth[7:].strip()
+        try:
+            client = (self.client_address[0] or "").strip()
+        except Exception:
+            client = ""
+        if client in ("127.0.0.1", "::1", "localhost"):
+            try:
+                query = parse_qs(urlparse(self.path).query)
+            except Exception:
+                query = {}
+            value = query.get("token", [None])[0]
+            if value:
+                return str(value)
         return None
 
     def _token_valid(self) -> bool:
-        """True when auth is disabled, or the supplied token matches.
+        """True only when the supplied token matches the configured one.
 
-        Unlike ``_authorized()`` this ignores the public-path exemption and is
-        used by the liveness endpoints to decide how much detail to disclose.
+        There is no "auth disabled" branch any more: ``run_standalone_server``
+        generates a token when the operator did not set one.
         """
         token = self.auth_token or ""
         if not token:
-            return True  # auth disabled (loopback-only default)
+            return False
         try:
             provided = self._provided_token()
             if not provided:
@@ -792,14 +939,22 @@ class StandaloneMCPHandler(BaseHTTPRequestHandler):
 
     # -- HTTP verbs -------------------------------------------------------
     def do_OPTIONS(self) -> None:  # noqa: N802 - http.server API
-        # CORS preflight is unauthenticated: it executes nothing and must
-        # succeed even when a token is configured, otherwise browsers cannot
-        # discover the endpoint/headers.
-        self._send_headers(200, "text/plain")
+        # CORS preflight is unauthenticated: it executes nothing.  It is still
+        # gated by Host/Origin so a foreign page cannot use it to discover the
+        # endpoint's capabilities.
+        if not self._request_allowed():
+            self._send_json(403, {"error": "forbidden", "message": "Host or Origin is not loopback"})
+            return
+        self._send_headers(204, "text/plain")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS, HEAD")
+        self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Mesh-Token")
         self.send_header("Content-Length", "0")
         self.end_headers()
 
     def do_HEAD(self) -> None:  # noqa: N802 - http.server API
+        if not self._request_allowed():
+            self._send_json(403, {"error": "forbidden", "message": "Host or Origin is not loopback"})
+            return
         if not self._authorized():
             self._send_unauthorized()
             return
@@ -817,6 +972,9 @@ class StandaloneMCPHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
     def do_GET(self) -> None:  # noqa: N802 - http.server API
+        if not self._request_allowed():
+            self._send_json(403, {"error": "forbidden", "message": "Host or Origin is not loopback"})
+            return
         if not self._authorized():
             self._send_unauthorized()
             return
@@ -838,6 +996,9 @@ class StandaloneMCPHandler(BaseHTTPRequestHandler):
             self._send_json(404, {"error": "not_found", "path": path})
 
     def do_POST(self) -> None:  # noqa: N802 - http.server API
+        if not self._request_allowed():
+            self._send_json(403, {"error": "forbidden", "message": "Host or Origin is not loopback"})
+            return
         if not self._authorized():
             self._send_unauthorized()
             return
@@ -845,6 +1006,12 @@ class StandaloneMCPHandler(BaseHTTPRequestHandler):
         path = self._clean_path()
         if path not in _JSONRPC_POST_PATHS:
             self._send_json(404, {"error": "not_found", "path": path})
+            return
+        if not json_content_type(self.headers.get("Content-Type", "")):
+            # A text/plain body is a "simple request": a foreign page could send it
+            # without a CORS preflight.  Requiring JSON forces a preflight, which
+            # the Host/Origin gate above rejects.
+            self._send_json(415, {"error": "unsupported_media_type", "message": "Content-Type must be application/json"})
             return
 
         raw_body = self._read_body()
@@ -904,17 +1071,19 @@ def run_standalone_server(host: str = "127.0.0.1", port: int = 8096, token: Opti
     """Start the blocking standalone MCP HTTP server."""
     if token is None:
         token = os.environ.get("MESH_TOKEN", "")
+    token = ensure_auth_token(token)
     mcp = create_mcp_server()
     StandaloneMCPHandler.server_mcp = mcp
-    StandaloneMCPHandler.auth_token = token or ""
+    StandaloneMCPHandler.auth_token = token
+    StandaloneMCPHandler.bind_host = host
+    StandaloneMCPHandler.bind_port = int(port)
 
     httpd = ThreadingHTTPServer((host, int(port)), StandaloneMCPHandler)
     httpd.daemon_threads = True
     logger.info(
-        "Remote Harness MCP standalone MCP server listening on http://%s:%s/sse (auth: %s)",
+        "Remote Harness MCP standalone MCP server listening on http://%s:%s/sse (auth: enabled)",
         host,
         port,
-        "enabled" if token else "disabled",
     )
     try:
         httpd.serve_forever()
@@ -944,8 +1113,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--port", type=int, default=8096, help="TCP port to listen on (default: 8096).")
     parser.add_argument(
         "--token",
-        default=os.environ.get("MESH_TOKEN", ""),
-        help="Shared auth token. Defaults to $MESH_TOKEN; empty disables auth (localhost-only).",
+        default=os.environ.get("MESH_TOKEN") or None,
+        help="Shared auth token. Defaults to $MESH_TOKEN; when absent a random token is "
+             "generated and written 0600 to the config directory.",
     )
     args = parser.parse_args(argv)
 
@@ -962,8 +1132,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     if args.host == "0.0.0.0" and not args.token:
         logger.warning(
-            "Bound to 0.0.0.0 without a token: anyone on the network can execute shell commands. "
-            "Use --host 127.0.0.1 or configure --token."
+            "Bound to 0.0.0.0 without a configured token: a random token was generated. "
+            "Read it from the config directory (standalone.token) or set --token."
         )
     run_standalone_server(host=args.host, port=args.port, token=args.token)
     return 0

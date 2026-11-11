@@ -3,6 +3,7 @@
 | File | Role |
 | :--- | :--- |
 | `agent-watchdog.ps1` | single-shot supervisor: check the node, restart the agent if it is dead |
+| `rhm-tray.ps1` | per-user tray: status, pause commands, live read-only, usage log, autostart, restart |
 | `../doctor.ps1` | read-only diagnostic: report every fact that explains an offline node |
 | `../update.ps1` | single-shot updater: install a newer release and let the node restart onto it |
 | `run-hidden.vbs` | the windowless launcher both scheduled tasks go through: no console is ever drawn |
@@ -207,11 +208,54 @@ at 03:30 updates at the next opportunity).
 
 ---
 
+## `rhm-tray.ps1` - tray icon and command control
+
+Run as the logged-in user (no admin rights):
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\ops\windows\rhm-tray.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\ops\windows\rhm-tray.ps1 -SelfTest
+```
+
+The tray reads `<ConfigDir>\agent.heartbeat` for status and flips two marker files
+that the agent checks on **every** call (`core/control.py`):
+
+* `agent.paused` - **Pause commands**: every tool call answers `node_paused`
+  until resumed; the tunnel stays connected.
+* `readonly.flag` - **Read-only mode**: observation tools keep working,
+  `bash_exec`/`run_job`/writes are refused, with no service restart.
+
+Menu: status, pause/resume, read-only, usage log (`usage.jsonl`), config folder,
+"Start with Windows" (HKCU `Run`, no admin), restart the node through
+`agent-watchdog.ps1`, exit. `-SelfTest` prints a JSON inventory without showing a
+window; the installer registers the tray in HKCU `Run` and starts it.
+
+---
+
+## `rhm-tray.ps1` - иконка в трее и управление командами
+
+Запускается от текущего пользователя, без прав администратора. Иконка читает
+`<ConfigDir>\agent.heartbeat` и переключает два файла-маркера, которые агент
+проверяет при **каждом** вызове:
+
+* `agent.paused` - **Pause commands**: все вызовы получают `node_paused`, туннель
+  остаётся живым;
+* `readonly.flag` - **Read-only mode**: чтение работает, команды и запись
+  отклоняются, перезапуск службы не нужен.
+
+В меню: статус, пауза, read-only, журнал `usage.jsonl`, папка конфигурации,
+автозапуск (HKCU `Run`), перезапуск узла через `agent-watchdog.ps1`, выход.
+`-SelfTest` печатает JSON со списком пунктов, не показывая окно; установщик
+регистрирует трей в HKCU `Run` и запускает его.
+
+---
+
 # Сторож и доктор для Windows
 
 | Файл | Назначение |
 | :--- | :--- |
 | `agent-watchdog.ps1` | однократная проверка: если узел мёртв - поднять агента |
+| `rhm-tray.ps1` | трей: статус, пауза команд, live read-only, журнал, автозапуск, рестарт |
 | `../doctor.ps1` | диагностика только на чтение: показать всё, что объясняет простой |
 
 Оба скрипта - ASCII-only, рассчитаны на Windows PowerShell 5.1 и используют

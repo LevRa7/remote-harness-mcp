@@ -180,6 +180,9 @@ GATEWAY_UNCONFIRMED_TOOLS = {
     "bash_exec", "run_job", "write_file", "edit_file", "job_kill",
     "share_file", "serve_dir", "unshare",
     "device_control", "device_capture", "device_messages",
+    # A screenshot writes one PNG on the node and reads the screen: nothing is
+    # installed, removed or published, so the client is not interrupted for it.
+    "screen_capture",
 }
 
 

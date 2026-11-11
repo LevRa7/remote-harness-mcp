@@ -12,6 +12,8 @@ import re
 import secrets
 import shutil
 import socket
+import tempfile
+import threading
 import time
 import uuid
 from urllib.parse import urlparse
@@ -20,7 +22,7 @@ from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
-from starlette.routing import Route, WebSocketRoute
+from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.websockets import WebSocket, WebSocketDisconnect
 import uvicorn
 
@@ -299,22 +301,77 @@ RESERVED_NAMES = {
     "anonymous", "gateway", "mesh", "mail", "vpn", "test", "null",
     "undefined", "localhost", "local", "internal", "public", "ws",
     "sse", "mcp", "messages", "health", "health-mesh", "core", "skills",
-    "install", "static", "assets"
+    "install", "static", "assets", "account"
 }
 
+_REGISTRY_LOCK = threading.Lock()
+_REGISTRY_CORRUPT = False
+
+
+def registry_corrupt() -> bool:
+    """True when the last read found an unreadable/invalid registry.
+
+    A corrupt registry must not be treated as "no nodes": that would let an
+    attacker re-register every name and lock the real owners out. Callers deny
+    control-plane operations until an operator restores the file.
+    """
+    return _REGISTRY_CORRUPT
+
+
 def load_registry() -> dict:
-    if os.path.exists(REGISTRY_PATH):
-        try:
-            with open(REGISTRY_PATH, "r") as f:
-                return json.load(f)
-        except Exception as e:
-            logger.error(f"Failed to read registry: {e}")
-    return {}
+    global _REGISTRY_CORRUPT
+    if not os.path.exists(REGISTRY_PATH):
+        _REGISTRY_CORRUPT = False
+        return {}
+    try:
+        with open(REGISTRY_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            raise ValueError("registry root is not a JSON object")
+        _REGISTRY_CORRUPT = False
+        return data
+    except Exception as e:
+        logger.error("Failed to read registry (%s): %s - control-plane writes are disabled", REGISTRY_PATH, e)
+        _REGISTRY_CORRUPT = True
+        return {}
+
 
 def save_registry(data: dict):
-    os.makedirs(os.path.dirname(REGISTRY_PATH), exist_ok=True)
-    with open(REGISTRY_PATH, "w") as f:
-        json.dump(data, f, indent=2)
+    """Atomically replace the registry, 0600, under a process lock.
+
+    ``open(path, "w")`` truncates the live file before the new JSON is written:
+    a crash or a concurrent writer leaves a half-file, and every node disappears.
+    The temp file is created in the same directory (so ``os.replace`` is atomic),
+    fsynced, then swapped in. The 0600 mode keeps link keys away from other local
+    users; the directory is 0700.
+    """
+    global _REGISTRY_CORRUPT
+    payload = json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8")
+    directory = os.path.dirname(REGISTRY_PATH) or "."
+    with _REGISTRY_LOCK:
+        os.makedirs(directory, mode=0o700, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(prefix=".registry-", suffix=".tmp", dir=directory)
+        try:
+            try:
+                os.fchmod(fd, 0o600)
+            except (AttributeError, OSError):
+                pass
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, REGISTRY_PATH)
+            try:
+                os.chmod(REGISTRY_PATH, 0o600)
+            except OSError:
+                pass
+            _REGISTRY_CORRUPT = False
+        finally:
+            if os.path.exists(tmp):
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
 
 def tokens_equal(a: str, b: str) -> bool:
     """Constant-time token comparison that never raises on non-ASCII input.
@@ -499,6 +556,8 @@ def verify_token(request: Request) -> tuple[bool, str, str]:
             f"{PUBLIC_BASE_URL}/sse?user=<node-name>&token=<link-key>."
         ), ""
     registry = load_registry()
+    if registry_corrupt():
+        return False, "The gateway registry is unreadable; restore it before using this node.", user
     entry = registry.get(user)
     if not entry:
         return False, f"User '{user}' is not registered.", user
@@ -546,6 +605,24 @@ MANDATORY GROUNDING & EXECUTION DIRECTIVES:
    - Always execute operations directly via MCP tools (`list_dir`, `read_file`, `bash_exec`, `system_vitals`).
    - Never ask the user to run shell commands manually.
 4. Always verify return codes and stdout/stderr before reporting results.
+5. NODE SETTINGS: use `node_control` for the node's own switches —
+   `status`, `mode` (read-only/approval/full), `cd` (the working directory every
+   other tool resolves against), `pause`/`resume` and `sandbox` (isolated
+   container). Never edit agent.env, access.mode or workspace.txt by hand, and
+   never claim a switch is off-limits without trying `node_control`: a refusal
+   (`read_only`, `remote_control_disabled`) is a real answer with a fix - report
+   it instead of working around it.
+6. GOAL: when the user states an objective meant to outlive this turn, record it
+   with `goal(action=set, text=...)`. The node keeps it across reconnects and the
+   gateway puts it back into the session instructions, so the next chat resumes
+   the same work; close it with `goal(action=complete|blocked, note=...)`.
+7. AUTONOMY: an instruction (or an active goal) is the authorization. Do not ask
+   "shall I start?" or "continue?" - execute, report, and only stop for a real
+   error, a finished task or an `approval_required` id you must wait for.
+8. LONG WORK: never wait inside a call. `run_job` for a long command, or
+   `schedule(action=set, ...)` for work that must start later; a fired timer is
+   listed in the session instructions as a pending continuation - collect its
+   job with `job_output` and acknowledge with `schedule(action=ack)`.
 """
 
 async def call_remote_tool(user: str, name: str, args: dict) -> dict:
@@ -614,6 +691,19 @@ async def call_remote_tool(user: str, name: str, args: dict) -> dict:
                     break
         return {"exit_code": 1, "error": str(e)}
 
+def _strip_reserved_arguments(args):
+    """Drop the arguments only the gateway may set (``_origin`` and friends).
+
+    The cabinet is told apart from a model by ``_origin=web``; a model that
+    could send that key would pose as the logged-in operator and lift a
+    read-only lock. Underscore keys are therefore gateway-owned and are removed
+    from every client argument before anything is forwarded.
+    """
+    if not isinstance(args, dict):
+        return args
+    return {key: value for key, value in args.items() if not str(key).startswith("_")}
+
+
 def remote_tool_error(res):
     """Return a human-readable error string if a remote tool response is a failure, else None.
 
@@ -634,6 +724,98 @@ def remote_tool_error(res):
     if res.get("exit_code") not in (None, 0) and set(res.keys()) <= {"exit_code", "stdout", "stderr"}:
         return str(res.get("stderr") or res.get("stdout") or f"remote call failed with exit code {res.get('exit_code')}")
     return None
+
+
+async def node_goal_brief(user: str, timeout: float = 2.5) -> str:
+    """The objective recorded on the node, for the session instructions.
+
+    Best effort and time-bounded: an old node answers "Unknown tool: goal" and an
+    offline one is slow, so a missing objective must never delay or fail the
+    handshake.
+    """
+    try:
+        result = await asyncio.wait_for(
+            call_remote_tool(user, "goal", {"action": "get"}), timeout)
+    except Exception:
+        return ""
+    if not isinstance(result, dict) or result.get("error"):
+        return ""
+    goal = result.get("goal") or {}
+    if not isinstance(goal, dict) or goal.get("status") != "active":
+        return ""
+    text = str(goal.get("text") or "").strip()
+    return text[:600]
+
+
+async def node_schedule_brief(user: str, timeout: float = 3.0, limit: int = 3) -> str:
+    """Timers that fired while the chat was idle, for the session instructions.
+
+    Best effort: an old node has no ``schedule`` tool and an offline one is slow,
+    so a pending continuation must never delay or fail the handshake.
+    """
+    try:
+        result = await asyncio.wait_for(
+            call_remote_tool(user, "schedule", {"action": "list"}), timeout)
+    except Exception:
+        return ""
+    if not isinstance(result, dict) or result.get("error"):
+        return ""
+    lines = []
+    for item in (result.get("pending") or [])[:max(1, limit)]:
+        if not isinstance(item, dict):
+            continue
+        label = item.get("label") or "timer"
+        when = item.get("fired_at_iso") or ""
+        outcome = item.get("result") or ("reminder" if not item.get("command") else "ran")
+        note = (" - " + item["note"]) if item.get("note") else ""
+        job = (" job=" + item["job_id"]) if item.get("job_id") else ""
+        lines.append("%s (%s): %s%s%s [ack: schedule(action=ack, id=%s)]"
+                     % (label, when, outcome, note, job, item.get("id") or "?"))
+    return "\n".join(lines)
+
+
+class CabinetNodeControl:
+    """The cabinet's only path to a node: the same ``node_control`` tool a model calls.
+
+    Kept here, not in ``account/``, because the account package must not import
+    the gateway (circular) and the trust boundary lives here anyway: a cabinet
+    call is stamped ``_origin=web`` which a model's arguments never survive.
+    """
+
+    def available(self) -> bool:
+        return True
+
+    def online(self, node: str) -> bool:
+        return bool(node) and node in active_tunnels
+
+    def claim(self, node: str, credential: str) -> dict:
+        """Verify that *credential* proves ownership of *node*.
+
+        Accepts the node's device token or its link key: the link key is what the
+        installer prints for the MCP URL, and proving it means the caller can
+        already drive that node's tools. Without either, the cabinet never links
+        a device - an account name is not an identity, exactly like a MAC.
+        """
+        node = str(node or "").strip().lower()
+        credential = str(credential or "").strip()
+        if not node or not credential:
+            return {"ok": False, "error": "missing"}
+        registry = load_registry()
+        if registry_corrupt():
+            return {"ok": False, "error": "registry_unavailable"}
+        entry = registry.get(node)
+        if not entry:
+            return {"ok": False, "error": "unknown_node"}
+        if not (token_matches_device(entry, credential) or token_matches_link(entry, credential)):
+            return {"ok": False, "error": "bad_credential"}
+        return {"ok": True, "node": node}
+
+    async def call(self, node: str, payload: dict) -> dict:
+        args = dict(payload) if isinstance(payload, dict) else {}
+        args.setdefault("action", "status")
+        args["_origin"] = "web"
+        result = await call_remote_tool(str(node or "").strip().lower(), "node_control", args)
+        return result if isinstance(result, dict) else {"error": "invalid response from node"}
 
 
 async def health(request: Request):
@@ -790,6 +972,11 @@ async def api_register(request: Request):
     clean_os = str(data.get("os", "")).strip()[:100]
     clean_arch = str(data.get("arch", "")).strip()[:40]
     registry = load_registry()
+    if registry_corrupt():
+        return JSONResponse({
+            "error": "registry_unavailable",
+            "message": "The gateway registry is unreadable; a node cannot be registered until it is restored.",
+        }, status_code=503)
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
     # The device token may arrive as an Authorization header (preferred) or in
@@ -1420,6 +1607,69 @@ async def messages_endpoint(request: Request):
         logger.info(f"initialize: client requested protocolVersion={client_version!r} "
                     f"clientInfo={(params or {}).get('clientInfo')} -> answering {negotiated}; "
                     f"issued session {session_id[:12]}… for user '{user}'")
+        instructions = (
+            f"Remote Harness MCP node '{user}' - direct access to the real host over a reverse tunnel.\n"
+            f"GROUNDING (mandatory): NEVER state a path, file, directory or process you have not seen "
+            f"in a tool result in THIS conversation. Tool output marked [VERIFIED BY TOOL] is real; "
+            f"anything marked [TOOL ERROR] means the path does NOT exist - never repeat it as real. "
+            f"If you have not inspected something, say so and call list_dir / glob_find / grep_search first.\n"
+            f"USE: list_dir/glob_find/grep_search to locate, read_file to read, write_file/edit_file to "
+            f"modify, bash_exec for short commands, system_vitals for resources. Only touch paths you "
+            f"have confirmed. For slow work (builds, installs, tests, downloads) use run_job, then "
+            f"job_output / job_kill / job_list. Long output is paged: pass cursor=<next_cursor>.\n"
+            f"REACHABILITY: every tool result you receive in this conversation was produced ON the "
+            f"node, so the node IS online. After any successful tool result, never tell the user the "
+            f"host is unreachable or that the agent did not answer. If a call fails, report its exact "
+            f"error text instead of guessing that the host is down.\n"
+            f"NODE SETTINGS: node_control reads and changes the node's own switches (mode, cd, pause, "
+            f"sandbox, remote_control); never edit agent.env or workspace.txt by hand.\n"
+            f"APPROVALS: in approval mode a mutating call waits for the operator and then runs "
+            f"inside the SAME call. If it answers approval_required, the call did NOT run: say "
+            f"you are waiting for the confirmation, do not end the task, and retry the same call "
+            f"after it is approved in rhm (a = once, A = always, or `rhm mode full`).\n"
+            f"AUTONOMY (mandatory): when the user has stated the task - in this message or as an "
+            f"active goal - EXECUTE it end to end. Never answer with 'shall I start?', 'run the "
+            f"pipeline?', 'continue?' or 'confirm and I will proceed': asking again for "
+            f"permission the user already gave is a failed turn. End a turn only when (a) the "
+            f"task is complete, (b) a tool returned a concrete error you cannot fix, or (c) a "
+            f"tool answered approval_required - then name the approval id and say you are "
+            f"waiting; the operator confirms in rhm, not in the chat. Batch the work: one script "
+            f"written with write_file and started with run_job beats ten small shell calls. If "
+            f"bash_exec refuses a command as a system change, call system_change - its client "
+            f"dialog IS the confirmation, do not re-ask in the chat.\n"
+            f"LONG WORK: a tool call must answer within ~30 s, so never wait inside one. Start it "
+            f"with run_job, or leave a timer with schedule(action=set, after_sec/every_sec/at, "
+            f"command=...) - when it fires, the firing is listed here as a pending continuation "
+            f"and mesh_status shows it; collect its job with job_output and acknowledge with "
+            f"schedule(action=ack).\n"
+            f"DEVICE: if system_info reports a 'device' block whose class is phone or tablet, prefer "
+            f"device_info / device_control for device-level work instead of hand-writing termux-* "
+            f"commands through bash_exec, and use device_capture / device_messages for the camera, "
+            f"microphone, location, SMS or contacts - they run without a confirmation dialog, so "
+            f"the node's own MESH_DEVICE / MESH_DEVICE_ACTIONS / MESH_DEVICE_PIM switches are what "
+            f"decides whether the call is allowed."
+        )
+        carried_goal = await node_goal_brief(user)
+        if carried_goal:
+            # The objective a previous chat recorded on the node: resume it, do
+            # not ask the user to repeat what they already said.
+            instructions += (
+                "\nACTIVE GOAL (persisted on the node; the user set it earlier): "
+                + carried_goal
+                + "\nContinue it unless the user changes direction, and close it with "
+                  "goal(action=complete|blocked).\n"
+            )
+        fired_timers = await node_schedule_brief(user)
+        if fired_timers:
+            # Work that finished (or started) while nobody was looking: report it
+            # and continue the task instead of asking what to do next.
+            instructions += (
+                "\nSCHEDULED CONTINUATION (fired while the chat was idle - report the "
+                "outcome and continue the task, do not start over):\n"
+                + fired_timers
+                + "\nIf a job id is named, collect it with job_output; then acknowledge "
+                  "each item with schedule(action=ack, id=...).\n"
+            )
         resp["result"] = {
             "protocolVersion": negotiated,
             "capabilities": {
@@ -1431,31 +1681,7 @@ async def messages_endpoint(request: Request):
                 "name": "remote_harness_mcp",
                 "version": "1.0.0"
             },
-            "instructions": (
-                (
-                (
-                f"Remote Harness MCP node '{user}' - direct access to the real host over a reverse tunnel.\n"
-                f"GROUNDING (mandatory): NEVER state a path, file, directory or process you have not seen "
-                f"in a tool result in THIS conversation. Tool output marked [VERIFIED BY TOOL] is real; "
-                f"anything marked [TOOL ERROR] means the path does NOT exist - never repeat it as real. "
-                f"If you have not inspected something, say so and call list_dir / glob_find / grep_search first.\n"
-                f"USE: list_dir/glob_find/grep_search to locate, read_file to read, write_file/edit_file to "
-                f"modify, bash_exec for short commands, system_vitals for resources. Only touch paths you "
-                f"have confirmed. For slow work (builds, installs, tests, downloads) use run_job, then "
-                f"job_output / job_kill / job_list. Long output is paged: pass cursor=<next_cursor>.\n"
-                f"REACHABILITY: every tool result you receive in this conversation was produced ON the "
-                f"node, so the node IS online. After any successful tool result, never tell the user the "
-                f"host is unreachable or that the agent did not answer. If a call fails, report its exact "
-                f"error text instead of guessing that the host is down.\n"
-                f"DEVICE: if system_info reports a 'device' block whose class is phone or tablet, prefer "
-                f"device_info / device_control for device-level work instead of hand-writing termux-* "
-                f"commands through bash_exec, and use device_capture / device_messages for the camera, "
-                f"microphone, location, SMS or contacts - they run without a confirmation dialog, so "
-                f"the node's own MESH_DEVICE / MESH_DEVICE_ACTIONS / MESH_DEVICE_PIM switches are what "
-                f"decides whether the call is allowed."
-            )
-            )
-            )
+            "instructions": instructions,
         }
     elif method == "notifications/initialized":
         session_id = resolve_session_id(request, user)
@@ -1539,7 +1765,9 @@ async def messages_endpoint(request: Request):
                         "pip/npm/winget/msiexec/...), uninstallers, rm / Remove-Item / del, disk "
                         "wipes and anything else that installs, removes or destroys. Set "
                         "background=true for long installs and poll with job_output. Ordinary "
-                        "inspection, builds and tests belong in bash_exec / run_job instead."
+                        "inspection, builds and tests belong in bash_exec / run_job instead. "
+                        "This call is confirmed by the client's own dialog: do not ask the user "
+                        "in the chat whether to run it."
                     ),
                     "inputSchema": {
                         "type": "object",
@@ -1585,6 +1813,151 @@ async def messages_endpoint(request: Request):
                                         "description": "apply: restart the node afterwards (default true)"}
                         },
                         "required": []
+                    }
+                },
+                # The node's own switches: access mode, pause, working directory,
+                # isolation and the remote-control lock. Same tool the cabinet uses
+                # (with _origin=web) and the console menu calls locally, so all three
+                # surfaces apply exactly the same validation.
+                {
+                    "name": "node_control",
+                    "description": (
+                        "Read or change this node's own switches: the access mode (read_only / "
+                        "approval / full), pause and resume, the working directory (the `cd` of "
+                        "every other tool - follow it with list_dir), the isolated container "
+                        "(Docker/Podman with only the project mounted) and the remote-control "
+                        "lock. Use action=status first: it answers the current mode, paused, "
+                        "workspace, isolation and remote_control without changing anything. A "
+                        "node in read-only mode cannot be lifted by a remote caller, and remote "
+                        "control must be switched back on at the machine - both refusals say so."
+                    ),
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "action": {
+                                "type": "string",
+                                "enum": ["status", "mode", "pause", "resume", "cd", "sandbox",
+                                         "remote_control"],
+                                "description": ("What to do (status reports without changing "
+                                                "anything).")
+                            },
+                            "mode": {
+                                "type": "string",
+                                "enum": ["read_only", "approval", "full"],
+                                "description": "mode: the access mode to apply."
+                            },
+                            "path": {
+                                "type": "string",
+                                "description": ("cd: the directory that becomes the working "
+                                                "directory.")
+                            },
+                            "workspace": {
+                                "type": "string",
+                                "description": ("sandbox: project directory to mount (default: "
+                                                "the current working directory).")
+                            },
+                            "enabled": {
+                                "type": "boolean",
+                                "description": ("sandbox: start (true) or stop (false) the isolated "
+                                                "container; remote_control: allow or forbid remote "
+                                                "settings changes.")
+                            },
+                            "network": {
+                                "type": "boolean",
+                                "description": ("sandbox: allow network access inside the container "
+                                                "(default false; in approval mode this asks the "
+                                                "operator first).")
+                            }
+                        },
+                        "required": ["action"],
+                        "additionalProperties": False
+                    }
+                },
+                # The persistent objective: a chat that reconnects must resume the
+                # same goal instead of starting over.
+                {
+                    "name": "goal",
+                    "description": (
+                        "Record the objective this chat is working on, so it survives a "
+                        "reconnect, an agent restart or a new session: the node stores it and "
+                        "the gateway puts it back into the session instructions (and into "
+                        "mesh_status). action=set with text starts or replaces the objective; "
+                        "get reads it; complete or blocked closes it (note optional); clear "
+                        "forgets it. Use it when the user states a goal that outlives this "
+                        "turn, not for every message. The note is metadata: it runs nothing "
+                        "and works in read-only mode. An active goal is the operator's "
+                        "standing authorization: proceed with its steps without asking."
+                    ),
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "action": {
+                                "type": "string",
+                                "enum": ["set", "get", "complete", "blocked", "clear"],
+                                "description": "What to do (default: get)."
+                            },
+                            "text": {
+                                "type": "string",
+                                "description": "set: the objective, as one sentence."
+                            },
+                            "note": {
+                                "type": "string",
+                                "description": ("complete/blocked: what was achieved, or what "
+                                                "stops it.")
+                            }
+                        },
+                        "required": ["action"],
+                        "additionalProperties": False
+                    }
+                },
+                # Timers on the node: the way a long task survives the client's
+                # ~30 s call budget without the model standing in a chat asking
+                # "shall I continue?".
+                {
+                    "name": "schedule",
+                    "description": (
+                        "Set a timer on the node and continue when it fires - the way to "
+                        "survive a long task, because a tool call must answer within ~30 s "
+                        "and the chat cannot be woken by the server. action=set needs a "
+                        "label and exactly one of after_sec (once), every_sec (repeat, "
+                        ">=10) or at (\"HH:MM\" daily); an optional command runs as a "
+                        "background job at that moment (job id is kept in the "
+                        "continuation), a note-only timer is a reminder. When it fires, "
+                        "the firing appears in mesh_status and in the session instructions "
+                        "as a pending continuation: read it, collect the job with "
+                        "job_output if there is one, and acknowledge it with action=ack. "
+                        "action=list shows timers and pending continuations, action=cancel "
+                        "stops one by id."
+                    ),
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "action": {
+                                "type": "string",
+                                "enum": ["set", "list", "cancel", "ack"],
+                                "description": "What to do (default: list)."
+                            },
+                            "label": {"type": "string",
+                                      "description": "set: short name for the timer."},
+                            "command": {"type": "string",
+                                        "description": ("set: optional shell command to run "
+                                                        "when it fires.")},
+                            "note": {"type": "string",
+                                     "description": "set: what to remember/continue with."},
+                            "after_sec": {"type": "integer",
+                                          "description": "set: fire once after this many seconds."},
+                            "every_sec": {"type": "integer",
+                                          "description": ("set: repeat every this many seconds "
+                                                          "(>=10).")},
+                            "at": {"type": "string",
+                                   "description": ("set: fire every day at this local time, "
+                                                   "e.g. 09:30.")},
+                            "id": {"type": "string",
+                                   "description": ("cancel/ack: the timer id, or the "
+                                                   "continuation id.")}
+                        },
+                        "required": ["action"],
+                        "additionalProperties": False
                     }
                 },
                 # The node's own device (a phone/tablet under Termux, or the local
@@ -1827,6 +2200,27 @@ async def messages_endpoint(request: Request):
                     "inputSchema": {"type": "object", "properties": {}, "required": []}
                 },
                 {
+                    "name": "screen_capture",
+                    "description": (
+                        "Take a PNG screenshot of the host's desktop and save it there. "
+                        "Windows captures through GDI (a clean install is enough, no "
+                        "PowerShell required); a headless Linux server or an Android app "
+                        "session has no readable display and answers available=false with "
+                        "the reason. share_file publishes the returned path as a link."
+                    ),
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": ("Optional destination PNG (default: a timestamped "
+                                                "file in the node's cache directory).")
+                            }
+                        },
+                        "required": []
+                    }
+                },
+                {
                     "name": "get_orchestration_skill",
                     "description": "Load the node orchestration rules.",
                     "inputSchema": {"type": "object", "properties": {}, "required": []}
@@ -1980,7 +2374,7 @@ async def messages_endpoint(request: Request):
         }
     elif method == "tools/call":
         name = params.get("name")
-        args = params.get("arguments", {})
+        args = _strip_reserved_arguments(params.get("arguments", {}))
         is_error = False
         if name == "get_orchestration_skill":
             content_text = get_skill(user, request.headers.get("host", PUBLIC_HOST))
@@ -2020,6 +2414,77 @@ async def messages_endpoint(request: Request):
                 elif res.get("reason"):
                     parts.append(f"detail: {res['reason']}")
                 content_text = "\n".join(parts) if parts else json.dumps(res, ensure_ascii=False, indent=2)
+        elif name == "node_control":
+            res = await call_remote_tool(user, name, args)
+            err = remote_tool_error(res)
+            if err:
+                is_error = True
+                content_text = f"[Error] {err}"
+            else:
+                state = res.get("state") or {}
+                lines = [str(res.get("message") or "ok")]
+                if state.get("access_mode"):
+                    lines.append("access_mode: %s" % state["access_mode"])
+                if state.get("paused") is not None:
+                    lines.append("paused: %s" % ("yes" if state["paused"] else "no"))
+                if state.get("workspace"):
+                    lines.append("workspace: %s" % state["workspace"])
+                isolation = state.get("sandbox") or {}
+                if isolation:
+                    lines.append("isolation: %s" % ("ON at %s" % isolation.get("workspace")
+                                                    if isolation.get("enabled") else "off"))
+                lock = state.get("remote_control") or {}
+                if lock.get("enabled") is not None:
+                    lines.append("remote_control: %s" % ("on" if lock["enabled"] else "off"))
+                content_text = "\n".join(lines)
+        elif name == "goal":
+            res = await call_remote_tool(user, name, args)
+            err = remote_tool_error(res)
+            if err:
+                is_error = True
+                content_text = f"[Error] {err}"
+            else:
+                goal_state = res.get("goal") or {}
+                lines = [str(res.get("message") or "ok")]
+                if goal_state:
+                    lines.append("goal: %s" % goal_state.get("text"))
+                    lines.append("status: %s" % goal_state.get("status"))
+                    if goal_state.get("note"):
+                        lines.append("note: %s" % goal_state["note"])
+                elif res.get("history"):
+                    last = res["history"][0]
+                    lines.append("last: %s - %s" % (last.get("status"), last.get("text")))
+                content_text = "\n".join(lines)
+        elif name == "schedule":
+            res = await call_remote_tool(user, name, args)
+            err = remote_tool_error(res)
+            if err:
+                is_error = True
+                content_text = f"[Error] {err}"
+            else:
+                action = str(args.get("action") or "list").lower()
+                if action in ("set", "add", "create", "cancel", "delete", "remove",
+                              "ack", "done", "acknowledge"):
+                    content_text = str(res.get("message") or "ok")
+                else:
+                    lines = [str(res.get("message") or "timers")]
+                    for item in res.get("schedules") or []:
+                        if not isinstance(item, dict):
+                            continue
+                        lines.append("- %s [%s] %s next=%s%s"
+                                     % (item.get("label"), item.get("id"),
+                                        item.get("kind"),
+                                        item.get("next_due_iso") or "?",
+                                        (" cmd=" + str(item.get("command"))[:60])
+                                        if item.get("command") else ""))
+                    for item in res.get("pending") or []:
+                        if not isinstance(item, dict):
+                            continue
+                        lines.append("FIRED %s (%s): %s%s"
+                                     % (item.get("label"), item.get("fired_at_iso") or "",
+                                        item.get("result") or "",
+                                        (" job=" + item["job_id"]) if item.get("job_id") else ""))
+                    content_text = "\n".join(lines)
         elif name == "system_info":
             res = await call_remote_tool(user, name, args)
             err = remote_tool_error(res)
@@ -2991,6 +3456,33 @@ TOOL_ANNOTATIONS = {
     "job_list": _ANNOT_READ_ONLY,
     "share_list": _ANNOT_READ_ONLY,
     "device_info": _ANNOT_READ_ONLY,
+    # The node's settings do change real behaviour, so the advertisement is
+    # honest (read-only false) exactly like the node's own surface: the model's
+    # client may ask before a switch is thrown, and the cabinet - which has no
+    # such prompt - is a logged-in person pressing a button.
+    "node_control": {
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": False,
+    },
+    # The persistent objective writes one note and starts nothing, but it does
+    # change what the next session sees, so the honest hint stays "not read-only"
+    # exactly like the node's own surface (tools/list parity is tested).
+    "goal": {
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": False,
+    },
+    # A timer may run a command later, when no client dialog can appear; the
+    # node gates its creation (approval mode asks once) and the hint stays honest.
+    "schedule": {
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": False,
+    },
     # Commands run without a dialog; classify_command() refuses the gated classes
     # (install/delete, sudo, system paths) and routes them to system_change.
     "bash_exec": _ANNOT_UNCONFIRMED_WRITE,
@@ -3002,6 +3494,9 @@ TOOL_ANNOTATIONS = {
     # Stopping a job is neither an install nor a delete, and bash_exec can
     # terminate the same process anyway, so no prompt is spent on it.
     "job_kill": _ANNOT_UNCONFIRMED_WRITE,
+    # A screenshot writes one PNG on the node and reads the screen; nothing is
+    # installed, removed or published, so it needs no dialog.
+    "screen_capture": _ANNOT_UNCONFIRMED_WRITE,
     # The device branch (torch, volume, TTS, camera, microphone, location, SMS,
     # contacts, ...): the node executes it and the node refuses it - MESH_DEVICE,
     # MESH_DEVICE_ACTIONS, MESH_DEVICE_PIM and MESH_READ_ONLY are checked before
@@ -3379,7 +3874,57 @@ routes = [
     Route("/{user}/{rest:path}", public_share_endpoint, methods=["GET", "HEAD", "OPTIONS"]),
 ]
 
+# The account cabinet is mounted before the share catch-all. A node named
+# "account" is now reserved, so the two can never collide.
+_account_app = None
+try:
+    from account.app import create_app as _create_account_app
+
+    _account_app = _create_account_app(node_control=CabinetNodeControl())
+except Exception as _account_exc:  # pragma: no cover - optional dependency failure
+    logger.error("Account cabinet is unavailable: %s", _account_exc)
+
+if _account_app is not None:
+    routes.insert(-1, Mount("/account", app=_account_app))
+
+class AccountCorsFilter:
+    """Keep the cabinet same-origin even though MCP routes allow any origin.
+
+    ``CORSMiddleware`` is global and wildcard; account pages must not advertise
+    ``Access-Control-Allow-Origin: *`` because the cabinet carries a session
+    cookie. The filter strips CORS headers from the final response only for
+    ``/account``.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http" or not scope.get("path", "").startswith("/account"):
+            await self.app(scope, receive, send)
+            return
+
+        async def wrapped(message):
+            if message.get("type") == "http.response.start":
+                blocked = {
+                    b"access-control-allow-origin",
+                    b"access-control-allow-methods",
+                    b"access-control-allow-headers",
+                    b"access-control-expose-headers",
+                    b"access-control-max-age",
+                    b"access-control-allow-credentials",
+                }
+                message["headers"] = [
+                    (name, value) for name, value in message.get("headers", [])
+                    if name.lower() not in blocked
+                ]
+            await send(message)
+
+        await self.app(scope, receive, wrapped)
+
+
 middleware = [
+    Middleware(AccountCorsFilter),
     Middleware(
         CORSMiddleware,
         allow_origins=["*"],

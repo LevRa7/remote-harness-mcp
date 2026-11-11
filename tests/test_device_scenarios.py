@@ -512,14 +512,28 @@ def test_the_two_termux_detectors_agree(monkeypatch, env):
 def test_the_resolver_is_the_only_decision_point():
     """A second place that asks "is this a phone?" is how the branches drift.
 
-    The three signals are pinned to one reader each: ``"com.termux"`` appears
-    once (in ``scenario``), the data directory constant is referenced only by its
-    own function, and the Windows decision itself is made in exactly one place.
+    The rule moved into :mod:`core.platforms` when the node was split into
+    per-platform packages: every platform decision (backend selection here, tool
+    selection in ``core/mcp_tools.py``) asks that one function.  ``core/device.py``
+    must therefore *not* decide for itself any more - it supplies the evidence it
+    has already probed (the Termux data directory, the platform string) and takes
+    the answer.  Pinned in both directions: one reader in ``platforms``, zero in
+    ``device``.
     """
-    source = inspect.getsource(device)
-    assert source.count('"com.termux"') == 1
-    assert source.count("_TERMUX_DATA_DIR") == 2
-    assert source.count('if os.name == "nt":') == 1
+    from core import platforms
+
+    device_source = inspect.getsource(device)
+    platforms_source = inspect.getsource(platforms)
+
+    assert platforms_source.count('"com.termux"') == 1
+    assert platforms_source.count('if os.name == "nt":') == 1
+    assert 'if os.name == "nt":' in platforms_source.split("def detect", 1)[1]
+
+    assert device_source.count('"com.termux"') == 0
+    assert device_source.count('if os.name == "nt":') == 0
+    assert device_source.count("platforms.detect(") == 1
+    # The data-directory probe still lives here, referenced only by its own reader.
+    assert device_source.count("_TERMUX_DATA_DIR") == 2
 
 
 # ---------------------------------------------------------------------------

@@ -67,6 +67,9 @@ def test_tools_surface_contains_all_tools():
         "mesh_status",
         "system_info",
         "system_vitals",
+        # Desktop capture: the tool that answers "what is on my screen?" and the
+        # reason the platform layer grew screenshot support.
+        "screen_capture",
         "get_orchestration_skill",
         "list_dir",
         "bash_exec",
@@ -82,6 +85,13 @@ def test_tools_surface_contains_all_tools():
         # Self-update, added before the share surface so the pre-existing order of
         # the fifteen tools above is untouched.
         "mesh_update",
+        # The node's own switches (access mode, workspace, isolation, pause and
+        # the remote-control lock). Sits next to self-update: both change the
+        # node itself rather than the files on it.
+        "node_control",
+        # The persistent objective, set from the chat: a note that outlives the
+        # session, next to the switches it usually accompanies.
+        "goal",
         # The device branch (the node's own phone or laptop), added in the same
         # slot and for the same reason: after everything that existed when it
         # landed and before the share block, so neither the legacy surface nor the
@@ -567,37 +577,57 @@ def test_run_job_missing_is_reported_and_kill():
     assert "error" in mcp_tools.call_tool("job_kill", {"job_id": "does-not-exist"})
 
 
-def test_job_kill_tolerates_an_already_dead_process(monkeypatch):
-    """taskkill exits non-zero ("process not found") when the tree is already gone.
+def test_job_kill_tolerates_an_already_dead_process():
+    """Killing a job whose process is already gone is success, not an error.
 
-    That is the normal race on Windows between a job finishing and job_kill
-    arriving, and it must not be reported as a failure to stop the job.
+    That is the normal race on Windows between a short-lived job finishing and
+    ``job_kill`` arriving.  The tree kill now goes through the kernel
+    (``Toolhelp32`` + ``TerminateProcess``) instead of ``taskkill``: it is faster,
+    it cannot be blocked by a missing program, and its "process not found" case
+    is simply a pid that no longer exists.
     """
-    class FakeCompleted(object):
-        returncode = 128
-        stdout = ""
-        stderr = 'ERROR: The process "4242" not found.'
-
-    monkeypatch.setattr(mcp_tools.subprocess, "run", lambda *a, **k: FakeCompleted())
-    mcp_tools._kill_tree_windows(4242)  # must not raise
-
-    class RealFailure(object):
-        returncode = 1
-        stdout = ""
-        stderr = "Access is denied."
-
-    monkeypatch.setattr(mcp_tools.subprocess, "run", lambda *a, **k: RealFailure())
-    with pytest.raises(OSError):
-        mcp_tools._kill_tree_windows(4242)
+    mcp_tools._kill_tree_windows(2 ** 22)  # must not raise for a pid that is gone
 
 
-def test_run_job_read_only_still_runs_but_kill_blocked():
-    started = mcp_tools.call_tool("run_job", {"command": py_sleep(2)})
+def test_kill_tree_windows_ends_a_real_tree():
+    """A parent and its child both die - the contract job_kill relies on."""
+    import subprocess as _sp
+    import sys as _sys
+    import time as _time
+
+    if not mcp_tools._IS_WINDOWS:
+        pytest.skip("Windows only")
+
+    parent = _sp.Popen([
+        _sys.executable, "-c",
+        "import subprocess,sys,time\n"
+        "subprocess.Popen([sys.executable,'-c','import time;time.sleep(60)'])\n"
+        "time.sleep(60)",
+    ])
+    try:
+        _time.sleep(1.0)
+        assert mcp_tools._pid_alive(parent.pid)
+        mcp_tools._kill_tree_windows(parent.pid)
+        _time.sleep(0.8)
+        assert not mcp_tools._pid_alive(parent.pid)
+    finally:
+        try:
+            parent.kill()
+        except Exception:
+            pass
+
+
+def test_read_only_blocks_shell_and_job_creation():
+    """MESH_READ_ONLY is the operator's hard stop for arbitrary execution.
+
+    It used to leave ``bash_exec`` and ``run_job`` open (and a test pinned that),
+    which meant a "read-only" node still ran any command.  The guard now covers
+    both, so a read-only node is observation-only.
+    """
     mcp_tools.configure(read_only=True)
-    assert "error" in mcp_tools.call_tool("job_kill", {"job_id": started["job_id"]})
-    assert mcp_tools.call_tool("bash_exec", {"command": "echo ok"})["stdout"].strip() == "ok"
+    assert "error" in mcp_tools.call_tool("bash_exec", {"command": "echo ok"})
+    assert "error" in mcp_tools.call_tool("run_job", {"command": py_sleep(1)})
     mcp_tools.configure(read_only=False)
-    mcp_tools.call_tool("job_kill", {"job_id": started["job_id"]})
 
 
 def test_job_output_stdout_pagination():
@@ -685,3 +715,18 @@ def test_glob_find_patterns_with_separators_are_deduplicated(tmp_path):
     # Patterns with a separator used to return nothing at all.
     assert len(mcp_tools.call_tool("glob_find", {"pattern": "sub/*.py", "path": str(tmp_path)})["files"]) == 1
     assert len(mcp_tools.call_tool("glob_find", {"pattern": "sub/b.py", "path": str(tmp_path)})["files"]) == 1
+
+
+def test_a_piped_python_child_streams_its_output(monkeypatch):
+    """A buffered Python child looks like a stalled job to whoever polls it.
+
+    The model download pipeline printed nothing for minutes (stdout is a pipe),
+    so job_output returned nothing and the model concluded the job was not
+    running. Every child shell now gets PYTHONUNBUFFERED=1 unless the operator
+    set it explicitly.
+    """
+    monkeypatch.delenv("PYTHONUNBUFFERED", raising=False)
+    assert mcp_tools._child_env()["PYTHONUNBUFFERED"] == "1"
+
+    monkeypatch.setenv("PYTHONUNBUFFERED", "0")
+    assert mcp_tools._child_env()["PYTHONUNBUFFERED"] == "0"

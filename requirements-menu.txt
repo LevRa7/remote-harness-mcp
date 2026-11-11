@@ -1,0 +1,4 @@
+# Optional dependency for the `rhm` console menu: renders the MCP endpoint as a
+# terminal QR code. The menu works without it (the URL is still shown), so this
+# is deliberately not installed by the zero-dependency node bootstrap.
+qrcode>=7.4

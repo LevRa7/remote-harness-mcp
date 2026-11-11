@@ -87,7 +87,7 @@ Every answer was produced by `system_vitals`, `device_info`, `device_capture` an
 
 ## 🛠️ What Gemini can do on your machine (MCP tools)
 
-**26 tools.** Every one of them runs on your machine under your own user account — the gateway only carries the calls.
+**30 tools.** Every one of them runs on your machine under your own user account — the gateway only carries the calls.
 
 ### Which calls ask for your confirmation
 
@@ -96,7 +96,7 @@ Gemini Spark decides whether to stop and ask *"confirm this action?"* from the *
 | Class | Tools | Confirmation |
 | :--- | :--- | :--- |
 | Read-only | `mesh_status`, `system_info`, `system_vitals`, `get_orchestration_skill`, `list_dir`, `read_file`, `grep_search`, `glob_find`, `job_output`, `job_list`, `share_list`, `device_info` | never asked |
-| Local work — commands, builds, file writes, jobs, shares, and the whole device branch | `bash_exec`, `run_job`, `write_file`, `edit_file`, `job_kill`, `share_file`, `serve_dir`, `unshare`, `device_control`, `device_capture`, `device_messages` | not asked |
+| Local work — commands, builds, file writes, jobs, shares, node settings, and the whole device branch | `bash_exec`, `run_job`, `write_file`, `edit_file`, `job_kill`, `node_control`, `goal`, `schedule`, `share_file`, `serve_dir`, `unshare`, `device_control`, `device_capture`, `device_messages`, `screen_capture` | not asked |
 | **Confirmed — install/delete, `sudo`, system paths** | `system_change` (installs/removes software, deletes data, runs `sudo`, edits system paths by shell), `system_write` (writes file content into a system path), `mesh_update` (installs a release) | **asked first** |
 
 A prompt is spent on a **system change** only: `system_change`, `system_write` and `mesh_update` install, remove, delete or replace something you cannot undo in one call. Everything else runs silently, the device branch included — a camera, a microphone or an SMS list installs and removes nothing, and what still refuses such a call is the node's own switch (`MESH_DEVICE`, `MESH_DEVICE_ACTIONS`, `MESH_DEVICE_PIM`, `MESH_READ_ONLY`), which holds no matter what the client does. `unshare` is ordinary local work for the same reason: it stops a local server and removes a copy you can publish again in one call.
@@ -124,6 +124,7 @@ The tool surface and the confirmation policy live in [gateway.py](gateway.py) (a
 | `mesh_status()` | Confirms the node is reachable, with live evidence from the host itself: what kind of machine answered (`device_class`, `scenario`) and its `battery_percent`. Call it first if the machine looks offline. |
 | `system_info()` | One-call host summary: OS, desktop, user, home, disks, memory, load, top processes, the current wallpaper, `command_shell` — the shell `bash_exec` will actually use — and the device blocks: battery and charging, network and signal, language, time and timezone, CPU, RAM, storage, cameras, microphones and sensors. |
 | `system_vitals()` | CPU, RAM and disk metrics, plus the battery block and the thermal sensors the platform exposes. |
+| `screen_capture(path)` | A PNG screenshot of the host's desktop. Windows captures through GDI, so it works on a clean install with no PowerShell and no third-party program; a headless server and the Android sandbox have no readable display, so the tool answers `available: false` with the reason instead of a black rectangle. `share_file` on the returned path publishes it as a link. |
 
 ### Shell
 
@@ -194,7 +195,54 @@ Read from `agent.env` at startup ([core/agent.py](core/agent.py), applied in [co
 | `MESH_DEVICE_CAPTURE_DIR` | shared storage on a phone once `termux-setup-storage` has been granted (`~/storage/dcim/remote-harness-mcp` or `~/storage/shared/RemoteHarnessMCP`), otherwise `~/.cache/remote-harness-mcp/captures` | Where photos and recordings are written. |
 | `MESH_DEVICE_PIM` | `0` | `1` enables SMS, the call log, contacts and placing a call. |
 | `MESH_DEVICE_QUICK` | `0` | `1` keeps `system_info` instant by skipping network, cameras, microphones and sensors. |
-| `MESH_READ_ONLY` | `0` | `1` refuses every `device_control` and `device_capture` action, and blocks `sms_send` and `call`. This is the node-side guarantee that does not depend on any client prompt. |
+| `MESH_READ_ONLY` | `0` | `1` makes the node observation-only: blocks `bash_exec`, `run_job`, `write_file`, `edit_file`, publishing and mutating device actions; reads (`read_file`, `list_dir`, `grep_search`, `system_info`) keep working. This is the startup guard: until the operator chooses a mode in `rhm`, `1` keeps the node read-only. An explicit menu choice (`access.mode`) is the operator's permission and the env file no longer overrides it; the tray can also flip read-only live. |
+
+### Node settings (`node_control`)
+
+One tool for the node's own switches — the same ones the `rhm` console menu and the cabinet change. Changes apply immediately: the agent reads them on every call, so no restart is needed.
+
+| Action | What it does |
+| :--- | :--- |
+| `status` | Reports the access mode, `paused`, the working directory, isolation and the remote-control state without changing anything. |
+| `mode` (`read_only` / `approval` / `full`) | The access mode. A model may **tighten** the mode but never lift read-only — that is a person's decision, in the cabinet or at the machine. |
+| `cd` (`path`) | The working directory: every relative `list_dir`, `read_file`, `write_file` and `bash_exec` path resolves against it. `ls` afterwards is plain `list_dir`. |
+| `pause` / `resume` | Pause: the node answers `node_paused` to everything except `status` and `resume`, while the tunnel stays up. |
+| `sandbox` (`enabled`, `workspace`, `network`) | An isolated Docker/Podman container: only the project directory is mounted at `/workspace`, networking is off by default, `--cap-drop ALL`, PID and memory limits. `bash_exec` and `run_job` then execute inside it. |
+| `remote_control` (`enabled`) | Allows or forbids changing these switches over the network. |
+
+**Remote control is on by default**: the cabinet and a model may tighten the mode and move the working directory. It can be switched off from anywhere, but switched back on **only at the machine**: `rhm remote-control on`, or `r` in the `rhm` menu. Otherwise switching it off would be a request rather than a lock.
+
+The cabinet (`/account`) shows the same switch right after login; a device is linked once with its node name and key (`lk_…` from the MCP URL, or the device token). Cabinet buttons, the menu and `rhm` subcommands go through one implementation ([core/settings.py](core/settings.py)), so they share the validation and the `settings.log` audit trail in the node's config directory.
+
+### Approvals (approval mode)
+
+In `approval` mode a mutating call is not cut off: the node queues it, **waits for the operator** (up to `MESH_APPROVAL_WAIT`, 12 s by default) and, once confirmed, runs the same call and returns its real result. The model does not stop on every step.
+
+| How to confirm | What it gives |
+| :--- | :--- |
+| `a` in `rhm` | once: the waiting call runs |
+| `A` in `rhm` | **always allow** (until revoked or the mode changes) |
+| `R` in `rhm` | revoke "always allow" |
+| `x` | deny the waiting request |
+| `rhm approvals allow [minutes]` / `once` / `off` | the same from the command line |
+| `rhm mode full` | switch approvals off entirely |
+
+From the chat: ask for `node_control(action="mode", mode="full")` — that transition itself needs one confirmation, and after it nothing asks again. If a call still answers `approval_required`, it did **not** run: the model must say it is waiting and retry the same call, not end the task. Changing the access mode revokes "always allow", so switching to approval means approvals again.
+
+### Goal from the chat (`goal`)
+
+A chat has no memory of the previous session: the client closes and the next turn starts from nothing. The node holds the objective instead.
+
+| Action | What it does |
+| :--- | :--- |
+| `set` (`text`) | Records the objective (or replaces the previous one, which moves to history). |
+| `get` | Reads the current objective and the last closed ones. |
+| `complete` / `blocked` (`note`) | Closes the objective as done or blocked. |
+| `clear` | Forgets it. |
+
+The objective lives in `<ConfigDir>/goal.json`, so it survives an agent restart and a new chat. On `initialize` the gateway puts it back into the session instructions (`ACTIVE GOAL: …`), and `mesh_status` returns it as `goal` — a reconnecting client continues where it left off instead of asking "what were we doing?". It is a note, not a command: it runs nothing and works even in read-only mode.
+
+From the console: `rhm goal "text"`, `rhm goal`, `rhm goal done "what was done"`, `rhm goal blocked "what stops it"`, `rhm goal clear`.
 
 ### Publishing files and web pages
 
@@ -417,7 +465,7 @@ The wizard does not offer it; use the console installer:
 .\install.ps1 -Mode standalone -Port 8096
 ```
 
-That starts a local-only FastMCP server at `http://localhost:8096/sse` and puts that URL on the clipboard.
+That starts a local-only FastMCP server at `http://localhost:8096/sse`, generates a token (`%USERPROFILE%\.config\remote-harness-mcp\standalone.env`, user-only ACL) and puts a tokenized URL on the clipboard. The URL works only from this computer; do not publish it.
 
 ---
 

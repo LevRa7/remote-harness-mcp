@@ -1,0 +1,35 @@
+name: Team coverage
+
+# The Wave 1 plan is only real if every detail has an owner, a reviewer and a
+# blocking test. This gate runs on every change to the team artefacts and fails
+# the build when a row is removed, an owner/reviewer is missing, or a test ID
+# points nowhere.
+
+on:
+  pull_request:
+    paths:
+      - "docs/team/**"
+      - "tools/check_team_coverage.py"
+      - "tools/build_team_matrix.py"
+  push:
+    branches: [main]
+    paths:
+      - "docs/team/**"
+      - "tools/check_team_coverage.py"
+      - "tools/build_team_matrix.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  coverage:
+    name: WBS -> owner -> test -> evidence
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Validate traceability
+        run: python tools/check_team_coverage.py --strict

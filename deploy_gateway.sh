@@ -99,7 +99,7 @@ if [ "$WITH_NODE_CODE" = true ]; then
     # install.ps1 registers the scheduled tasks that run the watchdog and the
     # updater, and points the operator at the doctor, so a node that bootstraps
     # itself from this domain must be able to download all three.
-    for f in ops/windows/agent-watchdog.ps1 ops/doctor.ps1 ops/update.ps1; do
+    for f in ops/windows/agent-watchdog.ps1 ops/windows/rhm-tray.ps1 ops/doctor.ps1 ops/update.ps1; do
         [ -f "$f" ] && NODE_FILES+=("$f")
     done
 fi

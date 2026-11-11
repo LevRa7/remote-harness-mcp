@@ -43,3 +43,10 @@ status_web/status.json
 status_web/status.txt
 # The personal Telegram pairing code is for one person, not for a public repo.
 telegram-brother-qr.png
+
+# Wave 1 evidence: produced locally, uploaded by CI, never committed (may contain test data).
+artifacts/**
+!artifacts/README.md
+
+# Isolated container state created by 'rhm' inside the selected project.
+.rhm-sandbox/

@@ -817,12 +817,23 @@ if (-not $ScriptDir -or -not (Test-Path "$ScriptDir\core\agent.py")) {
         "core/web_share.py",
         "core/domain.py",
         "core/paths.py",
+        "core/goal.py",
         "core/vitals.py",
         "core/updater.py",
         "core/version.py",
+        "core/control.py",
+        "core/usage.py",
+        "core/rescue.py",
+        "core/policy.py",
+        "core/menu.py",
+        "core/sandbox.py",
+        "core/schedule.py",
+        "core/settings.py",
+        "core/web_settings.py",
         "core/__init__.py",
         "skills/orchestrator.md",
         "ops/windows/agent-watchdog.ps1",
+        "ops/windows/rhm-tray.ps1",
         "ops/windows/run-hidden.vbs",
         "ops/update.ps1",
         "ops/doctor.ps1"
@@ -881,8 +892,23 @@ if ($Mode -eq "standalone") {
     } else {
         Write-Host "=== Starting in Local Standalone Mode on port $Port ===" -ForegroundColor Blue
     }
-    Start-Process $pyExeOnly -ArgumentList "-m core.server --host 127.0.0.1 --port=$Port" -WorkingDirectory $ScriptDir -WindowStyle Hidden
-    $LocalUrl = "http://localhost:$Port/sse"
+    # A standalone server is never unauthenticated: generate a token, keep it in a
+    # user-only env file, and pass it explicitly. The URL carries it only because
+    # Gemini's connector field cannot set an Authorization header; the server
+    # accepts a query token only from a loopback client.
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    $tokenBytes = New-Object byte[] 32
+    $rng.GetBytes($tokenBytes)
+    $rng.Dispose()
+    $StandaloneToken = -join ($tokenBytes | ForEach-Object { $_.ToString('x2') })
+    $StandaloneEnv = Join-Path $ConfigDir 'standalone.env'
+    New-Item -ItemType Directory -Force -Path $ConfigDir | Out-Null
+    Set-Content -LiteralPath $StandaloneEnv -Value ("MESH_TOKEN=" + $StandaloneToken) -Encoding ASCII
+    try {
+        icacls $StandaloneEnv /inheritance:r /grant:r ("$env:USERNAME:F") | Out-Null
+    } catch { }
+    Start-Process $pyExeOnly -ArgumentList "-m core.server --host 127.0.0.1 --port=$Port --token=$StandaloneToken" -WorkingDirectory $ScriptDir -WindowStyle Hidden
+    $LocalUrl = "http://localhost:$Port/sse?token=$StandaloneToken"
     $Copied = $false
     try {
         Set-Clipboard -Value $LocalUrl -ErrorAction Stop
@@ -1078,6 +1104,23 @@ $env:MESH_TOKEN = $AssignedToken
     ' Log the output so a silent autostart failure can be diagnosed later.
     WshShell.Run "cmd /c """"$pyExeForVbs"" -u -m core.agent >> """"$agentLog"""" 2>&1""", 0, False
 "@ | Out-File -FilePath $startupVbs -Encoding Unicode
+
+# Tray icon: a per-user observer/controller. It reads the same heartbeat and
+# marker files as the agent, so "Pause commands" and "Read-only mode" work
+# without restarting the service. Register it in HKCU Run (no admin) and start it
+# now; a payload without it is still a working node, so a miss is not fatal.
+$trayScript = Join-Path $ScriptDir 'ops\windows\rhm-tray.ps1'
+if (Test-Path -LiteralPath $trayScript) {
+    try {
+        $trayCommand = 'powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $trayScript + '"'
+        New-Item -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Force | Out-Null
+        Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'RemoteHarnessMCPTray' -Value $trayCommand
+        Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $trayScript + '"')) -WindowStyle Hidden -ErrorAction SilentlyContinue
+        Write-Host "[OK] Tray icon registered and started." -ForegroundColor Green
+    } catch {
+        Write-Host "[!] Could not start the tray icon: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+}
 
 # A Startup entry runs once per logon: it cannot recover a node whose agent died
 # (crash, Windows Update reboot, broken dependency). A Scheduled Task repeats the
