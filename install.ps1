@@ -3,7 +3,7 @@
 # ==============================================================================
 param(
     [switch]$Quick,
-    [string]$Mode = "tunnel",
+    [string]$Mode = "funnel",
     [string]$User = "",
     [string]$Token = "",
     # Empty on purpose: the shared domain is resolved from the one source of truth
@@ -30,6 +30,14 @@ param(
     # print the child's output: -Verb RunAs cannot redirect stdout.
     [string]$Transcript = ""
 )
+
+# Funnel is the default variant on Windows too: it needs neither a gateway nor a
+# domain, and the node stays on loopback. An explicit -Mode standalone keeps the
+# plain local server without publishing it.
+if ($Mode -eq "funnel") {
+    $Funnel = $true
+    $Mode = "standalone"
+}
 
 # Ensure UTF-8 output encoding in PowerShell console
 try {

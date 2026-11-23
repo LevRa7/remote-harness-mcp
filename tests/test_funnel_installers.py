@@ -127,3 +127,16 @@ def test_windows_installer_keeps_the_existing_token():
     text = _text("install.ps1")
     assert "a reinstall must not silently" in text
     assert "MESH_TOKEN=(.+)$" in text
+
+
+def test_funnel_is_the_default_mode_on_every_desktop_platform():
+    windows = _text("install.ps1")
+    assert '[string]$Mode = "funnel"' in windows
+    assert 'if ($Mode -eq "funnel") {' in windows, "the mode must normalise to standalone+Funnel"
+    shell = _text("install.sh")
+    # The menu puts Funnel first, and a non-interactive run defaults to it.
+    assert shell.index("Публичная ссылка через Tailscale Funnel") < shell.index("Быстрая настройка")
+    assert 'MODE="standalone"' in shell
+    assert 'if [ "$IS_TERMUX" = true ]; then' in shell, (
+        "Termux has no tailscaled: a phone must keep the gateway tunnel"
+    )

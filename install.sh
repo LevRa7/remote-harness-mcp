@@ -8,6 +8,7 @@ set -e
 
 # Defaults
 MODE=""
+MODE_EXPLICIT=false
 TLS="none"
 PORT="8096"
 DOMAIN=""
@@ -732,6 +733,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         --mode=*)
             MODE="${1#*=}"
+            MODE_EXPLICIT=true
             shift
             ;;
         --user=*)
@@ -1613,20 +1615,21 @@ if [ "$QUICK" = false ] && [ -z "$MODE" ] && [ -t 0 ]; then
     echo ""
     if [ "$LANG_CHOICE" = "ru" ]; then
         echo -e "${BOLD}Выберите режим установки:${RESET}"
-        echo -e "  ${GREEN}1)${RESET} ⚡ ${BOLD}Быстрая настройка${RESET} (Имя узла как имя ПК + Общий домен + Автозапуск) [Рекомендуется]"
-        echo -e "  ${BLUE}2)${RESET} 🖥️  ${BOLD}Локальный Standalone${RESET} (Только localhost:${PORT}, без облачного шлюза)"
-        echo -e "  ${YELLOW}3)${RESET} ⚙️  ${BOLD}Кастомная настройка${RESET} (Ввести имя узла вручную, выбор общего домена)"
-        echo -e "  ${CYAN}4)${RESET} 📡 ${BOLD}Удаленная установка на SSH-сервер${RESET}"
+        echo -e "  ${GREEN}1)${RESET} 🌐 ${BOLD}Публичная ссылка через Tailscale Funnel${RESET} (без сервера и домена) [Рекомендуется]"
+        echo -e "  ${GREEN}2)${RESET} ⚡ ${BOLD}Быстрая настройка${RESET} (имя ПК + общий домен шлюза + автозапуск)"
+        echo -e "  ${BLUE}3)${RESET} 🖥️  ${BOLD}Локальный Standalone${RESET} (только localhost:${PORT})"
+        echo -e "  ${YELLOW}4)${RESET} ⚙️  ${BOLD}Кастомная настройка${RESET} (своё имя узла и домен)"
+        echo -e "  ${CYAN}5)${RESET} 📡 ${BOLD}Удалённая установка по SSH${RESET}"
         echo -e "  ${RESET}0) Выход"
         echo ""
         read -rp "Ваш выбор [1]: " MENU_CHOICE
     else
         echo -e "${BOLD}Select Installation Mode:${RESET}"
-        echo -e "  ${GREEN}1)${RESET} ⚡ ${BOLD}Quick Setup${RESET} (Node name from PC name + shared domain + Autostart) [Recommended]"
-        echo -e "  ${BLUE}2)${RESET} 🖥️  ${BOLD}Local Standalone${RESET} (localhost:${PORT} only, no cloud gateway)"
-        echo -e "  ${YELLOW}3)${RESET} ⚙️  ${BOLD}Custom Setup${RESET} (Custom node name, custom shared domain)"
-        echo -e "  ${CYAN}4)${RESET} 📡 ${BOLD}Remote SSH Installation${RESET}"
-        echo -e "  ${GREEN}5)${RESET} 🌐 ${BOLD}Public URL via Tailscale Funnel${RESET} (no server, no domain)"
+        echo -e "  ${GREEN}1)${RESET} 🌐 ${BOLD}Public URL via Tailscale Funnel${RESET} (no server, no domain) [Recommended]"
+        echo -e "  ${GREEN}2)${RESET} ⚡ ${BOLD}Quick Setup${RESET} (node name from PC name + shared gateway domain)"
+        echo -e "  ${BLUE}3)${RESET} 🖥️  ${BOLD}Local Standalone${RESET} (localhost:${PORT} only)"
+        echo -e "  ${YELLOW}4)${RESET} ⚙️  ${BOLD}Custom Setup${RESET} (custom node name and domain)"
+        echo -e "  ${CYAN}5)${RESET} 📡 ${BOLD}Remote SSH Installation${RESET}"
         echo -e "  ${RESET}0) Exit"
         echo ""
         read -rp "Select [1]: " MENU_CHOICE
@@ -1635,13 +1638,17 @@ if [ "$QUICK" = false ] && [ -z "$MODE" ] && [ -t 0 ]; then
 
     case "$MENU_CHOICE" in
         1)
+            MODE="standalone"
+            FUNNEL=true
+            ;;
+        2)
             MODE="tunnel"
             QUICK=true
             ;;
-        2)
+        3)
             MODE="standalone"
             ;;
-        3)
+        4)
             MODE="tunnel"
             echo ""
             if [ "$LANG_CHOICE" = "ru" ]; then
@@ -1655,10 +1662,6 @@ if [ "$QUICK" = false ] && [ -z "$MODE" ] && [ -t 0 ]; then
             if [ -n "$CUSTOM_GW" ]; then GATEWAY="$CUSTOM_GW"; fi
             ;;
         5)
-            MODE="standalone"
-            FUNNEL=true
-            ;;
-        4)
             echo ""
             if [ "$LANG_CHOICE" = "ru" ]; then
                 read -rp "Введите SSH цель (например, user@<host-ip>): " REMOTE_TARGET
@@ -1675,14 +1678,23 @@ if [ "$QUICK" = false ] && [ -z "$MODE" ] && [ -t 0 ]; then
             exit 0
             ;;
         *)
-            MODE="tunnel"
-            QUICK=true
+            MODE="standalone"
+            FUNNEL=true
             ;;
     esac
 fi
 
+# No mode and no menu (piped, --quick, CI): Funnel is the default on every desktop
+# platform, because it needs no server and no domain. Termux is the exception -
+# Android has no tailscaled, so a phone keeps the gateway tunnel.
 if [ -z "$MODE" ]; then
-    MODE="tunnel"
+    if [ "$IS_TERMUX" = true ]; then
+        MODE="tunnel"
+        QUICK=true
+    else
+        MODE="standalone"
+        FUNNEL=true
+    fi
 fi
 
 print_device_info

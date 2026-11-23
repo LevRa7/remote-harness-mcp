@@ -360,8 +360,9 @@ That's it — Gemini is now an agent running on your machine. Repeat step 1 on o
 
 | Mode | Command | When to use |
 | :--- | :--- | :--- |
-| **Gateway + tunnel** (recommended) | `./install.sh --quick` | Home PCs and laptops behind NAT — the mobile-agent scenario. |
-| **Remote over SSH** | `./install.sh --ssh=user@host` | Deploy a node onto a remote Linux server from your terminal. |
+| **Public URL via Tailscale Funnel** (default) | `./install.sh` or `./install.sh --mode=funnel` | Home PCs and laptops: an HTTPS URL on your tailnet, no server, no domain, no open port. |
+| **Gateway + tunnel** | `./install.sh --mode=tunnel` | The shared-gateway scenario (mobile agents, many nodes behind one domain). |
+| **Remote over SSH**
 | **Local standalone** | `./install.sh --mode=standalone --port=8096` | Pure localhost FastMCP server at `http://localhost:8096/sse`, no cloud relay. |
 
 On Windows the same variants are available in the visual installer (`.\install-gui.cmd`); local standalone stays console-only there (`.\install.ps1 -Mode standalone -Port 8096`).
