@@ -90,3 +90,27 @@ loopback-имена и точный порт (`core/server.py:712`). Tailscale F
   — изоляция вместо гонки за один и тот же файл; цена — два чекаута.
 - `standalone.env` пишется двумя строками (`MESH_TOKEN`, `MESH_ALLOWED_HOSTS`): один файл —
   один источник и для токена, и для allowlist. — иначе автозапуск и ручной запуск разъедутся.
+
+## TSF-06 — Funnel по умолчанию и запрос авторизации
+
+Решение: авторизация запрашивается **сразу после установки клиента, до старта узла**.
+`tailscale up` сам открывает браузер и печатает `https://login.tailscale.com/a/...`;
+установщик дублирует ссылку в консоль (GUI её скрывает), ждёт `BackendState=Running`
+до 5 минут и повторяет `up` трижды, если служба ещё поднималась.
+
+| Что | Где |
+| :--- | :--- |
+| `Install-Tailscale` (winget), `Connect-Tailscale`, `Show-FunnelAclHint` | `install.ps1` |
+| Режим `funnel` первым и выбранным по умолчанию | `install-gui.ps1`, `install-gui.strings.json` |
+| `--mode=funnel`, `find_tailscale`, `install_tailscale`, `connect_tailscale`, `start_funnel` | `install.sh` |
+| Termux честно остаётся без Funnel (нет `tailscaled`) | `install.sh` |
+
+Доказательства: `1613 passed, 8 skipped`; `Parser::ParseFile` = 0 ошибок;
+`bash -n` = 0; `--mode=funnel --dry-run` печатает `Public URL: Tailscale Funnel`.
+
+Rulings:
+- Termux не получает Funnel: в Android нет `tailscaled`, а телефонный узел и так
+  ходит через шлюз. — иначе установщик обещал бы несуществующую ссылку.
+- macOS: CLI берётся из `/Applications/Tailscale.app/Contents/MacOS/Tailscale`, когда
+  его нет в PATH. — иначе `find_tailscale` не находил бы установленный клиент.
+- `sudo -v` перед фоновым `tailscale up`: фоновый процесс не может спросить пароль.

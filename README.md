@@ -492,6 +492,10 @@ The installer resolves `<node>.<tailnet>.ts.net` from `tailscale status --json`,
 
 Requirements and limits: Funnel must be allowed for the tailnet in the ACL (`"nodeAttrs": [{"target": ["autogroup:member"], "attr": ["funnel"]}]`); only ports 443, 8443 and 10000 are available; the URL is public, so treat the token as a password; the node must be awake.
 
+The wizard (`install-gui.cmd`) offers the same variant as its first, pre-selected option: it installs Tailscale, opens the sign-in page, and only then publishes the node. On Linux and macOS the console installer does it with `./install.sh --mode=funnel` (Termux is the exception: Android has no `tailscaled`, so the URL stays local).
+
+The authorization prompt appears **during installation**, right after the client is installed and before the node starts: the installer runs `tailscale up`, prints the `https://login.tailscale.com/a/...` link (the browser opens on its own) and waits up to five minutes for the machine to be approved.
+
 ---
 
 ## 📱 Android installation (Termux)

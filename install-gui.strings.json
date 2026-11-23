@@ -42,7 +42,9 @@
     "preflight_no_domain": "No gateway domain is configured. Use Custom setup to enter one, or set MESH_PUBLIC_URL / write the domain file.",
 
     "mode_prompt": "Choose the variant to run. It mirrors the console installer.",
-    "mode_quick_title": "Quick setup (recommended)",
+    "mode_funnel_title": "Public URL via Tailscale Funnel (recommended)",
+    "mode_funnel_desc": "No server and no domain: an HTTPS address on your tailnet; Tailscale is installed automatically.",
+    "mode_quick_title": "Quick setup (shared gateway)",
     "mode_quick_desc": "Node name = PC name, shared gateway domain, Windows autostart.",
     "mode_custom_title": "Custom setup",
     "mode_custom_desc": "Your own node name, your own shared domain, optional token.",
@@ -51,6 +53,8 @@
 
     "opt_quick_group": "Quick setup",
     "opt_quick_summary": "Node name:      {0}\r\nGateway domain: {1}\r\nAutostart:      Windows Startup folder (rhm-agent.vbs)",
+    "opt_funnel_group": "Tailscale Funnel",
+    "opt_funnel_note": "Tailscale is installed automatically when missing, then the browser opens once for sign-in.\r\nFunnel must be allowed for the tailnet in the ACL - a one-time switch.\r\nResult: https://<pc>.<tailnet>.ts.net/sse?token=... - no server, no domain, no open port.",
     "opt_node_label": "Node name",
     "opt_node_hint": "a-z, 0-9, dash and underscore only",
     "opt_domain_label": "Shared gateway domain",
@@ -95,6 +99,7 @@
     "res_fail_hint": "Read the installer output above. A frequent cause is a gateway domain that does not resolve: re-run with Custom setup and an explicit domain.",
     "res_url_missing": "The installer finished, but the URL could not be determined. See the output above.",
     "res_remote_note": "The node was installed on the remote host; the URL above is what the remote installer printed.",
+    "res_funnel_note": "The URL is public: whoever has it can run commands on this PC. Keep it as a password.",
     "res_log_group": "Installer output",
 
     "msg_cancel_title": "Confirm",
@@ -147,7 +152,9 @@
     "preflight_no_domain": "Домен шлюза не настроен. Укажите его в режиме «Кастомная настройка» или задайте MESH_PUBLIC_URL / файл домена.",
 
     "mode_prompt": "Выберите вариант запуска. Он повторяет консольный установщик.",
-    "mode_quick_title": "Быстрая настройка (рекомендуется)",
+    "mode_funnel_title": "Публичная ссылка через Tailscale Funnel (рекомендуется)",
+    "mode_funnel_desc": "Без сервера и домена: HTTPS-адрес в вашем tailnet; Tailscale ставится автоматически.",
+    "mode_quick_title": "Быстрая настройка (через общий шлюз)",
     "mode_quick_desc": "Имя узла = имя ПК, общий домен шлюза, автозапуск Windows.",
     "mode_custom_title": "Кастомная настройка",
     "mode_custom_desc": "Своё имя узла, свой общий домен, необязательный токен.",
@@ -156,6 +163,8 @@
 
     "opt_quick_group": "Быстрая настройка",
     "opt_quick_summary": "Имя узла:       {0}\r\nДомен шлюза:    {1}\r\nАвтозапуск:     папка «Автозагрузка» Windows (rhm-agent.vbs)",
+    "opt_funnel_group": "Tailscale Funnel",
+    "opt_funnel_note": "Tailscale ставится автоматически, если его нет; затем один раз откроется браузер для входа.\r\nFunnel нужно разрешить для tailnet в ACL — переключатель на один раз.\r\nНа выходе: https://<пк>.<tailnet>.ts.net/sse?token=... — без сервера, домена и открытых портов.",
     "opt_node_label": "Имя узла",
     "opt_node_hint": "только a-z, 0-9, дефис и подчёркивание",
     "opt_domain_label": "Общий домен шлюза",
@@ -200,6 +209,7 @@
     "res_fail_hint": "Прочитайте вывод установщика выше. Частая причина - домен шлюза, который не разрешается: повторите запуск в режиме «Кастомная настройка» с явным доменом.",
     "res_url_missing": "Установщик завершился, но ссылку определить не удалось. Смотрите вывод выше.",
     "res_remote_note": "Узел установлен на удалённом хосте; ссылка выше напечатана удалённым установщиком.",
+    "res_funnel_note": "Ссылка публичная: кто её получил, может выполнять команды на этом ПК. Храните её как пароль.",
     "res_log_group": "Вывод установщика",
 
     "msg_cancel_title": "Подтверждение",

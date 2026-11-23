@@ -50,8 +50,8 @@ param(
     # state would overwrite whatever the caller passed - the bug that once made
     # -Lang do nothing at all.
     [switch]$RunInstall,
-    [ValidateSet('quick', 'custom', 'ssh')]
-    [string]$InstallMode = 'quick',
+    [ValidateSet('quick', 'custom', 'ssh', 'funnel')]
+    [string]$InstallMode = 'funnel',
     [string]$InstallUser = '',
     [string]$InstallGateway = '',
     [string]$InstallToken = '',
@@ -653,6 +653,11 @@ function New-ConsoleInstallerSteps {
 
     $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Quote-Arg $ConsoleInstaller),
         '-Lang', $script:UiLang)
+    if ($Mode -eq 'funnel') {
+        # Standalone node plus Tailscale Funnel: install.ps1 installs Tailscale,
+        # shows the sign-in prompt and publishes the loopback server.
+        $argList += @('-Mode', 'standalone', '-Funnel')
+    }
     if ($Mode -eq 'custom') {
         $argList += @('-Mode', 'tunnel')
         if ($Node) { $argList += @('-User', (Quote-Arg $Node)) }
@@ -722,7 +727,7 @@ function New-SshSteps {
 function Get-CommandPreview {
     param([string]$Mode, [string]$Node, [string]$Domain, [string]$Token, [string]$Target, [int]$Port)
 
-    if ($Mode -eq 'quick' -or $Mode -eq 'custom') {
+    if ($Mode -eq 'quick' -or $Mode -eq 'custom' -or $Mode -eq 'funnel') {
         # @() matters: PowerShell unrolls a function's return value, so a single
         # step would arrive as a bare hashtable and $steps[0] would then be read
         # as a key lookup that finds nothing.
@@ -751,7 +756,7 @@ $script:BtnClose = $null
 $script:Device = @{ Hostname = ''; Raw = ''; IsLaptop = $false; Os = '' }
 
 $script:Page = 0
-$script:Mode = 'quick'
+$script:Mode = 'funnel'
 $script:Node = ''
 $script:Domain = ''
 $script:Token = ''
@@ -868,7 +873,10 @@ function Build-ModePage {
     $script:Content.Controls.Add((New-Label -Text (Get-UiText -Key 'mode_prompt') -X 16 -Y 12 -W 760 -H 24))
 
     $group = New-GroupBox -Text (Get-UiText -Key 'page_mode_title') -X 16 -Y 44 -W 760 -H 220
+    # Funnel first and selected by default: a public URL without a server and
+    # without a domain is the shortest path from zero to a working connector.
     $modes = @(
+        @{ Id = 'funnel'; Title = 'mode_funnel_title'; Desc = 'mode_funnel_desc' },
         @{ Id = 'quick';  Title = 'mode_quick_title';  Desc = 'mode_quick_desc' },
         @{ Id = 'custom'; Title = 'mode_custom_title'; Desc = 'mode_custom_desc' },
         @{ Id = 'ssh';    Title = 'mode_ssh_title';    Desc = 'mode_ssh_desc' }
@@ -900,6 +908,14 @@ function Build-ModePage {
 # ---- page 2: options ---------------------------------------------------------
 
 function Build-OptionsPage {
+    if ($script:Mode -eq 'funnel') {
+        $group = New-GroupBox -Text (Get-UiText -Key 'opt_funnel_group') -X 16 -Y 12 -W 760 -H 170
+        $summary = New-ReadOnlyBox -X 14 -Y 24 -W 732 -H 134 -MultiLine -Monospace
+        $summary.Text = (Get-UiText -Key 'opt_funnel_note')
+        $group.Controls.Add($summary)
+        $script:Content.Controls.Add($group)
+    }
+
     if ($script:Mode -eq 'quick') {
         $group = New-GroupBox -Text (Get-UiText -Key 'opt_quick_group') -X 16 -Y 12 -W 760 -H 120
         $domain = "$($script:Domain)".Trim()
@@ -1051,6 +1067,9 @@ function Build-ResultPage {
     if ($script:Mode -eq 'ssh' -and -not $failed) {
         $urlGroup.Controls.Add((New-Label -Text (Get-UiText -Key 'res_remote_note') -X 16 -Y 74 -W 730 -H 18 -Dim))
     }
+    if ($script:Mode -eq 'funnel' -and -not $failed) {
+        $urlGroup.Controls.Add((New-Label -Text (Get-UiText -Key 'res_funnel_note') -X 16 -Y 74 -W 730 -H 18 -Dim))
+    }
     $script:Content.Controls.Add($urlGroup)
 
     $stepsGroup = New-GroupBox -Text (Get-UiText -Key 'res_steps_title') -X 16 -Y 146 -W 760 -H 126
@@ -1197,7 +1216,7 @@ function Show-Page {
 # ---- install -----------------------------------------------------------------
 
 function Test-InstallOptions {
-    if ($script:Mode -eq 'quick' -or $script:Mode -eq 'custom') {
+    if ($script:Mode -eq 'quick' -or $script:Mode -eq 'custom' -or $script:Mode -eq 'funnel') {
         if (-not (Test-Path -LiteralPath $ConsoleInstaller)) {
             $script:OptionError = Format-UiText -Key 'opt_err_installer_missing' -Values @($ConsoleInstaller)
             return $false
@@ -1704,7 +1723,7 @@ function Invoke-SelfTest {
         Running = $false; Failed = $false; Exit = 0; Output = ''
         Url = 'https://mesh.example.test/sse?user=probe&token=tok'; Notice = ''; LinkNotice = ''
     }
-    $script:Mode = 'quick'
+    $script:Mode = 'funnel'
     Show-Page -Index 4
     $linkFound = $false
     $copyButtonFound = $false

@@ -764,7 +764,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -h|--help)
-            echo "Usage: $0 [--lang=en|ru] [-q|--quick] [--mode=tunnel|standalone|gateway] [--user=<node-name>] [--token=<token>] [--domain=<shared-domain>] [--port=<port>] [--ssh=user@host] [--dry-run]"
+            echo "Usage: $0 [--lang=en|ru] [-q|--quick] [--mode=tunnel|standalone|funnel|gateway] [--user=<node-name>] [--token=<token>] [--domain=<shared-domain>] [--port=<port>] [--ssh=user@host] [--dry-run]"
             echo ""
             echo "All nodes use ONE shared domain; the node is selected by ?user=<node-name>:"
             echo "  MCP URL: https://<shared-domain>/sse?user=<node-name>&token=<token>"
@@ -785,6 +785,15 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# --mode=funnel is "standalone, published through Tailscale Funnel".  Normalise it
+# here, before the bootstrap decides whether a gateway domain is required: a
+# funnel node needs no gateway, no domain and no open port.
+FUNNEL=false
+if [ "$MODE" = "funnel" ]; then
+    MODE="standalone"
+    FUNNEL=true
+fi
 
 # ------------------------------------------------------------------------------
 #  Resolve the shared domain, then fetch the node code from it.
@@ -1445,6 +1454,9 @@ if [ "$DRY_RUN" = true ]; then
     echo "[DRY-RUN] Detected Host: $DETECTED_HOSTNAME ($DETECTED_TYPE)"
     echo "[DRY-RUN] Architecture: ${ARCH_LABEL:-$DETECTED_ARCH}"
     echo "[DRY-RUN] Selected Mode: ${MODE:-standalone}"
+    if [ "$FUNNEL" = true ]; then
+        echo "[DRY-RUN] Public URL: Tailscale Funnel (https://<node>.<tailnet>.ts.net), client installed if missing"
+    fi
     echo "[DRY-RUN] Port: $PORT"
     echo "[DRY-RUN] TLS: $TLS"
     if [ -n "$GATEWAY" ]; then echo "[DRY-RUN] Domain: $GATEWAY"; fi
@@ -1529,6 +1541,7 @@ if [ "$QUICK" = false ] && [ -z "$MODE" ] && [ -t 0 ]; then
         echo -e "  ${BLUE}2)${RESET} 🖥️  ${BOLD}Local Standalone${RESET} (localhost:${PORT} only, no cloud gateway)"
         echo -e "  ${YELLOW}3)${RESET} ⚙️  ${BOLD}Custom Setup${RESET} (Custom node name, custom shared domain)"
         echo -e "  ${CYAN}4)${RESET} 📡 ${BOLD}Remote SSH Installation${RESET}"
+        echo -e "  ${GREEN}5)${RESET} 🌐 ${BOLD}Public URL via Tailscale Funnel${RESET} (no server, no domain)"
         echo -e "  ${RESET}0) Exit"
         echo ""
         read -rp "Select [1]: " MENU_CHOICE
@@ -1555,6 +1568,10 @@ if [ "$QUICK" = false ] && [ -z "$MODE" ] && [ -t 0 ]; then
             fi
             if [ -n "$CUSTOM_SUB" ]; then USERNAME="$CUSTOM_SUB"; fi
             if [ -n "$CUSTOM_GW" ]; then GATEWAY="$CUSTOM_GW"; fi
+            ;;
+        5)
+            MODE="standalone"
+            FUNNEL=true
             ;;
         4)
             echo ""
@@ -1590,6 +1607,117 @@ print_device_info
 retire_legacy_autostart
 
 # ==============================================================================
+#  TAILSCALE FUNNEL (standalone node, public URL, no server)
+#
+#  The node listens on loopback only, so the public URL needs an edge that
+#  terminates TLS. Funnel is that edge: no server, no domain, no open port.
+#  This block installs the client, walks the operator through the one-time
+#  sign-in and resolves the public host name.
+# ==============================================================================
+TAILSCALE_BIN=""
+
+find_tailscale() {
+    if [ -n "$TAILSCALE_BIN" ] && [ -x "$TAILSCALE_BIN" ]; then
+        return 0
+    fi
+    if command -v tailscale >/dev/null 2>&1; then
+        TAILSCALE_BIN="$(command -v tailscale)"
+        return 0
+    fi
+    # macOS keeps the CLI inside the app bundle, not on PATH.
+    if [ -x "/Applications/Tailscale.app/Contents/MacOS/Tailscale" ]; then
+        TAILSCALE_BIN="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+        return 0
+    fi
+    return 1
+}
+
+ts_run() {
+    if [ "$(id -u)" -eq 0 ]; then
+        "$TAILSCALE_BIN" "$@"
+    else
+        sudo "$TAILSCALE_BIN" "$@"
+    fi
+}
+
+ts_backend_state() {
+    ts_run status --json 2>/dev/null \
+        | "$PYTHON_BIN" -c 'import json,sys;print((json.load(sys.stdin) or {}).get("BackendState",""))' 2>/dev/null \
+        || true
+}
+
+ts_funnel_name() {
+    ts_run status --json 2>/dev/null \
+        | "$PYTHON_BIN" -c 'import json,sys;d=json.load(sys.stdin);print((d.get("Self") or {}).get("DNSName","").rstrip(".").lower())' 2>/dev/null \
+        || true
+}
+
+install_tailscale() {
+    if [ "$IS_TERMUX" = true ]; then
+        return 1
+    fi
+    if [ "$(uname -s)" = "Darwin" ]; then
+        if command -v brew >/dev/null 2>&1; then
+            brew install --cask tailscale >/dev/null 2>&1 || true
+        fi
+    else
+        if command -v curl >/dev/null 2>&1; then
+            curl -fsSL https://tailscale.com/install.sh | sh >/dev/null 2>&1 || true
+        fi
+    fi
+    unset TAILSCALE_BIN
+    find_tailscale
+}
+
+connect_tailscale() {
+    if [ "$(ts_backend_state)" = "Running" ]; then
+        return 0
+    fi
+    TS_LOG="$CONFIG_DIR/tailscale-up.log"
+    mkdir -p "$CONFIG_DIR"
+    # Prime sudo once, interactively: the login below runs in the background and
+    # therefore cannot answer a password prompt.
+    if [ "$(id -u)" -ne 0 ]; then
+        sudo -v 2>/dev/null || true
+    fi
+    ( ts_run up >"$TS_LOG" 2>&1 ) &
+    TS_WAITED=0
+    TS_ANNOUNCED=false
+    while [ "$TS_WAITED" -lt 300 ]; do
+        if [ "$TS_ANNOUNCED" = false ] && [ -f "$TS_LOG" ]; then
+            TS_URL=$(grep -o 'https://login\.tailscale\.com/a/[A-Za-z0-9]*' "$TS_LOG" 2>/dev/null | head -n 1 || true)
+            if [ -n "$TS_URL" ]; then
+                echo ""
+                echo -e "  ${YELLOW}Откройте ссылку и подтвердите вход / Open and approve:${RESET}"
+                echo -e "  ${CYAN}${TS_URL}${RESET}"
+                echo ""
+                TS_ANNOUNCED=true
+            fi
+        fi
+        if [ "$(ts_backend_state)" = "Running" ]; then
+            return 0
+        fi
+        sleep 2
+        TS_WAITED=$((TS_WAITED + 2))
+    done
+    return 1
+}
+
+start_funnel() {
+    ts_run funnel --bg --https=443 "http://127.0.0.1:${PORT}" 2>&1
+}
+
+funnel_acl_hint() {
+    if [ "$LANG_CHOICE" = "ru" ]; then
+        echo -e "${YELLOW}[!] Funnel не разрешён для tailnet. Включите один раз в ACL:${RESET}" >&2
+    else
+        echo -e "${YELLOW}[!] Funnel is not allowed for this tailnet. Enable it once in the ACL:${RESET}" >&2
+    fi
+    echo -e "    ${CYAN}https://login.tailscale.com/admin/acls${RESET}" >&2
+    echo -e '    "nodeAttrs": [{"target": ["autogroup:member"], "attr": ["funnel"]}]' >&2
+}
+
+# ==============================================================================
 #  BRANCH: STANDALONE MODE
 # ==============================================================================
 if [ "$MODE" = "standalone" ]; then
@@ -1607,6 +1735,40 @@ if [ "$MODE" = "standalone" ]; then
     # A standalone node answers share_file too, so the domain it resolved is written
     # down here as well - before the server is started, not after.
     write_domain_file "$GATEWAY"
+
+    # Funnel first: the public host name has to exist before the env file is
+    # written, because the node allowlists exactly that name and refuses every
+    # other Host (a DNS-rebinding guard that would otherwise reject the funnel).
+    FUNNEL_NAME=""
+    if [ "$FUNNEL" = true ]; then
+        if [ "$IS_TERMUX" = true ]; then
+            FUNNEL=false
+            echo -e "${YELLOW}[!] В Termux нет tailscaled: Funnel недоступен, остаётся локальная ссылка.${RESET}" >&2
+            echo -e "${YELLOW}[!] Termux has no tailscaled: Funnel is unavailable, the URL stays local.${RESET}" >&2
+        else
+            find_tailscale || install_tailscale || true
+            if find_tailscale; then
+                if [ "$LANG_CHOICE" = "ru" ]; then
+                    echo -e "[Funnel] Вход в Tailscale (сейчас откроется браузер)..."
+                else
+                    echo -e "[Funnel] Signing in to Tailscale (a browser window will open)..."
+                fi
+                if connect_tailscale; then
+                    FUNNEL_NAME="$(ts_funnel_name)"
+                fi
+            fi
+            if [ -z "$FUNNEL_NAME" ]; then
+                FUNNEL=false
+                if [ "$LANG_CHOICE" = "ru" ]; then
+                    echo -e "${YELLOW}[!] Публичный адрес не получен: вход не подтверждён или Tailscale не установлен.${RESET}" >&2
+                    echo -e "    Поставьте Tailscale (https://tailscale.com/download) и повторите с --mode=funnel." >&2
+                else
+                    echo -e "${YELLOW}[!] No public address: sign-in was not approved or Tailscale is missing.${RESET}" >&2
+                    echo -e "    Install Tailscale (https://tailscale.com/download) and re-run with --mode=funnel." >&2
+                fi
+            fi
+        fi
+    fi
 
     # Honour --token in standalone mode without embedding the secret in the
     # (world-readable) unit/plist: keep it in a 0600 env file for systemd
@@ -1626,6 +1788,9 @@ if [ "$MODE" = "standalone" ]; then
     fi
     if [ -n "$TOKEN" ]; then
         printf 'MESH_TOKEN=%s\n' "$TOKEN" > "$STANDALONE_ENV_FILE"
+        if [ -n "$FUNNEL_NAME" ]; then
+            printf 'MESH_ALLOWED_HOSTS=%s\n' "$FUNNEL_NAME" >> "$STANDALONE_ENV_FILE"
+        fi
         chmod 600 "$STANDALONE_ENV_FILE"
         ENV_FILE_LINE="EnvironmentFile=$STANDALONE_ENV_FILE"
         PLIST_TOKEN=$(printf '%s' "$TOKEN" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g')
@@ -1777,28 +1942,44 @@ EOF
         exit 1
     fi
 
+    # Publish the loopback server through the tailnet. The node is untouched:
+    # Funnel terminates TLS and proxies to 127.0.0.1, so no port and no
+    # certificate is needed on this machine.
+    MCP_PUBLIC_URL=""
+    if [ "$FUNNEL" = true ] && [ -n "$FUNNEL_NAME" ]; then
+        if start_funnel >/dev/null 2>&1; then
+            MCP_PUBLIC_URL="https://${FUNNEL_NAME}/sse?token=${TOKEN}"
+        else
+            funnel_acl_hint
+        fi
+    fi
+
     MCP_LOCAL_URL="http://localhost:${PORT}/sse"
-    
+    MCP_URL="$MCP_LOCAL_URL"
+    if [ -n "$MCP_PUBLIC_URL" ]; then
+        MCP_URL="$MCP_PUBLIC_URL"
+    fi
+
     # Quick Copy to Clipboard
     COPIED=false
-    B64_URL=$(printf "%s" "$MCP_LOCAL_URL" | base64 | tr -d '\r\n')
+    B64_URL=$(printf "%s" "$MCP_URL" | base64 | tr -d '\r\n')
     printf "\033]52;c;%s\a" "$B64_URL" 2>/dev/null || true
     if command -v termux-clipboard-set >/dev/null 2>&1; then
         # Termux on a phone: termux-api plus the Termux:API app put the URL on
         # Android's clipboard, where the Gemini app can paste it. Without the app
         # the command exists but fails, so COPIED stays false and the hint below
         # tells the user to copy by hand.
-        printf "%s" "$MCP_LOCAL_URL" | termux-clipboard-set 2>/dev/null && COPIED=true
+        printf "%s" "$MCP_URL" | termux-clipboard-set 2>/dev/null && COPIED=true
     elif command -v wl-copy >/dev/null 2>&1; then
-        printf "%s" "$MCP_LOCAL_URL" | wl-copy 2>/dev/null && COPIED=true
+        printf "%s" "$MCP_URL" | wl-copy 2>/dev/null && COPIED=true
     elif command -v xclip >/dev/null 2>&1; then
-        printf "%s" "$MCP_LOCAL_URL" | xclip -selection clipboard 2>/dev/null && COPIED=true
+        printf "%s" "$MCP_URL" | xclip -selection clipboard 2>/dev/null && COPIED=true
     elif command -v xsel >/dev/null 2>&1; then
-        printf "%s" "$MCP_LOCAL_URL" | xsel --clipboard --input 2>/dev/null && COPIED=true
+        printf "%s" "$MCP_URL" | xsel --clipboard --input 2>/dev/null && COPIED=true
     elif command -v pbcopy >/dev/null 2>&1; then
-        printf "%s" "$MCP_LOCAL_URL" | pbcopy 2>/dev/null && COPIED=true
+        printf "%s" "$MCP_URL" | pbcopy 2>/dev/null && COPIED=true
     elif command -v clip.exe >/dev/null 2>&1; then
-        printf "%s" "$MCP_LOCAL_URL" | clip.exe 2>/dev/null && COPIED=true
+        printf "%s" "$MCP_URL" | clip.exe 2>/dev/null && COPIED=true
     fi
 
     clear 2>/dev/null || printf "\033[2J\033[H" || true
@@ -1811,7 +1992,12 @@ EOF
         else
             copy_msg="Скопируйте ссылку выше"
         fi
-        print_mcp_box "ССЫЛКА ЛОКАЛЬНОГО MCP-СЕРВЕРА (СКОПИРУЙТЕ):" "$MCP_LOCAL_URL" "$copy_msg"
+        if [ -n "$MCP_PUBLIC_URL" ]; then
+            print_mcp_box "ПУБЛИЧНАЯ ССЫЛКА MCP (ЭТО ПАРОЛЬ, НЕ ПУБЛИКУЙТЕ):" "$MCP_PUBLIC_URL" "$copy_msg"
+            echo -e "  Локальная (только с этого ПК): ${CYAN}${MCP_LOCAL_URL}${RESET}"
+        else
+            print_mcp_box "ССЫЛКА ЛОКАЛЬНОГО MCP-СЕРВЕРА (СКОПИРУЙТЕ):" "$MCP_LOCAL_URL" "$copy_msg"
+        fi
         echo ""
         echo -e "  ${BOLD}Куда вставлять ссылку в Google Gemini:${RESET}"
         echo -e "  1. Откройте в браузере: ${CYAN}https://gemini.google.com/customize/connectors${RESET}"
@@ -1826,7 +2012,12 @@ EOF
         else
             copy_msg="Copy the URL above"
         fi
-        print_mcp_box "LOCAL MCP SERVER URL (COPY THIS):" "$MCP_LOCAL_URL" "$copy_msg"
+        if [ -n "$MCP_PUBLIC_URL" ]; then
+            print_mcp_box "PUBLIC MCP URL (THIS IS A PASSWORD - DO NOT SHARE):" "$MCP_PUBLIC_URL" "$copy_msg"
+            echo -e "  Local only (this PC): ${CYAN}${MCP_LOCAL_URL}${RESET}"
+        else
+            print_mcp_box "LOCAL MCP SERVER URL (COPY THIS):" "$MCP_LOCAL_URL" "$copy_msg"
+        fi
         echo ""
         echo -e "  ${BOLD}Where to paste this URL in Google Gemini:${RESET}"
         echo -e "  1. Open in your browser: ${CYAN}https://gemini.google.com/customize/connectors${RESET}"

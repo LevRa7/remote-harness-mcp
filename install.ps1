@@ -969,6 +969,93 @@ function Get-TailnetName {
     return ""
 }
 
+function Get-TailscaleState {
+    param([string]$Tailscale)
+    # BackendState is "Running" once the node is logged in and the netmap is up;
+    # "NeedsLogin" means the operator still has to approve the machine in a browser.
+    try {
+        $status = (& $Tailscale status --json 2>$null | Out-String) | ConvertFrom-Json
+        return [string]$status.BackendState
+    } catch { return "" }
+}
+
+function Install-Tailscale {
+    # winget is part of Windows 10 1809+ and needs no extra tooling. A missing
+    # package manager must not abort the whole install: the node still works
+    # locally, and the operator gets the download link.
+    $winget = Get-Command winget.exe -ErrorAction SilentlyContinue
+    if (-not $winget) { return $null }
+    & winget.exe install -e --id Tailscale.Tailscale --silent --accept-package-agreements --accept-source-agreements 2>&1 | Out-Null
+    return (Resolve-Tailscale)
+}
+
+function Connect-Tailscale {
+    param([string]$Tailscale, [int]$TimeoutSec = 300)
+    # This is the authorization prompt: "tailscale up" opens the browser itself
+    # and prints the device URL, which is echoed here because the GUI hides the
+    # browser and the console installer may be run over RDP or in a VM.
+    if ((Get-TailscaleState -Tailscale $Tailscale) -eq "Running") { return $true }
+    $log = Join-Path $env:TEMP "rhm-tailscale-up.log"
+    $errLog = Join-Path $env:TEMP "rhm-tailscale-up.err"
+    Remove-Item -Force $log, $errLog -ErrorAction SilentlyContinue
+    try {
+        $proc = Start-Process -FilePath $Tailscale -ArgumentList "up" -PassThru -NoNewWindow `
+            -RedirectStandardOutput $log -RedirectStandardError $errLog
+    } catch { return $false }
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    $announced = $false
+    $restarts = 0
+    while ((Get-Date) -lt $deadline) {
+        if (-not $announced) {
+            $text = ""
+            foreach ($f in @($log, $errLog)) {
+                if (Test-Path -LiteralPath $f) { $text += (Get-Content -LiteralPath $f -Raw -ErrorAction SilentlyContinue) }
+            }
+            $match = [regex]::Match([string]$text, "https://login\.tailscale\.com/a/[A-Za-z0-9]+")
+            if ($match.Success) {
+                Write-Host ""
+                Write-Host "  Откройте ссылку и подтвердите вход в Tailscale / Open and approve:" -ForegroundColor Yellow
+                Write-Host "  $($match.Value)" -ForegroundColor Cyan
+                Write-Host ""
+                $announced = $true
+            }
+        }
+        if ((Get-TailscaleState -Tailscale $Tailscale) -eq "Running") {
+            try { if ($proc -and -not $proc.HasExited) { $proc.Kill() } } catch { }
+            return $true
+        }
+        if ($proc -and $proc.HasExited) {
+            if ((Get-TailscaleState -Tailscale $Tailscale) -eq "Running") { return $true }
+            # Right after a fresh install the service can still be starting, so the
+            # first "up" may die before it ever reaches the login server.
+            if ($restarts -ge 3) { break }
+            $restarts++
+            Start-Sleep -Seconds 5
+            Remove-Item -Force $log, $errLog -ErrorAction SilentlyContinue
+            try {
+                $proc = Start-Process -FilePath $Tailscale -ArgumentList "up" -PassThru -NoNewWindow `
+                    -RedirectStandardOutput $log -RedirectStandardError $errLog
+            } catch { break }
+            continue
+        }
+        Start-Sleep -Seconds 2
+    }
+    try { if ($proc -and -not $proc.HasExited) { $proc.Kill() } } catch { }
+    return ((Get-TailscaleState -Tailscale $Tailscale) -eq "Running")
+}
+
+function Show-FunnelAclHint {
+    if ($Lang -eq "ru") {
+        Write-Host "[!] Funnel не разрешён для вашего tailnet. Включите его один раз в ACL:" -ForegroundColor Yellow
+        Write-Host "    https://login.tailscale.com/admin/acls" -ForegroundColor Cyan
+        Write-Host '    добавьте: "nodeAttrs": [{"target": ["autogroup:member"], "attr": ["funnel"]}]' -ForegroundColor White
+    } else {
+        Write-Host "[!] Funnel is not allowed for this tailnet. Enable it once in the ACL:" -ForegroundColor Yellow
+        Write-Host "    https://login.tailscale.com/admin/acls" -ForegroundColor Cyan
+        Write-Host '    add: "nodeAttrs": [{"target": ["autogroup:member"], "attr": ["funnel"]}]' -ForegroundColor White
+    }
+}
+
 function Register-StandaloneNodeTask {
     param([string]$Python, [int]$Port, [string]$WorkingDirectory)
     # pythonw keeps the logon task windowless; the token is NOT on this command
@@ -1015,13 +1102,30 @@ if ($Mode -eq "standalone") {
     $TsExe = $null
     if ($Funnel) {
         $TsExe = Resolve-Tailscale
+        if (-not $TsExe) {
+            if ($Lang -eq "ru") { Write-Host "[1/4] Tailscale не найден - устанавливаю..." -ForegroundColor Yellow }
+            else { Write-Host "[1/4] Tailscale not found - installing..." -ForegroundColor Yellow }
+            $TsExe = Install-Tailscale
+        }
         if ($TsExe) {
-            $FunnelName = Get-TailnetName -Tailscale $TsExe
-            if (-not $FunnelName) {
-                Write-Host "[!] Tailscale is installed but not signed in: run 'tailscale up' first." -ForegroundColor Yellow
+            # This is the authorization prompt: the browser opens here, right
+            # after installation and before the node starts, so the operator
+            # approves the machine once and the public URL exists immediately.
+            if ($Lang -eq "ru") { Write-Host "[2/4] Вход в Tailscale (сейчас откроется браузер)..." -ForegroundColor Yellow }
+            else { Write-Host "[2/4] Signing in to Tailscale (a browser window will open)..." -ForegroundColor Yellow }
+            if (Connect-Tailscale -Tailscale $TsExe) {
+                $FunnelName = Get-TailnetName -Tailscale $TsExe
+            } elseif ($Lang -eq "ru") {
+                Write-Host "[!] Вход не подтверждён за 5 минут: публичная ссылка не создана." -ForegroundColor Yellow
+                Write-Host "    Подтвердите вход и повторите: tailscale up" -ForegroundColor Yellow
+            } else {
+                Write-Host "[!] Sign-in was not approved within 5 minutes: no public URL." -ForegroundColor Yellow
+                Write-Host "    Approve the login and re-run: tailscale up" -ForegroundColor Yellow
             }
+        } elseif ($Lang -eq "ru") {
+            Write-Host "[!] Tailscale не установлен. Поставьте вручную: https://tailscale.com/download/windows" -ForegroundColor Yellow
         } else {
-            Write-Host "[!] tailscale.exe not found. Install it (winget install -e --id Tailscale.Tailscale) and rerun with -Funnel." -ForegroundColor Yellow
+            Write-Host "[!] Tailscale is not installed. Install it: https://tailscale.com/download/windows" -ForegroundColor Yellow
         }
     }
 
@@ -1039,10 +1143,17 @@ if ($Mode -eq "standalone") {
     if ($FunnelName) {
         # Tailscale terminates TLS and proxies to loopback; the node never sees a
         # public address, which is exactly why no port and no certificate is needed.
-        $funnelOut = (& $TsExe funnel --bg --https=443 "http://127.0.0.1:$Port" 2>&1 | Out-String).Trim()
-        if ($funnelOut) { Write-Host "    $funnelOut" -ForegroundColor DarkGray }
-        if ($LASTEXITCODE -ne 0) {
-            Write-Host "[!] tailscale funnel failed. Enable Funnel for this tailnet (ACL nodeAttrs) and see 'tailscale funnel status'." -ForegroundColor Yellow
+        # Three attempts: the certificate for the ts.net name is issued lazily and
+        # the very first funnel call can lose that race.
+        $funnelOk = $false
+        for ($attempt = 1; $attempt -le 3; $attempt++) {
+            $funnelOut = (& $TsExe funnel --bg --https=443 "http://127.0.0.1:$Port" 2>&1 | Out-String).Trim()
+            if ($funnelOut) { Write-Host "    $funnelOut" -ForegroundColor DarkGray }
+            if ($LASTEXITCODE -eq 0) { $funnelOk = $true; break }
+            Start-Sleep -Seconds 3
+        }
+        if (-not $funnelOk) {
+            Show-FunnelAclHint
             $FunnelName = ""
         }
     }
