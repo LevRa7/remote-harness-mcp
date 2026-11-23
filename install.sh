@@ -889,6 +889,83 @@ fi
 # ------------------------------------------------------------------------------
 GATEWAY="$(resolve_domain "$DOMAIN")"
 
+# Interactive Menu if no mode is specified and not in quick mode
+if [ "$QUICK" = false ] && [ -z "$MODE" ] && [ -t 0 ]; then
+    # The menu now runs before the gateway checks, so the banner helper may not be
+    # defined yet on a bootstrapped copy - call it only when it exists.
+    command -v print_device_info >/dev/null 2>&1 && print_device_info
+    echo ""
+    if [ "$LANG_CHOICE" = "ru" ]; then
+        echo -e "${BOLD}Выберите режим установки:${RESET}"
+        echo -e "  ${GREEN}1)${RESET} 🌐 ${BOLD}Публичная ссылка через Tailscale Funnel${RESET} (без сервера и домена) [Рекомендуется]"
+        echo -e "  ${GREEN}2)${RESET} ⚡ ${BOLD}Быстрая настройка${RESET} (имя ПК + общий домен шлюза + автозапуск)"
+        echo -e "  ${BLUE}3)${RESET} 🖥️  ${BOLD}Локальный Standalone${RESET} (только localhost:${PORT})"
+        echo -e "  ${YELLOW}4)${RESET} ⚙️  ${BOLD}Кастомная настройка${RESET} (своё имя узла и домен)"
+        echo -e "  ${CYAN}5)${RESET} 📡 ${BOLD}Удалённая установка по SSH${RESET}"
+        echo -e "  ${RESET}0) Выход"
+        echo ""
+        read -rp "Ваш выбор [1]: " MENU_CHOICE
+    else
+        echo -e "${BOLD}Select Installation Mode:${RESET}"
+        echo -e "  ${GREEN}1)${RESET} 🌐 ${BOLD}Public URL via Tailscale Funnel${RESET} (no server, no domain) [Recommended]"
+        echo -e "  ${GREEN}2)${RESET} ⚡ ${BOLD}Quick Setup${RESET} (node name from PC name + shared gateway domain)"
+        echo -e "  ${BLUE}3)${RESET} 🖥️  ${BOLD}Local Standalone${RESET} (localhost:${PORT} only)"
+        echo -e "  ${YELLOW}4)${RESET} ⚙️  ${BOLD}Custom Setup${RESET} (custom node name and domain)"
+        echo -e "  ${CYAN}5)${RESET} 📡 ${BOLD}Remote SSH Installation${RESET}"
+        echo -e "  ${RESET}0) Exit"
+        echo ""
+        read -rp "Select [1]: " MENU_CHOICE
+    fi
+    MENU_CHOICE=${MENU_CHOICE:-1}
+
+    case "$MENU_CHOICE" in
+        1)
+            MODE="standalone"
+            FUNNEL=true
+            ;;
+        2)
+            MODE="tunnel"
+            QUICK=true
+            ;;
+        3)
+            MODE="standalone"
+            ;;
+        4)
+            MODE="tunnel"
+            echo ""
+            if [ "$LANG_CHOICE" = "ru" ]; then
+                read -rp "Введите имя узла [по умолчанию: ${DETECTED_HOSTNAME}]: " CUSTOM_SUB
+                read -rp "Общий домен шлюза [по умолчанию: ${GATEWAY}]: " CUSTOM_GW
+            else
+                read -rp "Enter node name [default: ${DETECTED_HOSTNAME}]: " CUSTOM_SUB
+                read -rp "Shared gateway domain [default: ${GATEWAY}]: " CUSTOM_GW
+            fi
+            if [ -n "$CUSTOM_SUB" ]; then USERNAME="$CUSTOM_SUB"; fi
+            if [ -n "$CUSTOM_GW" ]; then GATEWAY="$CUSTOM_GW"; fi
+            ;;
+        5)
+            echo ""
+            if [ "$LANG_CHOICE" = "ru" ]; then
+                read -rp "Введите SSH цель (например, user@<host-ip>): " REMOTE_TARGET
+                read -rp "Порт SSH [22]: " REMOTE_PORT
+            else
+                read -rp "Enter SSH target (e.g., user@<host-ip>): " REMOTE_TARGET
+                read -rp "SSH Port [22]: " REMOTE_PORT
+            fi
+            REMOTE_PORT=${REMOTE_PORT:-22}
+            exec "$0" "--ssh=${REMOTE_TARGET}:${REMOTE_PORT}" "--lang=${LANG_CHOICE}"
+            ;;
+        0)
+            echo "Cancelled."
+            exit 0
+            ;;
+        *)
+            MODE="standalone"
+            FUNNEL=true
+            ;;
+    esac
+fi
+
 if [ "$GATEWAY" = "$DOMAIN_PLACEHOLDER" ]; then
     if domain_required; then
         echo ""
@@ -1622,80 +1699,6 @@ if [ -n "$SSH_TARGET" ]; then
     exit 0
 fi
 
-# Interactive Menu if no mode is specified and not in quick mode
-if [ "$QUICK" = false ] && [ -z "$MODE" ] && [ -t 0 ]; then
-    print_device_info
-    echo ""
-    if [ "$LANG_CHOICE" = "ru" ]; then
-        echo -e "${BOLD}Выберите режим установки:${RESET}"
-        echo -e "  ${GREEN}1)${RESET} 🌐 ${BOLD}Публичная ссылка через Tailscale Funnel${RESET} (без сервера и домена) [Рекомендуется]"
-        echo -e "  ${GREEN}2)${RESET} ⚡ ${BOLD}Быстрая настройка${RESET} (имя ПК + общий домен шлюза + автозапуск)"
-        echo -e "  ${BLUE}3)${RESET} 🖥️  ${BOLD}Локальный Standalone${RESET} (только localhost:${PORT})"
-        echo -e "  ${YELLOW}4)${RESET} ⚙️  ${BOLD}Кастомная настройка${RESET} (своё имя узла и домен)"
-        echo -e "  ${CYAN}5)${RESET} 📡 ${BOLD}Удалённая установка по SSH${RESET}"
-        echo -e "  ${RESET}0) Выход"
-        echo ""
-        read -rp "Ваш выбор [1]: " MENU_CHOICE
-    else
-        echo -e "${BOLD}Select Installation Mode:${RESET}"
-        echo -e "  ${GREEN}1)${RESET} 🌐 ${BOLD}Public URL via Tailscale Funnel${RESET} (no server, no domain) [Recommended]"
-        echo -e "  ${GREEN}2)${RESET} ⚡ ${BOLD}Quick Setup${RESET} (node name from PC name + shared gateway domain)"
-        echo -e "  ${BLUE}3)${RESET} 🖥️  ${BOLD}Local Standalone${RESET} (localhost:${PORT} only)"
-        echo -e "  ${YELLOW}4)${RESET} ⚙️  ${BOLD}Custom Setup${RESET} (custom node name and domain)"
-        echo -e "  ${CYAN}5)${RESET} 📡 ${BOLD}Remote SSH Installation${RESET}"
-        echo -e "  ${RESET}0) Exit"
-        echo ""
-        read -rp "Select [1]: " MENU_CHOICE
-    fi
-    MENU_CHOICE=${MENU_CHOICE:-1}
-
-    case "$MENU_CHOICE" in
-        1)
-            MODE="standalone"
-            FUNNEL=true
-            ;;
-        2)
-            MODE="tunnel"
-            QUICK=true
-            ;;
-        3)
-            MODE="standalone"
-            ;;
-        4)
-            MODE="tunnel"
-            echo ""
-            if [ "$LANG_CHOICE" = "ru" ]; then
-                read -rp "Введите имя узла [по умолчанию: ${DETECTED_HOSTNAME}]: " CUSTOM_SUB
-                read -rp "Общий домен шлюза [по умолчанию: ${GATEWAY}]: " CUSTOM_GW
-            else
-                read -rp "Enter node name [default: ${DETECTED_HOSTNAME}]: " CUSTOM_SUB
-                read -rp "Shared gateway domain [default: ${GATEWAY}]: " CUSTOM_GW
-            fi
-            if [ -n "$CUSTOM_SUB" ]; then USERNAME="$CUSTOM_SUB"; fi
-            if [ -n "$CUSTOM_GW" ]; then GATEWAY="$CUSTOM_GW"; fi
-            ;;
-        5)
-            echo ""
-            if [ "$LANG_CHOICE" = "ru" ]; then
-                read -rp "Введите SSH цель (например, user@<host-ip>): " REMOTE_TARGET
-                read -rp "Порт SSH [22]: " REMOTE_PORT
-            else
-                read -rp "Enter SSH target (e.g., user@<host-ip>): " REMOTE_TARGET
-                read -rp "SSH Port [22]: " REMOTE_PORT
-            fi
-            REMOTE_PORT=${REMOTE_PORT:-22}
-            exec "$0" "--ssh=${REMOTE_TARGET}:${REMOTE_PORT}" "--lang=${LANG_CHOICE}"
-            ;;
-        0)
-            echo "Cancelled."
-            exit 0
-            ;;
-        *)
-            MODE="standalone"
-            FUNNEL=true
-            ;;
-    esac
-fi
 
 # No mode and no menu (piped, --quick, CI): Funnel is the default on every desktop
 # platform, because it needs no server and no domain. Termux is the exception -
@@ -1745,9 +1748,16 @@ find_tailscale() {
 ts_run() {
     if [ "$(id -u)" -eq 0 ]; then
         "$TAILSCALE_BIN" "$@"
-    else
-        sudo "$TAILSCALE_BIN" "$@"
+        return
     fi
+    # Never let sudo block behind a redirect: -n fails fast, and the caller primes
+    # the credential cache with a visible prompt before redirecting output.
+    if sudo -n true 2>/dev/null; then
+        sudo -n "$TAILSCALE_BIN" "$@"
+        return
+    fi
+    sudo -v || return 1
+    sudo "$TAILSCALE_BIN" "$@"
 }
 
 ts_backend_state() {
@@ -1818,7 +1828,8 @@ connect_tailscale() {
     # Prime sudo once, interactively: the login below runs in the background and
     # therefore cannot answer a password prompt.
     if [ "$(id -u)" -ne 0 ]; then
-        sudo -v 2>/dev/null || true
+        # Visible: a hidden prompt would wait forever for a password nobody sees.
+        sudo -v || true
     fi
     ( ts_run up >"$TS_LOG" 2>&1 ) &
     TS_WAITED=0
@@ -1844,7 +1855,17 @@ connect_tailscale() {
 }
 
 start_funnel() {
-    ts_run funnel --bg --https=443 "http://127.0.0.1:${PORT}" 2>&1
+    # A bounded call: when Funnel is not enabled for the tailnet, `tailscale funnel`
+    # prints the enable link and then KEEPS RUNNING, which used to hang the install
+    # after [3/3]. The timeout turns that into a readable failure.
+    local cmd=()
+    if [ "$(id -u)" -ne 0 ]; then cmd=(sudo -n); fi
+    cmd+=("$TAILSCALE_BIN" funnel --bg --https=443 "http://127.0.0.1:${PORT}")
+    if command -v timeout >/dev/null 2>&1; then
+        timeout 25 "${cmd[@]}" 2>&1
+    else
+        "${cmd[@]}" 2>&1
+    fi
 }
 
 funnel_acl_hint() {
@@ -2039,6 +2060,13 @@ RestartSec=5
 [Install]
 WantedBy=default.target
 EOF
+        # A server left by an earlier install keeps the port and answers /health with
+        # ITS code and token: the new run would then report a URL the old node serves.
+        if ! pkill -f "core.server --host 127.0.0.1 --port=$PORT" 2>/dev/null; then
+        # The old node may belong to root (an earlier sudo run): a user cannot
+        # kill it, and the new one would die on "Address already in use".
+        run_privileged pkill -f "core.server --host 127.0.0.1 --port=$PORT" >/dev/null 2>&1 || true
+    fi
         systemctl --user daemon-reload 2>/dev/null || true
         systemctl --user enable --now rhm-standalone.service 2>/dev/null || {
             pkill -f "core.server" 2>/dev/null || true
@@ -2109,9 +2137,20 @@ EOF
     # certificate is needed on this machine.
     MCP_PUBLIC_URL=""
     if [ "$FUNNEL" = true ] && [ -n "$FUNNEL_NAME" ]; then
-        if start_funnel >/dev/null 2>&1; then
+        # Funnel is configured through the daemon: ask for the password HERE, on the
+        # terminal, or the redirected call below waits forever for an unseen prompt.
+        if [ "$(id -u)" -ne 0 ] && ! sudo -n true 2>/dev/null; then
+            echo -e "  ${YELLOW}Для настройки Funnel нужен sudo / sudo is needed for Funnel${RESET}"
+            sudo -v || true
+        fi
+        if funnel_output="$(start_funnel 2>&1)"; then
             MCP_PUBLIC_URL="https://${FUNNEL_NAME}/sse?token=${TOKEN}"
         else
+            # Print what tailscale said: "no serve config" and "funnel not enabled"
+            # are different problems, and the hint alone cannot tell them apart.
+            if [ -n "$funnel_output" ]; then
+                printf "%s\n" "$funnel_output" | sed "s/^/    /" >&2
+            fi
             funnel_acl_hint
         fi
     fi
