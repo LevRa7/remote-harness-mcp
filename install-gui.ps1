@@ -624,6 +624,14 @@ function Get-ResultUrl {
 
     $found = [regex]::Matches($Text, $UrlPattern)
     if ($found.Count -gt 0) {
+        # install.ps1 prints the public URL first and the local fallback right after
+        # it, so the LAST match is the localhost one - and a localhost URL cannot be
+        # added to a cloud connector. Prefer a reachable address; keep the loopback
+        # one only when nothing else was printed.
+        $public = @($found | Where-Object {
+            $_.Value -notmatch '^https?://(localhost|127\.0\.0\.1|\[::1\])([:/]|$)'
+        })
+        if ($public.Count -gt 0) { return $public[$public.Count - 1].Value }
         return $found[$found.Count - 1].Value
     }
 
@@ -1174,6 +1182,14 @@ function Build-ResultPage {
         $rows = @()
         if ($script:Mode -eq 'ssh') {
             $rows = @(@((Get-UiText -Key 'res_config_file'), '~/remote-harness-mcp (remote)'))
+        } elseif ($script:Mode -eq 'funnel') {
+            # Funnel is a standalone node: it has its own env file, its own log and
+            # a Startup launcher, not the gateway agent ones.
+            $rows = @(
+                @((Get-UiText -Key 'res_config_file'), (Join-Path $ConfigDir 'standalone.env')),
+                @((Get-UiText -Key 'res_autostart_file'), (Join-Path $StartupDir 'rhm-node.vbs')),
+                @((Get-UiText -Key 'res_agent_log'), (Join-Path $ConfigDir 'standalone.log'))
+            )
         } else {
             $rows = @(
                 @((Get-UiText -Key 'res_config_file'), $AgentEnvFile),
@@ -1614,6 +1630,14 @@ function Invoke-SelfTest {
     $parsedStandalone = Get-ResultUrl -Text 'http://localhost:8096/sse' -Mode 'custom'
     Add-SelfTestResult 'url_parser_standalone' ($parsedStandalone -eq 'http://localhost:8096/sse') `
         ("parsed='" + $parsedStandalone + "'")
+
+    # 5b. Funnel prints the public URL and then the local fallback; the local one
+    # must never win, or the wizard hands the operator a localhost link.
+    $mixed = "https://node.tailnet.ts.net/sse?token=abc123" + "`n" +
+        "    Local only (this PC): http://localhost:8096/sse?token=abc123"
+    $parsedMixed = Get-ResultUrl -Text $mixed -Mode 'funnel'
+    Add-SelfTestResult 'url_parser_prefers_public' `
+        ($parsedMixed -eq 'https://node.tailnet.ts.net/sse?token=abc123') ("parsed='" + $parsedMixed + "'")
 
     # 6. the agent.env fallback rebuilds the canonical URL
     $envProbe = Join-Path (Get-ScratchDirectory) ('mesh-gui-selftest-env-' + [Guid]::NewGuid().ToString('N') + '.env')
