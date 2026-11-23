@@ -1278,6 +1278,15 @@ class StandaloneMCPHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, OSError):
             return
 
+    def handle_one_request(self) -> None:  # noqa: N802 - http.server API
+        # A client that opens a probe and hangs up (Google does this between HEAD
+        # and POST) raised ConnectionAbortedError out of the socketserver thread and
+        # printed a traceback per attempt. A closed socket is not an error here.
+        try:
+            super().handle_one_request()
+        except (ConnectionError, TimeoutError):
+            self.close_connection = True
+
     def log_request(self, code: Any = "-", size: Any = "-") -> None:  # noqa: N802
         # Log only the request path: the query string can carry ?token=<secret>
         # and must never reach journald / standalone.log.

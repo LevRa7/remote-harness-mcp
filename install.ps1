@@ -1331,28 +1331,85 @@ if ($Mode -eq "standalone") {
     $envLines = @("MESH_TOKEN=" + $StandaloneToken)
     if ($FunnelName) { $envLines += ("MESH_ALLOWED_HOSTS=" + $FunnelName) }
     Set-Content -LiteralPath $StandaloneEnv -Value $envLines -Encoding ASCII
-    try {
-        icacls $StandaloneEnv /inheritance:r /grant:r ("$($env:USERNAME):F") | Out-Null
-    } catch { }
-    # No --token on purpose: the node reads standalone.env itself, so the secret
-    # stays out of the process list and out of the scheduled task.
-    Stop-StandaloneNode -Port $Port
-    Start-Process $pyExeOnly -ArgumentList "-u -m core.server --host 127.0.0.1 --port=$Port" -WorkingDirectory $ScriptDir -WindowStyle Hidden
-    $nodeUp = Wait-StandaloneNode -Port $Port
-    if (-not $nodeUp) {
-        if ($Lang -eq "ru") {
-            Write-Host "[!] Узел не отвечает на http://127.0.0.1:$Port/health - установка остановлена." -ForegroundColor Red
-            Write-Host "    Порт занят другим процессом или Python завершился с ошибкой." -ForegroundColor Yellow
-        } else {
-            Write-Host "[!] The node does not answer on http://127.0.0.1:$Port/health - stopping." -ForegroundColor Red
-            Write-Host "    The port is taken by another process or Python exited with an error." -ForegroundColor Yellow
-        }
-        exit 1
+    if ($AdminService) {
+        # The machine task runs the server as SYSTEM, so SYSTEM must be able to read
+        # the token file; the operator keeps full control as well.
+        try {
+            icacls $StandaloneEnv /inheritance:r /grant:r ("$($env:USERNAME):F") "/grant:r" "SYSTEM:F" | Out-Null
+        } catch { }
+    } else {
+        try {
+            icacls $StandaloneEnv /inheritance:r /grant:r ("$($env:USERNAME):F") | Out-Null
+        } catch { }
     }
-    # The Startup entry is the reliable one: it needs no elevation. A scheduled
-    # task is only a bonus (restart on failure) and is attempted afterwards.
-    $nodeTaskOk = Register-StandaloneStartup -Python $pyExeOnly -Port $Port -WorkingDirectory $ScriptDir
-    try { Register-StandaloneNodeTask -Python $pyExeOnly -Port $Port -WorkingDirectory $ScriptDir | Out-Null } catch { }
+
+    $nodeUp = $false
+    $nodeTaskOk = $false
+    if ($AdminService) {
+        # Funnel + Administrator service: the task runs core.server (not core.agent),
+        # keeps its configuration in ProgramData and starts at boot without a logon.
+        Stop-StandaloneNode -Port $Port
+        # The machine task owns the node now: a leftover per-user launcher would
+        # start a second server on the same port at logon.
+        try {
+            $staleStartup = Join-Path ([Environment]::GetFolderPath("Startup")) "rhm-node.vbs"
+            if (Test-Path -LiteralPath $staleStartup) { Remove-Item -LiteralPath $staleStartup -Force }
+        } catch { }
+        $serviceEnvFile = Join-Path $ConfigDir "service.env"
+        @(
+            ("MESH_PYTHON=" + $pyExeOnly),
+            ("MESH_CONFIG_DIR=" + $ConfigDir),
+            ("MESH_SERVICE_MODE=server"),
+            ("MESH_SERVICE_PORT=" + $Port)
+        ) | Out-File -FilePath $serviceEnvFile -Encoding ASCII
+
+        $serviceOk = $false
+        if (Test-ElevatedSession) {
+            $serviceOk = Register-McpServiceTask -ConfigDirPath $ConfigDir -PayloadDir $ScriptDir -Language $Lang
+        } elseif (-not $PSCommandPath) {
+            if ($Lang -eq "ru") {
+                Write-Host "[!] Службу нельзя зарегистрировать из 'irm | iex': нужен файл install.ps1." -ForegroundColor Red
+            } else {
+                Write-Host "[!] The service cannot be registered from 'irm | iex': it needs install.ps1." -ForegroundColor Red
+            }
+            exit 1
+        } else {
+            if ($Lang -eq "ru") {
+                Write-Host "[*] Узел настроен. Для регистрации службы нужны права администратора - сейчас появится запрос UAC..." -ForegroundColor Yellow
+            } else {
+                Write-Host "[*] The node is configured. Registering the service needs administrator rights - asking for elevation now..." -ForegroundColor Yellow
+            }
+            $childArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $PSCommandPath + '"'),
+                '-AdminService', '-Elevated', '-ServiceOnly', '-Lang', $Lang)
+            try {
+                $child = Start-Process -FilePath 'powershell.exe' -Verb RunAs -Wait -PassThru -ArgumentList $childArgs -ErrorAction Stop
+                $serviceOk = ($child -and $child.ExitCode -eq 0)
+            } catch { $serviceOk = $false }
+        }
+        if (-not $serviceOk) {
+            if ($Lang -eq "ru") {
+                Write-Host "[!] Повышение прав отклонено или регистрация не удалась: служба MCP не установлена." -ForegroundColor Red
+                Write-Host "    Повторите:  .\install.ps1 -Mode standalone -Funnel -AdminService" -ForegroundColor Yellow
+            } else {
+                Write-Host "[!] Elevation was refused or registration failed: the MCP service was not installed." -ForegroundColor Red
+                Write-Host "    Re-run:  .\install.ps1 -Mode standalone -Funnel -AdminService" -ForegroundColor Yellow
+            }
+            exit 1
+        }
+        # The service starts the server itself; give it time to bind the port.
+        $nodeUp = Wait-StandaloneNode -Port $Port -TimeoutSec 45
+        $nodeTaskOk = $serviceOk
+    } else {
+        # No --token on purpose: the node reads standalone.env itself, so the secret
+        # stays out of the process list and out of the scheduled task.
+        Stop-StandaloneNode -Port $Port
+        Start-Process $pyExeOnly -ArgumentList "-u -m core.server --host 127.0.0.1 --port=$Port" -WorkingDirectory $ScriptDir -WindowStyle Hidden
+        $nodeUp = Wait-StandaloneNode -Port $Port
+        # The Startup entry is the reliable one: it needs no elevation. A scheduled
+        # task is only a bonus (restart on failure) and is attempted afterwards.
+        $nodeTaskOk = Register-StandaloneStartup -Python $pyExeOnly -Port $Port -WorkingDirectory $ScriptDir
+        try { Register-StandaloneNodeTask -Python $pyExeOnly -Port $Port -WorkingDirectory $ScriptDir | Out-Null } catch { }
+    }
 
     if ($FunnelName) {
         # Tailscale terminates TLS and proxies to loopback; the node never sees a
@@ -1411,7 +1468,11 @@ if ($Lang -eq "ru") {
         Write-Host "    Публичная ссылка не создана: запустите с -Funnel и установленным Tailscale." -ForegroundColor DarkGray
     }
     if ($nodeTaskOk) {
-        Write-Host "    Автозапуск узла: при входе в систему (rhm-node.vbs в папке Автозагрузки)." -ForegroundColor DarkGray
+        if ($AdminService) {
+            Write-Host "    Автозапуск узла: служба RemoteHarnessMCPService (SYSTEM, при загрузке)." -ForegroundColor DarkGray
+        } else {
+            Write-Host "    Автозапуск узла: при входе в систему (rhm-node.vbs в папке Автозагрузки)." -ForegroundColor DarkGray
+        }
     } else {
         Write-Host "    [!] Не удалось зарегистрировать автозапуск: узел поднимется только до перезагрузки." -ForegroundColor Yellow
     }
@@ -1432,7 +1493,11 @@ if ($Lang -eq "ru") {
         Write-Host "    No public URL: rerun with -Funnel and Tailscale installed." -ForegroundColor DarkGray
     }
     if ($nodeTaskOk) {
-        Write-Host "    Node autostart: at logon (rhm-node.vbs in the Startup folder)." -ForegroundColor DarkGray
+        if ($AdminService) {
+            Write-Host "    Node autostart: the RemoteHarnessMCPService task (SYSTEM, at boot)." -ForegroundColor DarkGray
+        } else {
+            Write-Host "    Node autostart: at logon (rhm-node.vbs in the Startup folder)." -ForegroundColor DarkGray
+        }
     } else {
         Write-Host "    [!] Could not register autostart: the node lives until the next reboot." -ForegroundColor Yellow
     }

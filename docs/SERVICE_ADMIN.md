@@ -42,6 +42,21 @@ registration, the URL contract and the error reporting stay in one place.
 
 Already-elevated shells register the task in-process, without a second process or a prompt.
 
+## Funnel variant
+
+The same switch works with **Public URL via Tailscale Funnel**: the task then
+hosts `core.server` (the standalone MCP server on loopback) instead of
+`core.agent`, keeps its configuration in `C:\ProgramData\remote-harness-mcp`
+and starts at boot. Funnel itself is configured machine-wide by `tailscaled`, so
+the published `https://<node>.<tailnet>.ts.net` URL keeps working without a
+logged-on user. `service.env` carries the choice:
+
+```ini
+MESH_SERVICE_MODE=server
+MESH_SERVICE_PORT=8096
+```
+
+
 ## What gets registered
 
 ```

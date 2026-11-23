@@ -208,6 +208,21 @@ def test_service_variant_uses_the_machine_wide_configuration():
     assert '("MESH_CONFIG_DIR=" + $ConfigDir)' in text
 
 
+def test_service_launcher_can_host_the_standalone_server():
+    text = _read(os.path.join(REPO, "ops", "windows", "rhm-service.ps1"))
+    assert "MESH_SERVICE_MODE" in text, "the launcher must know what to run"
+    assert "core.server" in text, "Funnel mode runs the MCP server, not the tunnel agent"
+    assert "--port=$ServicePort" in text
+
+
+def test_funnel_with_the_service_writes_a_server_mode_config():
+    text = _read(INSTALL_PS1)
+    assert "MESH_SERVICE_MODE=server" in text
+    assert "Wait-StandaloneNode -Port $Port -TimeoutSec 45" in text, (
+        "the service starts the server, so the installer waits for it"
+    )
+
+
 def test_service_launcher_pins_the_interpreter_and_restarts():
     text = _read(SERVICE)
     assert "service.env" in text
@@ -233,9 +248,7 @@ def test_wizard_offers_the_service_as_a_switch_not_a_mode():
     assert "opt_service_label" in text, "the options page needs the service checkbox"
     assert "$script:AdminService" in text
     assert "$argList += '-AdminService'" in text, "the wizard must pass the flag to install.ps1"
-    assert "($Mode -eq 'quick' -or $Mode -eq 'custom')" in text, (
-        "the machine service hosts the gateway agent: only those variants can use it"
-    )
+    assert "$Mode -eq 'funnel'" in text, "Funnel can host the machine service too (core.server)"
 
 
 def test_service_variant_strings_are_bilingual():

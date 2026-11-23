@@ -1754,10 +1754,40 @@ install_tailscale() {
     find_tailscale
 }
 
+tailscaled_running() {
+    ts_run status >/dev/null 2>&1
+}
+
+# Start the daemon when the package installed one but nothing runs it. Containers
+# and WSL have no systemd as PID 1, and `tailscale up` against a dead daemon prints
+# nothing useful - the installer would wait five minutes for a login that cannot
+# happen. Fall back to running tailscaled ourselves, userspace networking when the
+# kernel gives us no TUN device.
+start_tailscaled() {
+    tailscaled_running && return 0
+    if command -v systemctl >/dev/null 2>&1; then
+        run_privileged systemctl start tailscaled >/dev/null 2>&1 || true
+        for _ in 1 2 3 4 5; do
+            tailscaled_running && return 0
+            sleep 1
+        done
+    fi
+    local tun_arg=""
+    [ -e /dev/net/tun ] || tun_arg="--tun=userspace-networking"
+    run_privileged mkdir -p /var/lib/tailscale /run/tailscale >/dev/null 2>&1 || true
+    run_privileged sh -c "nohup tailscaled $tun_arg --state=/var/lib/tailscale/tailscaled.state --socket=/run/tailscale/tailscaled.sock >/var/log/tailscaled.log 2>&1 &" >/dev/null 2>&1 || true
+    for _ in 1 2 3 4 5 6 7 8; do
+        tailscaled_running && return 0
+        sleep 1
+    done
+    return 1
+}
+
 connect_tailscale() {
     if [ "$(ts_backend_state)" = "Running" ]; then
         return 0
     fi
+    start_tailscaled || true
     TS_LOG="$CONFIG_DIR/tailscale-up.log"
     mkdir -p "$CONFIG_DIR"
     # Prime sudo once, interactively: the login below runs in the background and

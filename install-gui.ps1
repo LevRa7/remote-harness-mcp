@@ -686,7 +686,7 @@ function New-ConsoleInstallerSteps {
     }
     # The administrator service is a switch on the chosen variant, not a variant
     # of its own: only the gateway modes have an agent a machine service can run.
-    if ($script:AdminService -and ($Mode -eq 'quick' -or $Mode -eq 'custom')) {
+    if ($script:AdminService -and ($Mode -eq 'quick' -or $Mode -eq 'custom' -or $Mode -eq 'funnel')) {
         $argList += '-AdminService'
     }
     return @(New-PipelineStep -File (Get-PowerShellExe) -Arguments ($argList -join ' ') `
@@ -934,7 +934,7 @@ function Build-ModePage {
                 # The service switch belongs to the gateway variants: carrying a
                 # stale TRUE into Funnel would make the URL fallback read the
                 # machine config for a node that runs in the user session.
-                if ($script:Mode -eq 'funnel' -or $script:Mode -eq 'ssh') { $script:AdminService = $false }
+                if ($script:Mode -eq 'ssh') { $script:AdminService = $false }
                 $script:OptionError = ''
             }
         })
@@ -1025,7 +1025,7 @@ function Build-OptionsPage {
     elseif ($script:Mode -eq 'custom') { $serviceTop = 252 }
 
     if ($serviceTop -ge 0) {
-        $serviceSupported = ($script:Mode -eq 'quick' -or $script:Mode -eq 'custom')
+        $serviceSupported = ($script:Mode -eq 'quick' -or $script:Mode -eq 'custom' -or $script:Mode -eq 'funnel')
         $serviceGroup = New-GroupBox -Text (Get-UiText -Key 'opt_service_group') -X 16 -Y $serviceTop -W 760 -H 88
         $serviceBox = New-Object System.Windows.Forms.CheckBox
         $serviceBox.Text = Get-UiText -Key 'opt_service_label'
