@@ -146,3 +146,27 @@ def test_the_stream_announces_a_post_endpoint_that_carries_the_token():
     finally:
         httpd.shutdown()
         httpd.server_close()
+
+def test_a_chunked_jsonrpc_body_is_read():
+    """Google\'s MCP client posts chunked; an empty read looks like \"not a server\"."""
+    httpd, port = _start()
+    server.StandaloneMCPHandler.server_mcp = server.RemoteHarnessMCPServer()
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        payload = b'{"jsonrpc":"2.0","id":1,"method":"ping"}'
+        conn.request(
+            "POST",
+            "/mcp?token=test-token",
+            body=iter([payload[:10], payload[10:]]),
+            headers={"Content-Type": "application/json", "Accept": "application/json, text/event-stream"},
+            encode_chunked=True,
+        )
+        response = conn.getresponse()
+        body = response.read()
+        conn.close()
+        assert response.status == 200
+        assert b"result" in body, body
+        assert b"-32700" not in body, "an empty read would answer Parse error"
+    finally:
+        httpd.shutdown()
+        httpd.server_close()

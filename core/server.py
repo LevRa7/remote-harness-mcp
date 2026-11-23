@@ -1023,6 +1023,12 @@ class StandaloneMCPHandler(BaseHTTPRequestHandler):
         return self._token_valid()
 
     def _read_body(self) -> bytes:
+        # Streamable HTTP clients may send the JSON-RPC body chunked. BaseHTTPRequest
+        # Handler does not decode that, and a chunked request then looked like an
+        # empty POST - which a validator reports as "not an MCP server".
+        encoding = (self.headers.get("Transfer-Encoding") or "").lower()
+        if "chunked" in encoding:
+            return self._read_chunked_body()
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except (TypeError, ValueError):
@@ -1033,6 +1039,38 @@ class StandaloneMCPHandler(BaseHTTPRequestHandler):
             return self.rfile.read(length)
         except Exception:
             return b""
+
+    #: Upper bound for a request body: the biggest legitimate call is a tool
+    #: argument blob, and an unbounded read is a memory hole.
+    MAX_BODY_BYTES = 8 * 1024 * 1024
+
+    def _read_chunked_body(self) -> bytes:
+        chunks = []
+        total = 0
+        try:
+            while True:
+                line = self.rfile.readline(65536)
+                if not line:
+                    break
+                size_text = line.strip().split(b";", 1)[0]
+                if not size_text:
+                    continue
+                size = int(size_text, 16)
+                if size <= 0:
+                    # Consume the trailer so the connection stays usable.
+                    while True:
+                        trailer = self.rfile.readline(65536)
+                        if trailer in (b"\r\n", b"\n", b""):
+                            break
+                    break
+                total += size
+                if total > self.MAX_BODY_BYTES:
+                    break
+                chunks.append(self.rfile.read(size))
+                self.rfile.read(2)  # the CRLF that terminates the chunk
+        except Exception:
+            pass
+        return b"".join(chunks)
 
     # -- HTTP verbs -------------------------------------------------------
     def do_OPTIONS(self) -> None:  # noqa: N802 - http.server API
