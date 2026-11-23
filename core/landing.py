@@ -38,7 +38,11 @@ def is_browser(headers) -> bool:
         return True
     if (headers.get("Sec-Fetch-Mode") or "").lower() == _FETCH_NAVIGATE:
         return True
-    return "text/html" in accept
+    # `Accept: text/html` alone is not proof of a browser: some MCP validators and
+    # HTTP libraries advertise it while probing an endpoint. A browser always
+    # sends a Mozilla user agent, so both signals are required.
+    user_agent = (headers.get("User-Agent") or "").lower()
+    return "text/html" in accept and "mozilla" in user_agent
 
 
 def _clipboard_button(target: str, label: str) -> str:

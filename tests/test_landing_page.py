@@ -32,7 +32,7 @@ def _headers(**values):
 def test_a_browser_navigation_is_recognised():
     assert landing.is_browser(_headers(Accept="text/html,application/xhtml+xml", **{"Sec-Fetch-Dest": "document"}))
     assert landing.is_browser(_headers(**{"Sec-Fetch-Mode": "navigate"}))
-    assert landing.is_browser(_headers(Accept="text/html"))
+    assert landing.is_browser(_headers(Accept="text/html", **{"User-Agent": "Mozilla/5.0 (Windows NT 10.0) Chrome/140"}))
 
 
 def test_an_mcp_client_is_not_mistaken_for_a_browser():
@@ -40,6 +40,10 @@ def test_an_mcp_client_is_not_mistaken_for_a_browser():
     assert not landing.is_browser(_headers(Accept="text/event-stream", **{"Sec-Fetch-Dest": "document"}))
     assert not landing.is_browser(_headers(Accept="*/*"))
     assert not landing.is_browser(_headers())
+    # A validator that advertises HTML without being a browser must still get the
+    # stream: this is what made Gemini answer "not an MCP server address".
+    assert not landing.is_browser(_headers(Accept="text/html", **{"User-Agent": "python-requests/2.32"}))
+    assert not landing.is_browser(_headers(Accept="text/html"))
 
 
 # ---------------------------------------------------------------------------
@@ -123,6 +127,22 @@ def test_browser_without_a_valid_token_gets_no_card():
             "Sec-Fetch-Dest": "document",
         })
         assert status == 401, "the card carries the token: it must never render unauthenticated"
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+def test_the_stream_announces_a_post_endpoint_that_carries_the_token():
+    httpd, port = _start()
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        conn.request("GET", "/sse?token=test-token", headers={"Accept": "text/event-stream"})
+        response = conn.getresponse()
+        first = response.read1(200)
+        conn.close()
+        assert b"event: endpoint" in first
+        assert b"data: /messages?token=test-token" in first, (
+            "the client posts to the announced endpoint; without the token that POST is 401"
+        )
     finally:
         httpd.shutdown()
         httpd.server_close()

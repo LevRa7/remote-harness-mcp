@@ -58,7 +58,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
-from urllib.parse import parse_qs, urlparse, urlsplit
+from urllib.parse import parse_qs, quote, urlparse, urlsplit
 
 logger = logging.getLogger("remote-harness-mcp.standalone")
 
@@ -1078,6 +1078,15 @@ class StandaloneMCPHandler(BaseHTTPRequestHandler):
             if landing.is_browser(self.headers):
                 self._send_html(landing.render_landing(self._public_base(), self._provided_token() or ""))
                 return
+            # Which client asked for the stream is the one fact that explains a
+            # connector refusing the URL; headers only, never the token.
+            logger.info(
+                "GET %s from ua=%r accept=%r fetch_dest=%r",
+                self._clean_path(),
+                (self.headers.get("User-Agent") or "")[:80],
+                (self.headers.get("Accept") or "")[:80],
+                (self.headers.get("Sec-Fetch-Dest") or ""),
+            )
             self._stream_sse()
         elif path.startswith("/.well-known/oauth-protected-resource"):
             self._send_json(404, {"error": "not_found"})
@@ -1119,13 +1128,35 @@ class StandaloneMCPHandler(BaseHTTPRequestHandler):
         else:  # defensive: never drop the connection on a malformed handler result
             self._send_json(500, {"error": "internal_error"})
 
+    def _query_token(self) -> Optional[str]:
+        """The token from the query string, loopback clients only."""
+        try:
+            client = (self.client_address[0] or "").strip()
+        except Exception:
+            client = ""
+        if client not in ("127.0.0.1", "::1", "localhost"):
+            return None
+        try:
+            query = parse_qs(urlparse(self.path).query)
+        except Exception:
+            return None
+        value = query.get("token", [None])[0]
+        return str(value) if value else None
+
     def _stream_sse(self) -> None:
         self._send_headers(200, "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "keep-alive")
         self.end_headers()
+        # The client posts JSON-RPC to the announced endpoint, and it learned the
+        # token only from this URL. Without the token there the follow-up POST is
+        # unauthenticated, and a connector reports "this is not an MCP server".
+        endpoint = "/messages"
+        query_token = self._query_token()
+        if query_token:
+            endpoint += "?token=" + quote(query_token, safe="")
         try:
-            self.wfile.write(b"event: endpoint\ndata: /messages\n\n")
+            self.wfile.write(("event: endpoint\ndata: %s\n\n" % endpoint).encode("utf-8"))
             self.wfile.flush()
             while True:
                 time.sleep(15)
