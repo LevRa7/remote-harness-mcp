@@ -187,6 +187,21 @@ def test_windows_installer_carries_the_service_variant():
     assert "ops\\windows\\rhm-service.ps1" in text
 
 
+def test_elevation_is_requested_at_the_service_step_not_before_the_install():
+    text = _read(INSTALL_PS1)
+    # The UAC prompt belongs to the moment the service is registered: the node
+    # part runs unelevated first, so starting the installer without admin rights
+    # does not block the option.
+    assert "-ServiceOnly" in text, "the elevated child must do only the service step"
+    assert "if ($ServiceOnly) {" in text
+    service_env_at = text.index('("MESH_CONFIG_DIR=" + $ConfigDir)')
+    runas_at = text.index("Start-Process -FilePath 'powershell.exe' -Verb RunAs")
+    assert service_env_at < runas_at, (
+        "the machine configuration must be written before the elevation request"
+    )
+    assert "Узел установлен" in text, "the prompt must say the node part is already done"
+
+
 def test_service_variant_uses_the_machine_wide_configuration():
     text = _read(INSTALL_PS1)
     assert 'Join-Path $ProgramDataRoot "remote-harness-mcp"' in text

@@ -27,18 +27,20 @@ Console (the domain must be resolvable):
 .\install.ps1 -AdminService -Gateway mesh.example.test -User my-node
 ```
 
-The script detects that it is not elevated and re-runs itself through
-`Start-Process -Verb RunAs`, so the UAC prompt is the only interaction. Because an
-elevated process cannot have its stdout redirected, the child writes a transcript
-and the parent prints it — the output you see is the real installer output, and
-the exit code is the child's.
+The node part runs unelevated. Elevation is requested **at the service step**: the
+installer prints that the node is ready and then starts an elevated child through
+`Start-Process -Verb RunAs` with `-ServiceOnly`, which registers and starts the
+SYSTEM task and nothing else. So starting the installer without administrator
+rights does not block this variant - it simply prompts later, when the privileged
+operation actually happens. Refusing the prompt leaves the node installed and the
+service absent, and says so.
 
 Visual installer: pick the gateway variant, then tick **Install as a Windows service with administrator rights**
 page, fill in the node name and the shared domain, press Install. The wizard runs
 the same command through one pipeline step (`install.ps1 ... -AdminService`), so
 registration, the URL contract and the error reporting stay in one place.
 
-Already-elevated shells skip the relaunch entirely.
+Already-elevated shells register the task in-process, without a second process or a prompt.
 
 ## What gets registered
 

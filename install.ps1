@@ -23,6 +23,9 @@ param(
     # Set by the elevated relaunch of this same script, so the child does not try
     # to elevate again (which would be an endless UAC loop).
     [switch]$Elevated,
+    # The elevated child does one thing: register the machine service. It must not
+    # repeat the node registration the parent already performed.
+    [switch]$ServiceOnly,
     # Where the elevated child writes its transcript, so the unelevated parent can
     # print the child's output: -Verb RunAs cannot redirect stdout.
     [string]$Transcript = ""
@@ -705,13 +708,12 @@ if ($DryRun) {
 # ------------------------------------------------------------------------------
 #  ADMINISTRATOR SERVICE VARIANT - elevation
 #
-#  Registering a task for SYSTEM is an administrative operation, so the variant
-#  asks for elevation once and re-runs this same script with -Elevated. The work
-#  happens in the elevated child rather than here: splitting it would duplicate
-#  every installation step.
-#
-#  The child's output cannot be redirected (Start-Process -Verb RunAs implies
-#  ShellExecute), hence the transcript file the parent prints afterwards.
+#  Registering a task for SYSTEM is the only privileged operation in this
+#  installer, so it is the only thing that asks for elevation. The request
+#  happens when the service is actually installed - after the node part ran
+#  unelevated - and the elevated child does nothing but register the task.
+#  Starting the installer without administrator rights therefore no longer
+#  blocks the service option: it prompts when it gets there.
 # ------------------------------------------------------------------------------
 function Test-ElevatedSession {
     try {
@@ -723,56 +725,68 @@ function Test-ElevatedSession {
     }
 }
 
-if ($AdminService -and -not $Elevated -and -not $DryRun) {
-    if (Test-ElevatedSession) {
-        # Already an administrator (a shell started "as administrator"): no second
-        # process and no UAC prompt, the work simply continues here.
-        $Elevated = $true
-    } else {
-        if ($Lang -eq "ru") {
-            Write-Host "[*] Для варианта со службой MCP нужны права администратора. Запрос UAC..." -ForegroundColor Yellow
+function Register-McpServiceTask {
+    param([string]$ConfigDirPath, [string]$PayloadDir, [string]$Language)
+    $taskName = "RemoteHarnessMCPService"
+    $scriptPath = Join-Path $PayloadDir "ops\windows\rhm-service.ps1"
+    if (-not (Test-Path -LiteralPath $scriptPath)) {
+        if ($Language -eq "ru") {
+            Write-Host "[!] Не найден ${scriptPath}: службу MCP зарегистрировать нельзя." -ForegroundColor Red
         } else {
-            Write-Host "[*] The MCP service variant needs administrator rights. Requesting elevation..." -ForegroundColor Yellow
+            Write-Host "[!] $scriptPath is missing: the MCP service cannot be registered." -ForegroundColor Red
         }
-        if (-not $PSCommandPath) {
-            # "irm | iex" has no file to relaunch: elevation would have nothing to run.
-            if ($Lang -eq "ru") {
-                Write-Host "[!] Вариант со службой MCP нельзя запускать через 'irm | iex': нужен файл install.ps1." -ForegroundColor Red
-                Write-Host "    Скачайте установщик и запустите его из PowerShell от имени администратора." -ForegroundColor Yellow
-            } else {
-                Write-Host "[!] The MCP service variant cannot run from 'irm | iex': it needs the install.ps1 file." -ForegroundColor Red
-                Write-Host "    Download the installer and run it from an elevated PowerShell." -ForegroundColor Yellow
-            }
-            exit 1
-        }
-        $childLog = Join-Path ([IO.Path]::GetTempPath()) ("rhm-admin-service-" + [Guid]::NewGuid().ToString('N') + ".log")
-        $childArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $PSCommandPath + '"'),
-            '-AdminService', '-Elevated', '-Transcript', $childLog, '-Lang', $Lang)
-        if ($User) { $childArgs += @('-User', ('"' + $User + '"')) }
-        if ($Gateway) { $childArgs += @('-Gateway', ('"' + $Gateway + '"')) }
-        if ($Token) { $childArgs += @('-Token', ('"' + $Token + '"')) }
-        if ($Quick) { $childArgs += '-Quick' }
-        if ($Port) { $childArgs += @('-Port', "$Port") }
-        $child = $null
-        try {
-            $child = Start-Process -FilePath 'powershell.exe' -Verb RunAs -Wait -PassThru -ArgumentList $childArgs -ErrorAction Stop
-        } catch {
-            if ($Lang -eq "ru") {
-                Write-Host "[!] Повышение прав отклонено: служба MCP не установлена." -ForegroundColor Red
-                Write-Host "    Запустите установщик от имени администратора (правая кнопка -> 'Запуск от имени администратора')." -ForegroundColor Yellow
-            } else {
-                Write-Host "[!] Elevation was refused: the MCP service was not installed." -ForegroundColor Red
-                Write-Host "    Run the installer as administrator (right-click -> 'Run as administrator')." -ForegroundColor Yellow
-            }
-            exit 1
-        }
-        if (Test-Path -LiteralPath $childLog) {
-            Get-Content -LiteralPath $childLog -Encoding UTF8 | ForEach-Object { Write-Host $_ }
-        }
-        $childExit = 0
-        if ($child) { $childExit = $child.ExitCode }
-        exit $childExit
+        return $false
     }
+    # A full path, not "powershell.exe": a boot-time task runs before any user
+    # PATH exists, and the system one is not guaranteed to carry the
+    # WindowsPowerShell directory either.
+    $servicePowerShell = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+    if (-not (Test-Path -LiteralPath $servicePowerShell)) { $servicePowerShell = "powershell.exe" }
+    try {
+        $action = New-ScheduledTaskAction -Execute $servicePowerShell -WorkingDirectory $PayloadDir -Argument ('-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -NonInteractive -File "' + $scriptPath + '"')
+        $trigger = New-ScheduledTaskTrigger -AtStartup
+        $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Days 3650)
+        Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force -Description "Runs the Remote Harness MCP node agent with administrator rights." -ErrorAction Stop | Out-Null
+    } catch {
+        if ($Language -eq "ru") {
+            Write-Host "[!] Не удалось зарегистрировать задачу '$taskName': $($_.Exception.Message)" -ForegroundColor Red
+        } else {
+            Write-Host "[!] Could not register the '$taskName' task: $($_.Exception.Message)" -ForegroundColor Red
+        }
+        return $false
+    }
+    $started = $false
+    try {
+        Start-ScheduledTask -TaskName $taskName -ErrorAction Stop
+        Start-Sleep -Seconds 3
+        $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+        $started = [bool]($task -and $task.State -ne "Disabled")
+    } catch { $started = $false }
+    if ($Language -eq "ru") {
+        Write-Host "[OK] Служба MCP '$taskName' зарегистрирована: запуск при загрузке, пользователь SYSTEM, права администратора." -ForegroundColor Green
+        Write-Host "    Конфигурация: $ConfigDirPath (машинная, вне профиля пользователя)" -ForegroundColor DarkGray
+        Write-Host "    Управление: Start-ScheduledTask / Stop-ScheduledTask -TaskName $taskName" -ForegroundColor DarkGray
+        if (-not $started) {
+            Write-Host "    [!] Задача создана, но не запустилась: проверьте 'Get-ScheduledTask -TaskName $taskName'." -ForegroundColor Yellow
+        }
+    } else {
+        Write-Host "[OK] MCP service '$taskName' registered: starts at boot, runs as SYSTEM with administrator rights." -ForegroundColor Green
+        Write-Host "    Configuration: $ConfigDirPath (machine-wide, outside the user profile)" -ForegroundColor DarkGray
+        Write-Host "    Control it with: Start-ScheduledTask / Stop-ScheduledTask -TaskName $taskName" -ForegroundColor DarkGray
+        if (-not $started) {
+            Write-Host "    [!] The task was created but did not start: check 'Get-ScheduledTask -TaskName $taskName'." -ForegroundColor Yellow
+        }
+    }
+    return $true
+}
+
+# The elevated child of -AdminService has exactly one job. It must not repeat the
+# node registration: the parent already did that before asking for elevation.
+if ($ServiceOnly) {
+    $payloadDir = if ($PSCommandPath) { Split-Path -Parent $PSCommandPath } else { (Get-Location).Path }
+    $ok = Register-McpServiceTask -ConfigDirPath $ConfigDir -PayloadDir $payloadDir -Language $Lang
+    if ($ok) { exit 0 } else { exit 1 }
 }
 
 function Resolve-PythonAfterInstall {
@@ -1603,83 +1617,56 @@ if ($AdminService) {
         }
     }
 
-    if (-not (Test-Path -LiteralPath $serviceScript)) {
-        if ($Lang -eq "ru") {
-            Write-Host "[!] Не найден ${serviceScript}: службу MCP зарегистрировать нельзя." -ForegroundColor Red
-            Write-Host "    Переустановите из полного пакета (в нём есть ops\windows\rhm-service.ps1)." -ForegroundColor Yellow
-        } else {
-            Write-Host "[!] $serviceScript is missing: the MCP service cannot be registered." -ForegroundColor Red
-            Write-Host "    Install from a complete package (it carries ops\windows\rhm-service.ps1)." -ForegroundColor Yellow
-        }
-        exit 1
-    }
-
-    # The interpreter was already proven usable above (the Store alias was
-    # rejected there). The service script must not search PATH again: SYSTEM's PATH
-    # is not the operator's, and a pinned path is what this installer promises.
+    # The machine configuration is written BEFORE elevation: creating a folder
+    # under ProgramData needs no administrator rights, and the elevated child
+    # then has everything it needs.
     @(
         ("MESH_PYTHON=" + $pyExeOnly),
         ("MESH_CONFIG_DIR=" + $ConfigDir)
     ) | Out-File -FilePath $serviceEnvFile -Encoding ASCII
 
-    # A full path, not "powershell.exe": a boot-time task runs before any user PATH
-    # exists, and the system one is not guaranteed to carry the WindowsPowerShell
-    # directory either. Fall back to the bare name only if the file is gone.
-    $servicePowerShell = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
-    if (-not (Test-Path -LiteralPath $servicePowerShell)) { $servicePowerShell = "powershell.exe" }
-    $serviceAction = New-ScheduledTaskAction -Execute $servicePowerShell -WorkingDirectory $ScriptDir -Argument ('-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -NonInteractive -File "' + $serviceScript + '"')
-    $serviceTrigger = New-ScheduledTaskTrigger -AtStartup
-    # SYSTEM + Highest: the service account has the privileges the variant exists
-    # for, and ServiceAccount logon type means "no user has to be logged on".
-    $servicePrincipal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
-    # 3650 days is "no time limit" without the P0D serialisation a zero timespan
-    # produces (the Task Scheduler schema rejects it).
-    $serviceSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Days 3650)
-    $serviceRegistered = $false
-    $serviceError = ""
-    try {
-        Register-ScheduledTask -TaskName $serviceTaskName -Action $serviceAction -Trigger $serviceTrigger -Principal $servicePrincipal -Settings $serviceSettings -Force -Description "Runs the Remote Harness MCP node agent with administrator rights." -ErrorAction Stop | Out-Null
-        $serviceRegistered = $true
-    } catch {
-        $serviceRegistered = $false
-        $serviceError = $_.Exception.Message
-    }
-
-    if (-not $serviceRegistered) {
+    $serviceOk = $false
+    if (Test-ElevatedSession) {
+        # Started "as administrator": no second process, no UAC prompt.
+        $serviceOk = Register-McpServiceTask -ConfigDirPath $ConfigDir -PayloadDir $ScriptDir -Language $Lang
+    } elseif (-not $PSCommandPath) {
         if ($Lang -eq "ru") {
-            Write-Host "[!] Не удалось зарегистрировать задачу '$serviceTaskName'." -ForegroundColor Red
-            Write-Host "    Запустите установщик от имени администратора: регистрация задачи для SYSTEM требует прав." -ForegroundColor Yellow
+            Write-Host "[!] Службу MCP нельзя зарегистрировать из 'irm | iex': нужен файл install.ps1." -ForegroundColor Red
+            Write-Host "    Скачайте установщик и запустите его из PowerShell." -ForegroundColor Yellow
         } else {
-            Write-Host "[!] Could not register the '$serviceTaskName' task." -ForegroundColor Red
-            Write-Host "    Run the installer as administrator: registering a SYSTEM task requires it." -ForegroundColor Yellow
+            Write-Host "[!] The MCP service cannot be registered from 'irm | iex': it needs the install.ps1 file." -ForegroundColor Red
+            Write-Host "    Download the installer and run it from PowerShell." -ForegroundColor Yellow
         }
-        if ($serviceError) { Write-Host "    $serviceError" -ForegroundColor DarkYellow }
         exit 1
-    }
-
-    # Start it now, so the run ends with a connected node instead of a reboot.
-    $serviceStarted = $false
-    try {
-        Start-ScheduledTask -TaskName $serviceTaskName -ErrorAction Stop
-        Start-Sleep -Seconds 3
-        $serviceTask = Get-ScheduledTask -TaskName $serviceTaskName -ErrorAction SilentlyContinue
-        $serviceStarted = [bool]($serviceTask -and $serviceTask.State -ne "Disabled")
-    } catch {
-        $serviceStarted = $false
-    }
-    if ($Lang -eq "ru") {
-        Write-Host "[OK] Служба MCP '$serviceTaskName' зарегистрирована: запуск при загрузке, пользователь SYSTEM, права администратора." -ForegroundColor Green
-        Write-Host "    Конфигурация: $ConfigDir (машинная, вне профиля пользователя)" -ForegroundColor DarkGray
-        Write-Host "    Управление: Start-ScheduledTask / Stop-ScheduledTask -TaskName $serviceTaskName" -ForegroundColor DarkGray
-        if (-not $serviceStarted) {
-            Write-Host "    [!] Задача создана, но не запустилась: проверьте 'Get-ScheduledTask -TaskName $serviceTaskName'." -ForegroundColor Yellow
-        }
     } else {
-        Write-Host "[OK] MCP service '$serviceTaskName' registered: starts at boot, runs as SYSTEM with administrator rights." -ForegroundColor Green
-        Write-Host "    Configuration: $ConfigDir (machine-wide, outside the user profile)" -ForegroundColor DarkGray
-        Write-Host "    Control it with: Start-ScheduledTask / Stop-ScheduledTask -TaskName $serviceTaskName" -ForegroundColor DarkGray
-        if (-not $serviceStarted) {
-            Write-Host "    [!] The task was created but did not start: check 'Get-ScheduledTask -TaskName $serviceTaskName'." -ForegroundColor Yellow
+        # Elevation is requested HERE, after the node part has already run: the
+        # service option does not require starting the installer as administrator.
+        if ($Lang -eq "ru") {
+            Write-Host "[*] Узел установлен. Для регистрации службы нужны права администратора - сейчас появится запрос UAC..." -ForegroundColor Yellow
+        } else {
+            Write-Host "[*] The node is installed. Registering the service needs administrator rights - asking for elevation now..." -ForegroundColor Yellow
+        }
+        # -Gateway travels with the child: it exits at -ServiceOnly, but only
+        # after the domain gate, which the child would otherwise fail on an
+        # empty ProgramData configuration.
+        $childArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $PSCommandPath + '"'),
+            '-AdminService', '-Elevated', '-ServiceOnly', '-Lang', $Lang)
+        if ($Gateway) { $childArgs += @('-Gateway', ('"' + $Gateway + '"')) }
+        try {
+            $child = Start-Process -FilePath 'powershell.exe' -Verb RunAs -Wait -PassThru -ArgumentList $childArgs -ErrorAction Stop
+            $serviceOk = ($child -and $child.ExitCode -eq 0)
+        } catch {
+            $serviceOk = $false
+        }
+        if (-not $serviceOk) {
+            if ($Lang -eq "ru") {
+                Write-Host "[!] Повышение прав отклонено или регистрация не удалась: служба MCP не установлена." -ForegroundColor Red
+                Write-Host "    Узел при этом установлен. Повторите:  .\install.ps1 -AdminService" -ForegroundColor Yellow
+            } else {
+                Write-Host "[!] Elevation was refused or registration failed: the MCP service was not installed." -ForegroundColor Red
+                Write-Host "    The node itself is installed. Re-run:  .\install.ps1 -AdminService" -ForegroundColor Yellow
+            }
+            exit 1
         }
     }
 } else {
