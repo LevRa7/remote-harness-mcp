@@ -496,6 +496,8 @@ The wizard (`install-gui.cmd`) offers the same variant as its first, pre-selecte
 
 The other wizard variants stay available: quick (shared gateway), custom, remote SSH, the administrator service (`-AdminService`: machine-wide task, runs as SYSTEM) and the container install (`docker/`, `--container` in `install.sh`). On Linux and macOS the console installer does it with `./install.sh --mode=funnel` (Termux is the exception: Android has no `tailscaled`, so the URL stays local).
 
+Opening the MCP link in a browser does not start a stream: the node recognises a browser (`Sec-Fetch-Dest: document` / `Accept: text/html`) and returns a connection card with both endpoints, the token and the steps for Gemini, ChatGPT and Claude. An MCP client sends `Accept: text/event-stream` and gets its stream exactly as before.
+
 The authorization prompt appears **during installation**, right after the client is installed and before the node starts: the installer runs `tailscale up`, prints the `https://login.tailscale.com/a/...` link (the browser opens on its own) and waits up to five minutes for the machine to be approved.
 
 ---
