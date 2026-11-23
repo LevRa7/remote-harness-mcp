@@ -86,7 +86,7 @@ h2 { font-size: 17px; margin: 28px 0 8px; }
 .muted { color: #98a2b3; font-size: 14px; }
 .card { background: #171a21; border: 1px solid #262b36; border-radius: 10px; padding: 16px; margin: 12px 0; }
 code, input { font-family: ui-monospace, Consolas, monospace; font-size: 13px; }
-input { width: 100%; padding: 9px 10px; border-radius: 8px; border: 1px solid #2c3240;
+input { width: 100%; box-sizing: border-box; padding: 9px 10px; border-radius: 8px; border: 1px solid #2c3240;
         background: #0d1016; color: #e7e9ee; }
 button { margin-top: 8px; padding: 8px 14px; border-radius: 8px; border: 1px solid #2c3240;
          background: #1f2530; color: #e7e9ee; cursor: pointer; }
