@@ -140,3 +140,16 @@ def test_funnel_is_the_default_mode_on_every_desktop_platform():
     assert 'if [ "$IS_TERMUX" = true ]; then' in shell, (
         "Termux has no tailscaled: a phone must keep the gateway tunnel"
     )
+
+
+def test_standalone_does_not_require_a_gateway_domain():
+    text = _text("install.ps1")
+    assert "$DomainMissing = $false" in text, (
+        "Funnel/standalone never talks to a gateway, so a missing domain is not fatal"
+    )
+    shell = _text("install.sh")
+    # The default is applied BEFORE the domain gate, otherwise a fresh machine
+    # stops with "no gateway domain" on a mode that does not need one.
+    assert 'if [ -z "$MODE" ] && { [ "$QUICK" = true ] || [ ! -t 0 ]; }' in shell, (
+        "a non-interactive run must pick a mode before the gateway checks"
+    )

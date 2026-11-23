@@ -832,6 +832,19 @@ if [ "$MODE" = "funnel" ]; then
     FUNNEL=true
 fi
 
+# Non-interactive runs (piped, --quick, CI) take the default here, BEFORE the
+# domain gate: Funnel needs no domain, and the gate runs long before the menu.
+# The interactive menu only runs when there is a TTY and no --quick.
+if [ -z "$MODE" ] && { [ "$QUICK" = true ] || [ ! -t 0 ]; }; then
+    if [ "$IS_TERMUX" = true ]; then
+        MODE="tunnel"
+        QUICK=true
+    else
+        MODE="standalone"
+        FUNNEL=true
+    fi
+fi
+
 # Inside a container there is no systemd user session and no logon, so the default
 # autostart branch cannot work there. Detect the usual markers and pick the
 # container branch, so a plain "bash install.sh" in a Dockerfile also produces a

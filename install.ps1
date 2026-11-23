@@ -604,6 +604,11 @@ if (-not $ResolvedDomain -and $PublishedDomain -ne $DomainPlaceholder) {
 if (-not $ResolvedDomain) { $ResolvedDomain = Get-NormalisedHost (Get-ModuleDefaultDomain) }
 
 $DomainMissing = [string]::IsNullOrWhiteSpace($ResolvedDomain) -or $ResolvedDomain -eq $DomainPlaceholder
+if ($Mode -eq "standalone") {
+    # A standalone node publishes through Funnel or stays local: it never talks to
+    # a gateway, so a missing gateway domain is not an error for it.
+    $DomainMissing = $false
+}
 if ($DomainMissing) {
     if ($Lang -eq "ru") {
         Write-Host ""
