@@ -103,3 +103,26 @@ def test_shell_installer_writes_the_allowlist_and_starts_funnel():
 def test_shell_installer_says_termux_has_no_funnel():
     text = _text("install.sh")
     assert "Termux has no tailscaled" in text
+
+def test_windows_installer_restarts_a_stale_node_and_waits_for_health():
+    text = _text("install.ps1")
+    assert "function Stop-StandaloneNode" in text, (
+        "an old node on the port answers with its own environment and returns 403"
+    )
+    assert "function Wait-StandaloneNode" in text
+    assert "Stop-StandaloneNode -Port $Port" in text
+
+
+def test_windows_autostart_needs_no_elevation():
+    text = _text("install.ps1")
+    assert "function Register-StandaloneStartup" in text
+    assert "rhm-node.vbs" in text
+    assert "[System.IO.File]::WriteAllLines" in text, (
+        "Set-Content joined the launcher lines into one broken VBScript statement"
+    )
+
+
+def test_windows_installer_keeps_the_existing_token():
+    text = _text("install.ps1")
+    assert "a reinstall must not silently" in text
+    assert "MESH_TOKEN=(.+)$" in text

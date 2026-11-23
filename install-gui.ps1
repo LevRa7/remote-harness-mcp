@@ -872,7 +872,6 @@ function Build-WelcomePage {
 function Build-ModePage {
     $script:Content.Controls.Add((New-Label -Text (Get-UiText -Key 'mode_prompt') -X 16 -Y 12 -W 760 -H 24))
 
-    $group = New-GroupBox -Text (Get-UiText -Key 'page_mode_title') -X 16 -Y 44 -W 760 -H 220
     # Funnel first and selected by default: a public URL without a server and
     # without a domain is the shortest path from zero to a working connector.
     $modes = @(
@@ -881,6 +880,11 @@ function Build-ModePage {
         @{ Id = 'custom'; Title = 'mode_custom_title'; Desc = 'mode_custom_desc' },
         @{ Id = 'ssh';    Title = 'mode_ssh_title';    Desc = 'mode_ssh_desc' }
     )
+    # The box must grow with the list: a fixed height cut the last variant in
+    # half and its radio was still clickable only in the visible strip.
+    $modeRowHeight = 62
+    $groupHeight = 26 + ($modes.Count * $modeRowHeight) + 8
+    $group = New-GroupBox -Text (Get-UiText -Key 'page_mode_title') -X 16 -Y 44 -W 760 -H $groupHeight
     $y = 26
     foreach ($mode in $modes) {
         $radio = New-Object System.Windows.Forms.RadioButton
@@ -900,7 +904,7 @@ function Build-ModePage {
         })
         $group.Controls.Add($radio)
         $group.Controls.Add((New-Label -Text (Get-UiText -Key $mode.Desc) -X 36 -Y ($y + 22) -W 700 -H 20 -Dim))
-        $y += 62
+        $y += $modeRowHeight
     }
     $script:Content.Controls.Add($group)
 }
@@ -1029,14 +1033,24 @@ function Build-ResultPage {
 
     $url = $script:Install.Url
 
-    $urlGroup = New-GroupBox -Text (Get-UiText -Key 'res_url_group') -X 16 -Y 42 -W 760 -H 96
+    # 116, not 96: the mode-specific note sits at Y=74 and needs its own room,
+    # otherwise it is drawn across the group border.
+    $urlGroup = New-GroupBox -Text (Get-UiText -Key 'res_url_group') -X 16 -Y 42 -W 760 -H 116
     $urlBox = New-Object System.Windows.Forms.TextBox
     $urlBox.Location = New-Object System.Drawing.Point(14, 26)
     $urlBox.Size = New-Object System.Drawing.Size(600, 23)
     $urlBox.ReadOnly = $true
     $urlBox.BackColor = [System.Drawing.Color]::White
     $urlBox.Font = New-Object System.Drawing.Font('Consolas', 9)
-    if ($url) { $urlBox.Text = $url } else { $urlBox.Text = Get-UiText -Key 'res_url_missing' }
+    if ($url) {
+        $urlBox.Text = $url
+    } elseif ($script:Mode -eq 'funnel') {
+        # Funnel has one specific failure shape; the generic "URL could not be
+        # determined" would hide it behind text about a gateway domain.
+        $urlBox.Text = Get-UiText -Key 'res_url_missing_funnel'
+    } else {
+        $urlBox.Text = Get-UiText -Key 'res_url_missing'
+    }
     $urlGroup.Controls.Add($urlBox)
 
     $copy = New-Object System.Windows.Forms.Button
@@ -1072,7 +1086,7 @@ function Build-ResultPage {
     }
     $script:Content.Controls.Add($urlGroup)
 
-    $stepsGroup = New-GroupBox -Text (Get-UiText -Key 'res_steps_title') -X 16 -Y 146 -W 760 -H 126
+    $stepsGroup = New-GroupBox -Text (Get-UiText -Key 'res_steps_title') -X 16 -Y 164 -W 760 -H 126
     $stepsGroup.Controls.Add((New-Label -Text (Get-UiText -Key 'res_step1_prefix') -X 16 -Y 24 -W 250 -H 20))
 
     # A real link, not a label: clicking it opens the page, and the button beside
@@ -1110,11 +1124,12 @@ function Build-ResultPage {
     $script:Content.Controls.Add($stepsGroup)
 
     if ($failed) {
-        $hint = New-Label -Text (Get-UiText -Key 'res_fail_hint') -X 20 -Y 278 -W 752 -H 40
+        $hintKey = if ($script:Mode -eq 'funnel') { 'res_fail_hint_funnel' } else { 'res_fail_hint' }
+        $hint = New-Label -Text (Get-UiText -Key $hintKey) -X 20 -Y 296 -W 752 -H 40
         $hint.ForeColor = [System.Drawing.Color]::FromArgb(176, 96, 0)
         $script:Content.Controls.Add($hint)
     } else {
-        $configGroup = New-GroupBox -Text (Get-UiText -Key 'res_config_group') -X 16 -Y 278 -W 760 -H 110
+        $configGroup = New-GroupBox -Text (Get-UiText -Key 'res_config_group') -X 16 -Y 296 -W 760 -H 110
         $rows = @()
         if ($script:Mode -eq 'ssh') {
             $rows = @(@((Get-UiText -Key 'res_config_file'), '~/remote-harness-mcp (remote)'))
@@ -1759,6 +1774,19 @@ function Invoke-SelfTest {
                     if ($child.Right -gt $control.ClientSize.Width) {
                         $overflow += ("{0}/page{1}: {2} right={3} > {4}" -f `
                             $code, $index, $child.GetType().Name, $child.Right, $control.ClientSize.Width)
+                    }
+                    # A group box that is shorter than its rows hides the last option
+                    # behind the border: the mode list shipped with its fourth radio
+                    # cut in half. ClientSize excludes the caption, DisplayRectangle
+                    # is the area a child is actually drawn in.
+                    if ($control -is [System.Windows.Forms.GroupBox]) {
+                        $inner = $control.DisplayRectangle
+                        # 16 px of tolerance: a few pages deliberately let a box run
+                        # slightly past the frame, while a hidden option is ~40 px out.
+                        if ($child.Bottom -gt ($inner.Height + 16)) {
+                            $overflow += ("{0}/page{1}: {2} bottom={3} > group {4}" -f `
+                                $code, $index, $child.GetType().Name, $child.Bottom, $inner.Height)
+                        }
                     }
                     $walk.Push($child)
                 }

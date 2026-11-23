@@ -1053,6 +1053,59 @@ function Show-FunnelAclHint {
     }
 }
 
+function Stop-StandaloneNode {
+    param([int]$Port)
+    # A node left by an earlier install keeps the port and answers with ITS
+    # environment: the new run would print a URL while the old process (without
+    # the Funnel hostname in MESH_ALLOWED_HOSTS) returns 403. Kill only ours.
+    try {
+        $listeners = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
+        foreach ($listener in @($listeners)) {
+            $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$($listener.OwningProcess)" -ErrorAction SilentlyContinue
+            if ($proc -and $proc.CommandLine -and $proc.CommandLine -like "*core.server*") {
+                Stop-Process -Id $listener.OwningProcess -Force -ErrorAction SilentlyContinue
+            }
+        }
+        Start-Sleep -Milliseconds 600
+    } catch { }
+}
+
+function Wait-StandaloneNode {
+    param([int]$Port, [int]$TimeoutSec = 20)
+    # Starting a process is not the same as a listening server: without this the
+    # installer can print a URL for a node that died on a busy port.
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        try {
+            $probe = Invoke-WebRequest -Uri "http://127.0.0.1:$Port/health" -TimeoutSec 2 -UseBasicParsing
+            if ($probe.StatusCode -eq 200) { return $true }
+        } catch { }
+        Start-Sleep -Milliseconds 500
+    }
+    return $false
+}
+
+function Register-StandaloneStartup {
+    param([string]$Python, [int]$Port, [string]$WorkingDirectory)
+    # A per-user logon entry needs no elevation, while Register-ScheduledTask does:
+    # on a normal account it fails with "Access is denied" and leaves no autostart.
+    # The quoting copies the agent launcher this project already ships: cmd /c with
+    # an escaped quoted path, output appended to a log so a silent failure is not silent.
+    $startup = [Environment]::GetFolderPath("Startup")
+    if (-not $startup) { return $false }
+    $log = Join-Path (Join-Path $env:USERPROFILE ".config\remote-harness-mcp") "standalone.log"
+    $run = 'WshShell.Run "cmd /c """"' + $Python + '"" -u -m core.server --host 127.0.0.1 --port=' + $Port + ' >> """"' + $log + '"""" 2>&1""", 0, False'
+    $lines = @(
+        'Set WshShell = CreateObject("WScript.Shell")',
+        ('WshShell.CurrentDirectory = "' + $WorkingDirectory + '"'),
+        $run
+    )
+    try {
+        [System.IO.File]::WriteAllLines((Join-Path $startup "rhm-node.vbs"), [string[]]$lines, (New-Object System.Text.UTF8Encoding($false)))
+        return $true
+    } catch { return $false }
+}
+
 function Register-StandaloneNodeTask {
     param([string]$Python, [int]$Port, [string]$WorkingDirectory)
     # pythonw keeps the logon task windowless; the token is NOT on this command
@@ -1086,13 +1139,26 @@ if ($Mode -eq "standalone") {
     # user-only env file, and pass it explicitly. The URL carries it only because
     # Gemini's connector field cannot set an Authorization header; the server
     # accepts a query token only from a loopback client.
-    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
-    $tokenBytes = New-Object byte[] 32
-    $rng.GetBytes($tokenBytes)
-    $rng.Dispose()
-    $StandaloneToken = -join ($tokenBytes | ForEach-Object { $_.ToString('x2') })
     $StandaloneEnv = Join-Path $ConfigDir 'standalone.env'
     New-Item -ItemType Directory -Force -Path $ConfigDir | Out-Null
+    # Reuse the token an earlier install wrote: a reinstall must not silently
+    # invalidate the connector URL the operator already pasted into Gemini.
+    $StandaloneToken = ""
+    if ($Token) {
+        $StandaloneToken = $Token
+    } elseif (Test-Path -LiteralPath $StandaloneEnv) {
+        try {
+            $existingLine = Select-String -LiteralPath $StandaloneEnv -Pattern '^MESH_TOKEN=(.+)$' | Select-Object -First 1
+            if ($existingLine) { $StandaloneToken = $existingLine.Matches[0].Groups[1].Value.Trim() }
+        } catch { }
+    }
+    if (-not $StandaloneToken) {
+        $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+        $tokenBytes = New-Object byte[] 32
+        $rng.GetBytes($tokenBytes)
+        $rng.Dispose()
+        $StandaloneToken = -join ($tokenBytes | ForEach-Object { $_.ToString('x2') })
+    }
 
     # Resolve the Funnel hostname BEFORE the env file is written: the allowlist
     # entry, the Funnel target and the printed link must name one host.
@@ -1109,8 +1175,10 @@ if ($Mode -eq "standalone") {
             # This is the authorization prompt: the browser opens here, right
             # after installation and before the node starts, so the operator
             # approves the machine once and the public URL exists immediately.
-            if ($Lang -eq "ru") { Write-Host "[2/4] Вход в Tailscale (сейчас откроется браузер)..." -ForegroundColor Yellow }
-            else { Write-Host "[2/4] Signing in to Tailscale (a browser window will open)..." -ForegroundColor Yellow }
+            if ((Get-TailscaleState -Tailscale $TsExe) -ne "Running") {
+                if ($Lang -eq "ru") { Write-Host "[2/4] Вход в Tailscale (сейчас откроется браузер)..." -ForegroundColor Yellow }
+                else { Write-Host "[2/4] Signing in to Tailscale (a browser window will open)..." -ForegroundColor Yellow }
+            }
             if (Connect-Tailscale -Tailscale $TsExe) {
                 $FunnelName = Get-TailnetName -Tailscale $TsExe
             } elseif ($Lang -eq "ru") {
@@ -1131,12 +1199,27 @@ if ($Mode -eq "standalone") {
     if ($FunnelName) { $envLines += ("MESH_ALLOWED_HOSTS=" + $FunnelName) }
     Set-Content -LiteralPath $StandaloneEnv -Value $envLines -Encoding ASCII
     try {
-        icacls $StandaloneEnv /inheritance:r /grant:r ("$env:USERNAME:F") | Out-Null
+        icacls $StandaloneEnv /inheritance:r /grant:r ("$($env:USERNAME):F") | Out-Null
     } catch { }
     # No --token on purpose: the node reads standalone.env itself, so the secret
     # stays out of the process list and out of the scheduled task.
+    Stop-StandaloneNode -Port $Port
     Start-Process $pyExeOnly -ArgumentList "-u -m core.server --host 127.0.0.1 --port=$Port" -WorkingDirectory $ScriptDir -WindowStyle Hidden
-    $nodeTaskOk = Register-StandaloneNodeTask -Python $pyExeOnly -Port $Port -WorkingDirectory $ScriptDir
+    $nodeUp = Wait-StandaloneNode -Port $Port
+    if (-not $nodeUp) {
+        if ($Lang -eq "ru") {
+            Write-Host "[!] Узел не отвечает на http://127.0.0.1:$Port/health - установка остановлена." -ForegroundColor Red
+            Write-Host "    Порт занят другим процессом или Python завершился с ошибкой." -ForegroundColor Yellow
+        } else {
+            Write-Host "[!] The node does not answer on http://127.0.0.1:$Port/health - stopping." -ForegroundColor Red
+            Write-Host "    The port is taken by another process or Python exited with an error." -ForegroundColor Yellow
+        }
+        exit 1
+    }
+    # The Startup entry is the reliable one: it needs no elevation. A scheduled
+    # task is only a bonus (restart on failure) and is attempted afterwards.
+    $nodeTaskOk = Register-StandaloneStartup -Python $pyExeOnly -Port $Port -WorkingDirectory $ScriptDir
+    try { Register-StandaloneNodeTask -Python $pyExeOnly -Port $Port -WorkingDirectory $ScriptDir | Out-Null } catch { }
 
     if ($FunnelName) {
         # Tailscale terminates TLS and proxies to loopback; the node never sees a
@@ -1195,7 +1278,7 @@ if ($Lang -eq "ru") {
         Write-Host "    Публичная ссылка не создана: запустите с -Funnel и установленным Tailscale." -ForegroundColor DarkGray
     }
     if ($nodeTaskOk) {
-        Write-Host "    Автозапуск узла: задача RemoteHarnessMCPNode (при входе в систему)." -ForegroundColor DarkGray
+        Write-Host "    Автозапуск узла: при входе в систему (rhm-node.vbs в папке Автозагрузки)." -ForegroundColor DarkGray
     } else {
         Write-Host "    [!] Не удалось зарегистрировать автозапуск: узел поднимется только до перезагрузки." -ForegroundColor Yellow
     }
@@ -1216,7 +1299,7 @@ if ($Lang -eq "ru") {
         Write-Host "    No public URL: rerun with -Funnel and Tailscale installed." -ForegroundColor DarkGray
     }
     if ($nodeTaskOk) {
-        Write-Host "    Node autostart: scheduled task RemoteHarnessMCPNode (at logon)." -ForegroundColor DarkGray
+        Write-Host "    Node autostart: at logon (rhm-node.vbs in the Startup folder)." -ForegroundColor DarkGray
     } else {
         Write-Host "    [!] Could not register autostart: the node lives until the next reboot." -ForegroundColor Yellow
     }
