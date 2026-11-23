@@ -982,7 +982,7 @@ if [ ! -f "$SCRIPT_DIR/core/agent.py" ]; then
     for f in core/__init__.py core/agent.py core/agent_harness.py core/code_cache.py \
              core/control.py core/device.py core/domain.py core/goal.py core/hooks.py core/mcp_tools.py core/menu.py core/paths.py \
              core/policies.py core/policy.py core/rekey.py \
-             core/redact.py core/rescue.py core/sandbox.py core/schedule.py core/schemas.py core/server.py core/settings.py core/subagents.py core/termux.py \
+             core/redact.py core/rescue.py core/sandbox.py core/schedule.py core/schemas.py core/server.py core/settings.py core/subagents.py core/termux.py core/landing.py \
              core/triggers.py core/updater.py core/usage.py core/version.py core/vitals.py core/web_share.py core/web_settings.py \
              core/platforms/__init__.py core/platforms/base.py core/platforms/common.py \
              core/platforms/encoding.py core/platforms/png.py core/platforms/shell.py \

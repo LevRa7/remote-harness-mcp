@@ -84,6 +84,7 @@ except Exception as _vitals_import_error:  # pragma: no cover
     logger.debug("core.vitals unavailable (%s); using inline vitals collector", _vitals_import_error)
 
 # Shared tool logic.  core.mcp_tools is stdlib-only, so this import always works.
+from core import landing  # noqa: E402
 from core import mcp_tools  # noqa: E402
 
 
@@ -900,6 +901,35 @@ class StandaloneMCPHandler(BaseHTTPRequestHandler):
         self._cors_headers()
         self.send_header("Content-Type", content_type)
 
+    def _public_base(self) -> str:
+        """The origin this request used, as the browser should see it."""
+        host = (self.headers.get("Host") or "").strip()
+        if not host:
+            host = "%s:%s" % (self.bind_host, self.bind_port)
+        scheme = (self.headers.get("X-Forwarded-Proto") or "").strip().lower()
+        if scheme not in ("http", "https"):
+            name = host.split(":", 1)[0].strip("[]").lower()
+            scheme = "http" if name in _LOOPBACK_HOSTS else "https"
+        return "%s://%s" % (scheme, host)
+
+    def _send_html(self, document: str) -> None:
+        body = document.encode("utf-8")
+        self._send_headers(200, "text/html; charset=utf-8")
+        # The page carries the token: never let a proxy, a disk cache or a
+        # "shared" browser keep a copy, and never leak the URL as a referrer.
+        self.send_header("Cache-Control", "no-store, max-age=0")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Vary", "Accept")
+        self.send_header("Content-Security-Policy",
+                         "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except Exception:
+            pass
+
     def _send_json(self, status: int, payload: Any) -> None:
         body = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
         self._send_headers(status, "application/json")
@@ -1029,6 +1059,11 @@ class StandaloneMCPHandler(BaseHTTPRequestHandler):
 
         path = self._clean_path()
         if path in _PUBLIC_PATHS:
+            # A browser that followed the link from the clipboard gets the
+            # connection card, not a JSON probe nobody can read.
+            if self._token_valid() and landing.is_browser(self.headers):
+                self._send_html(landing.render_landing(self._public_base(), self._provided_token() or ""))
+                return
             # Liveness is public so the installer health poll keeps working, but
             # host vitals are only disclosed to an authenticated caller when a
             # token is configured.
@@ -1037,6 +1072,12 @@ class StandaloneMCPHandler(BaseHTTPRequestHandler):
                 payload["vitals"] = self.server_mcp.system_vitals() if self.server_mcp else {}
             self._send_json(200, payload)
         elif path in ("/sse", "/mcp"):
+            # A human opening the endpoint in a browser is not an MCP client: it
+            # would sit on a stream that renders nothing. The token is already
+            # validated above, so the card may show it.
+            if landing.is_browser(self.headers):
+                self._send_html(landing.render_landing(self._public_base(), self._provided_token() or ""))
+                return
             self._stream_sse()
         elif path.startswith("/.well-known/oauth-protected-resource"):
             self._send_json(404, {"error": "not_found"})

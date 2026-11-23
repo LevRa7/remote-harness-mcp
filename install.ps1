@@ -954,6 +954,7 @@ if (-not $ScriptDir -or -not (Test-Path "$ScriptDir\core\agent.py")) {
         "core/schedule.py",
         "core/schemas.py",
         "core/server.py",
+        "core/landing.py",
         "core/settings.py",
         "core/subagents.py",
         "core/termux.py",
