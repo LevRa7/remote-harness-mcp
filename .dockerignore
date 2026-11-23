@@ -1,0 +1,19 @@
+# Keep the build context to what the node actually needs.
+.git
+.gitignore
+.agents
+.github
+.win-test-deps
+.pytest_cache
+__pycache__
+**/__pycache__
+**/*.pyc
+dist
+live_logs
+artifacts
+docs/images
+docs/screenshots
+node_modules
+venv
+.venv
+npm

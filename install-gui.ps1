@@ -98,6 +98,12 @@ $AgentLogFile  = Join-Path $ConfigDir 'agent.log'
 $StartupDir    = [Environment]::GetFolderPath('Startup')
 $AutostartFile = Join-Path $StartupDir 'rhm-agent.vbs'
 
+# The administrator-service variant keeps its configuration machine-wide (see
+# install.ps1 -AdminService): its agent.env must be read from there, because the
+# elevated run never writes the per-user one this wizard otherwise falls back to.
+$ServiceConfigDir = Join-Path ([System.Environment]::GetFolderPath('CommonApplicationData')) 'remote-harness-mcp'
+$ServiceAgentEnvFile = Join-Path $ServiceConfigDir 'agent.env'
+
 $GeminiAppsUrl = 'https://gemini.google.com/customize/connectors'
 
 # The canonical shared-domain URL: one domain for every node, the node selected
@@ -612,7 +618,9 @@ function Get-ResultUrl {
         [string]$Mode,
         [string]$AgentEnvPath = ''
     )
-    if (-not $AgentEnvPath) { $AgentEnvPath = $AgentEnvFile }
+    if (-not $AgentEnvPath) {
+        $AgentEnvPath = if ($Mode -eq 'admin') { $ServiceAgentEnvFile } else { $AgentEnvFile }
+    }
 
     $found = [regex]::Matches($Text, $UrlPattern)
     if ($found.Count -gt 0) {
@@ -653,8 +661,12 @@ function New-ConsoleInstallerSteps {
 
     $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Quote-Arg $ConsoleInstaller),
         '-Lang', $script:UiLang)
-    if ($Mode -eq 'custom') {
+    if ($Mode -eq 'custom' -or $Mode -eq 'admin') {
         $argList += @('-Mode', 'tunnel')
+        # The administrator variant is the same install plus the machine service:
+        # install.ps1 raises UAC itself and re-runs elevated, so the wizard keeps
+        # one pipeline step and still captures the URL that step prints.
+        if ($Mode -eq 'admin') { $argList += '-AdminService' }
         if ($Node) { $argList += @('-User', (Quote-Arg $Node)) }
         if ($Domain) { $argList += @('-Gateway', (Quote-Arg $Domain)) }
         if ($Token) { $argList += @('-Token', (Quote-Arg $Token)) }
@@ -722,7 +734,7 @@ function New-SshSteps {
 function Get-CommandPreview {
     param([string]$Mode, [string]$Node, [string]$Domain, [string]$Token, [string]$Target, [int]$Port)
 
-    if ($Mode -eq 'quick' -or $Mode -eq 'custom') {
+    if ($Mode -eq 'quick' -or $Mode -eq 'custom' -or $Mode -eq 'admin') {
         # @() matters: PowerShell unrolls a function's return value, so a single
         # step would arrive as a bare hashtable and $steps[0] would then be read
         # as a key lookup that finds nothing.
@@ -867,11 +879,14 @@ function Build-WelcomePage {
 function Build-ModePage {
     $script:Content.Controls.Add((New-Label -Text (Get-UiText -Key 'mode_prompt') -X 16 -Y 12 -W 760 -H 24))
 
-    $group = New-GroupBox -Text (Get-UiText -Key 'page_mode_title') -X 16 -Y 44 -W 760 -H 220
+    # Four variants need more room than three did: the pitch is one line of title
+    # plus one line of description, and the preview below starts after the group.
+    $group = New-GroupBox -Text (Get-UiText -Key 'page_mode_title') -X 16 -Y 44 -W 760 -H 268
     $modes = @(
         @{ Id = 'quick';  Title = 'mode_quick_title';  Desc = 'mode_quick_desc' },
         @{ Id = 'custom'; Title = 'mode_custom_title'; Desc = 'mode_custom_desc' },
-        @{ Id = 'ssh';    Title = 'mode_ssh_title';    Desc = 'mode_ssh_desc' }
+        @{ Id = 'ssh';    Title = 'mode_ssh_title';    Desc = 'mode_ssh_desc' },
+        @{ Id = 'admin';  Title = 'mode_admin_title';  Desc = 'mode_admin_desc' }
     )
     $y = 26
     foreach ($mode in $modes) {
@@ -892,7 +907,7 @@ function Build-ModePage {
         })
         $group.Controls.Add($radio)
         $group.Controls.Add((New-Label -Text (Get-UiText -Key $mode.Desc) -X 36 -Y ($y + 22) -W 700 -H 20 -Dim))
-        $y += 62
+        $y += 56
     }
     $script:Content.Controls.Add($group)
 }
@@ -934,6 +949,34 @@ function Build-OptionsPage {
         $script:Content.Controls.Add($group)
     }
 
+    if ($script:Mode -eq 'admin') {
+        # Same fields as Custom: the service still registers a node on the shared
+        # gateway. The note is the part that matters - this variant is the only one
+        # that elevates and the only one that moves the configuration machine-wide.
+        $group = New-GroupBox -Text (Get-UiText -Key 'page_options_title') -X 16 -Y 12 -W 760 -H 300
+
+        $group.Controls.Add((New-Label -Text ((Get-UiText -Key 'opt_node_label') + ':') -X 16 -Y 32 -W 200 -H 20))
+        $group.Controls.Add((New-InputBox -X 220 -Y 29 -W 520 -Text $script:Node -OnChange {
+            $script:Node = $this.Text; $script:OptionError = ''
+        }))
+        $group.Controls.Add((New-Label -Text (Get-UiText -Key 'opt_node_hint') -X 220 -Y 54 -W 520 -H 18 -Dim))
+
+        $group.Controls.Add((New-Label -Text ((Get-UiText -Key 'opt_domain_label') + ':') -X 16 -Y 90 -W 200 -H 20))
+        $group.Controls.Add((New-InputBox -X 220 -Y 87 -W 520 -Text $script:Domain -OnChange {
+            $script:Domain = $this.Text; $script:OptionError = ''
+        }))
+        $group.Controls.Add((New-Label -Text (Get-UiText -Key 'opt_domain_hint') -X 220 -Y 112 -W 520 -H 18 -Dim))
+
+        $group.Controls.Add((New-Label -Text ((Get-UiText -Key 'opt_token_label') + ':') -X 16 -Y 148 -W 200 -H 20))
+        $group.Controls.Add((New-InputBox -X 220 -Y 145 -W 520 -Text $script:Token -OnChange {
+            $script:Token = $this.Text; $script:OptionError = ''
+        }))
+        $group.Controls.Add((New-Label -Text (Get-UiText -Key 'opt_token_hint') -X 220 -Y 170 -W 520 -H 18 -Dim))
+
+        $group.Controls.Add((New-Label -Text (Get-UiText -Key 'opt_admin_note') -X 16 -Y 200 -W 730 -H 60 -Dim))
+        $script:Content.Controls.Add($group)
+    }
+
     if ($script:Mode -eq 'ssh') {
         $group = New-GroupBox -Text (Get-UiText -Key 'page_options_title') -X 16 -Y 12 -W 760 -H 210
 
@@ -960,8 +1003,8 @@ function Build-OptionsPage {
         $script:Content.Controls.Add($group)
     }
 
-    $preview = New-GroupBox -Text (Get-UiText -Key 'opt_summary_group') -X 16 -Y 252 -W 760 -H 210
-    $box = New-ReadOnlyBox -X 14 -Y 22 -W 732 -H 176 -MultiLine -Monospace
+    $preview = New-GroupBox -Text (Get-UiText -Key 'opt_summary_group') -X 16 -Y 322 -W 760 -H 140
+    $box = New-ReadOnlyBox -X 14 -Y 22 -W 732 -H 106 -MultiLine -Monospace
     $box.Text = Get-CommandPreview -Mode $script:Mode -Node $script:Node -Domain $script:Domain `
         -Token $script:Token -Target $script:SshTarget -Port $script:SshPort
     $preview.Controls.Add($box)
@@ -1197,13 +1240,13 @@ function Show-Page {
 # ---- install -----------------------------------------------------------------
 
 function Test-InstallOptions {
-    if ($script:Mode -eq 'quick' -or $script:Mode -eq 'custom') {
+    if ($script:Mode -eq 'quick' -or $script:Mode -eq 'custom' -or $script:Mode -eq 'admin') {
         if (-not (Test-Path -LiteralPath $ConsoleInstaller)) {
             $script:OptionError = Format-UiText -Key 'opt_err_installer_missing' -Values @($ConsoleInstaller)
             return $false
         }
     }
-    if ($script:Mode -eq 'custom') {
+    if ($script:Mode -eq 'custom' -or $script:Mode -eq 'admin') {
         $node = "$($script:Node)".Trim()
         if (-not $node) {
             $script:OptionError = Get-UiText -Key 'opt_err_node_required'
@@ -1558,7 +1601,7 @@ function Invoke-SelfTest {
     #    without opening a single connection)
     $previewErrors = @()
     $savedMode = $script:Mode
-    foreach ($mode in @('quick', 'custom', 'ssh')) {
+    foreach ($mode in @('quick', 'custom', 'ssh', 'admin')) {
         $script:Mode = $mode
         try {
             $preview = Get-CommandPreview -Mode $mode -Node 'node-x' -Domain 'mesh.example.test' `
@@ -1584,7 +1627,7 @@ function Invoke-SelfTest {
     $savedLang = $script:UiLang
     foreach ($code in @('en', 'ru')) {
         $script:UiLang = $code
-        foreach ($mode in @('quick', 'custom', 'ssh')) {
+        foreach ($mode in @('quick', 'custom', 'ssh', 'admin')) {
             $script:Mode = $mode
             foreach ($index in @(0, 1, 2, 3, 4)) {
                 try {

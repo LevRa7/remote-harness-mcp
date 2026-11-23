@@ -21,6 +21,22 @@ SSH_PORT="22"
 LANG_CHOICE=""
 EXPLICIT_LANG=""
 
+# Container installation.
+#
+# A container has no systemd user session, no logon trigger and no tray: an
+# "autostart unit" there is a unit systemd will never load, and the nohup fallback
+# would leave the agent as a child of the installer shell. --container therefore
+# writes the node configuration and either hands the agent to the foreground
+# (--foreground, what docker/entrypoint.sh does) or prints the exact command that
+# starts it, so the image's own supervisor owns the process.
+#
+# Detection is informational: the explicit --container flag also covers a host
+# reached through docker exec or a CI runner, where /.dockerenv does not exist.
+CONTAINER_MODE=false
+CONTAINER_DATA_DIR=""
+CONTAINER_DETECTED=false
+FOREGROUND=false
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
 [ -z "$SCRIPT_DIR" ] && SCRIPT_DIR="."
 
@@ -759,12 +775,34 @@ while [[ $# -gt 0 ]]; do
             GATEWAY="$DOMAIN"
             shift
             ;;
+        --container|--docker)
+            CONTAINER_MODE=true
+            shift
+            ;;
+        --data-dir=*)
+            # Where agent.env and the node cache live inside the container. The
+            # docker-compose.yml mounts a volume here (/data), so a recreated
+            # container keeps the token it was registered with.
+            CONTAINER_DATA_DIR="${1#*=}"
+            shift
+            ;;
+        --foreground)
+            # Run the agent in this process after installing (image entrypoint).
+            FOREGROUND=true
+            CONTAINER_MODE=true
+            shift
+            ;;
         --dry-run)
             DRY_RUN=true
             shift
             ;;
         -h|--help)
             echo "Usage: $0 [--lang=en|ru] [-q|--quick] [--mode=tunnel|standalone|gateway] [--user=<node-name>] [--token=<token>] [--domain=<shared-domain>] [--port=<port>] [--ssh=user@host] [--dry-run]"
+            echo "       [--container|--docker] [--data-dir=<path>] [--foreground]"
+            echo ""
+            echo "Container installation (--container, or automatic inside Docker/LXC/podman):"
+            echo "  no systemd unit and no logon entry; --foreground runs the agent in this"
+            echo "  process, --data-dir=<path> keeps agent.env on a volume across recreation."
             echo ""
             echo "All nodes use ONE shared domain; the node is selected by ?user=<node-name>:"
             echo "  MCP URL: https://<shared-domain>/sse?user=<node-name>&token=<token>"
@@ -785,6 +823,42 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# Inside a container there is no systemd user session and no logon, so the default
+# autostart branch cannot work there. Detect the usual markers and pick the
+# container branch, so a plain "bash install.sh" in a Dockerfile also produces a
+# node that starts rather than a unit nobody loads.
+if [ -f /.dockerenv ] || grep -qaE 'docker|containerd|kubepods|libpod' /proc/1/cgroup 2>/dev/null; then
+    CONTAINER_DETECTED=true
+fi
+if [ "$CONTAINER_DETECTED" = true ]; then
+    CONTAINER_MODE=true
+fi
+if [ "$CONTAINER_MODE" = true ] && [ -z "$MODE" ]; then
+    MODE="tunnel"
+fi
+
+# A volume-mounted data directory wins over the per-user default: a container
+# rebuilt from the same image keeps the token it registered with.
+if [ -n "$CONTAINER_DATA_DIR" ]; then
+    CONFIG_DIR="$CONTAINER_DATA_DIR"
+    CONFIG_FILE="$CONFIG_DIR/agent.env"
+elif [ "$CONTAINER_MODE" = true ] && [ -d "/data" ] && [ -w "/data" ]; then
+    CONFIG_DIR="/data"
+    CONFIG_FILE="$CONFIG_DIR/agent.env"
+fi
+if [ "$CONTAINER_MODE" = true ]; then
+    mkdir -p "$CONFIG_DIR" 2>/dev/null || true
+    # The domain file follows the node configuration: core/domain.py resolves it
+    # through core/paths.py, which honours MESH_CONFIG_DIR. Leaving DEFAULT_DOMAIN_FILE
+    # in "~/.config" would make the installer record the domain somewhere the
+    # containerised agent never reads, and share links would silently fall back to
+    # the built-in default domain.
+    if [ -z "${MESH_DOMAIN_FILE:-}" ]; then
+        DEFAULT_DOMAIN_DIR="$CONFIG_DIR"
+        DEFAULT_DOMAIN_FILE="$CONFIG_DIR/domain.env"
+    fi
+fi
 
 # ------------------------------------------------------------------------------
 #  Resolve the shared domain, then fetch the node code from it.
@@ -1463,7 +1537,15 @@ if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Domain file: $DEFAULT_DOMAIN_FILE"
     else
         echo "[DRY-RUN] Domain file: $DEFAULT_DOMAIN_FILE"
-        echo "[DRY-RUN] Systemd service and dependencies check: OK"
+        if [ "$CONTAINER_MODE" = true ]; then
+            # A container has no systemd: reporting a unit here would be a lie the
+            # operator only discovers after the install.
+            echo "[DRY-RUN] Container mode: no systemd unit, no logon entry"
+            echo "[DRY-RUN] Container data dir: $CONFIG_DIR"
+            echo "[DRY-RUN] Foreground agent after install: $FOREGROUND"
+        else
+            echo "[DRY-RUN] Systemd service and dependencies check: OK"
+        fi
     fi
     if [ -z "$GATEWAY" ]; then
         echo "[DRY-RUN] Domain file value: not written (no domain configured)"
@@ -1665,7 +1747,17 @@ if [ "$MODE" = "standalone" ]; then
         echo "[2/3] Configuring autostart background service..."
     fi
 
-    if [ "$(uname -s)" = "Darwin" ]; then
+    if [ "$CONTAINER_MODE" = true ]; then
+        # No systemd inside a container: the standalone server is started by the
+        # image entrypoint (or by hand) instead of by a unit nothing loads.
+        if [ "$LANG_CHOICE" = "ru" ]; then
+            echo -e "${GREEN}[OK] Режим контейнера: systemd не используется.${RESET}"
+            echo -e "    Запуск локального сервера: ${CYAN}$PYTHON_BIN -m core.server --host 127.0.0.1 --port=$PORT${RESET}"
+        else
+            echo -e "${GREEN}[OK] Container mode: systemd is not used.${RESET}"
+            echo -e "    Start the local server with: ${CYAN}$PYTHON_BIN -m core.server --host 127.0.0.1 --port=$PORT${RESET}"
+        fi
+    elif [ "$(uname -s)" = "Darwin" ]; then
         LAUNCH_AGENTS="$HOME/Library/LaunchAgents"
         mkdir -p "$LAUNCH_AGENTS"
         PLIST_FILE="$LAUNCH_AGENTS/com.remoteharness.mcp.standalone.plist"
@@ -1740,6 +1832,16 @@ EOF
     else
         echo "[3/3] Verifying local endpoint..."
     fi
+    # In a container nothing is started in the background on purpose: with
+    # --foreground the server takes over this process at the end of the branch, so
+    # a health gate here would always time out and abort a working install.
+    if [ "$CONTAINER_MODE" = true ]; then
+        if [ "$LANG_CHOICE" = "ru" ]; then
+            echo -e "${YELLOW}[i] Режим контейнера: проверка локального эндпоинта пропущена (сервер запустится в этом процессе).${RESET}"
+        else
+            echo -e "${YELLOW}[i] Container mode: the local endpoint check is skipped (the server runs in this process).${RESET}"
+        fi
+    else
     HEALTH_URL="http://127.0.0.1:${PORT}/health"
     HEALTH_OK=false
     for _attempt in 1 2 3 4 5 6 7 8 9 10; do
@@ -1775,6 +1877,7 @@ EOF
             fi
         fi
         exit 1
+    fi
     fi
 
     MCP_LOCAL_URL="http://localhost:${PORT}/sse"
@@ -1836,6 +1939,11 @@ EOF
     fi
     if [ "$IS_TERMUX" = true ]; then
         print_termux_hints "rhm-standalone"
+    fi
+    if [ "$CONTAINER_MODE" = true ] && [ "$FOREGROUND" = true ]; then
+        # exec, not "&": the agent must be the container's foreground process so
+        # `docker stop` delivers SIGTERM to it instead of to a shell.
+        exec "$PYTHON_BIN" -u -m core.server --host 127.0.0.1 --port="$PORT"
     fi
     exit 0
 fi
@@ -1997,7 +2105,25 @@ else
     echo "[4/4] Configuring and starting background autostart service..."
 fi
 
-if [ "$(uname -s)" = "Darwin" ]; then
+if [ "$CONTAINER_MODE" = true ]; then
+    # The container is the supervisor. There is no systemd user session and no
+    # logon trigger, and a nohup child would die with the installer shell, so the
+    # configuration written above is all this branch has to do; the foreground
+    # exec at the end of this file (or the image entrypoint) starts the agent.
+    if [ "$LANG_CHOICE" = "ru" ]; then
+        echo -e "${GREEN}[OK] Режим контейнера: конфигурация готова, systemd не используется.${RESET}"
+        if [ "$FOREGROUND" != true ]; then
+            echo -e "    Запуск узла: ${CYAN}$PYTHON_BIN -u -m core.agent${RESET} (рабочий каталог $SCRIPT_DIR)"
+            echo -e "    В docker-compose это делает entrypoint; контейнер должен оставаться запущенным."
+        fi
+    else
+        echo -e "${GREEN}[OK] Container mode: configuration is ready, systemd is not used.${RESET}"
+        if [ "$FOREGROUND" != true ]; then
+            echo -e "    Start the node with: ${CYAN}$PYTHON_BIN -u -m core.agent${RESET} (from $SCRIPT_DIR)"
+            echo -e "    docker/entrypoint.sh does this; the container must stay running."
+        fi
+    fi
+elif [ "$(uname -s)" = "Darwin" ]; then
     LAUNCH_AGENTS="$HOME/Library/LaunchAgents"
     mkdir -p "$LAUNCH_AGENTS"
     PLIST_FILE="$LAUNCH_AGENTS/com.remoteharness.mcp.agent.plist"
@@ -2132,4 +2258,13 @@ fi
 # same in both modes; on a Linux/macOS/Windows node there is nothing to add.
 if [ "$IS_TERMUX" = true ]; then
     print_termux_hints "rhm-agent"
+fi
+
+# The container entrypoint: the URL box above is the only part of this output a
+# container user reads from `docker logs`, so it is printed before the agent takes
+# over the process. exec keeps the agent in the foreground, which is what lets
+# `docker stop` deliver SIGTERM to it instead of to a shell.
+if [ "$CONTAINER_MODE" = true ] && [ "$FOREGROUND" = true ]; then
+    echo -e "${GREEN}[OK] Container mode: starting the node agent in the foreground.${RESET}"
+    exec "$PYTHON_BIN" -u -m core.agent
 fi

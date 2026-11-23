@@ -1,0 +1,13 @@
+# Shell code stays LF in the repository AND in every checkout.
+#
+# docker build copies the working tree into the build context, so a Windows
+# checkout with core.autocrlf=true would hand bash a CRLF entrypoint, and the
+# container would fail with a shebang it cannot execute. install.sh is LF for
+# the same reason: it is run by bash on Linux, Git Bash and Termux alike.
+*.sh text eol=lf
+docker/* text eol=lf
+
+# PowerShell keeps the checkout's native decision (a BOM matters, the EOL does not),
+# and cmd/vbs launchers are happier with CRLF.
+*.vbs text eol=crlf
+*.cmd text eol=crlf
