@@ -65,3 +65,45 @@ def test_generated_token_is_reused_on_restart(tmp_path):
     first = server.ensure_auth_token("", path=str(target))
     second = server.ensure_auth_token("", path=str(target))
     assert first == second, "a service restart must not invalidate configured clients"
+
+# ---------------------------------------------------------------------------
+# TSF-01: public host allowlist for edge tunnels (Tailscale Funnel, Cloudflare)
+# ---------------------------------------------------------------------------
+
+def test_allowlisted_public_host_is_accepted(monkeypatch):
+    monkeypatch.setenv("MESH_ALLOWED_HOSTS", "node.tailnet.ts.net")
+    assert server.host_allowed("node.tailnet.ts.net", "127.0.0.1", 8096)
+    assert server.host_allowed("node.tailnet.ts.net:443", "127.0.0.1", 8096)
+    assert server.host_allowed("NODE.Tailnet.TS.net:443", "127.0.0.1", 8096)
+
+
+def test_allowlist_does_not_open_foreign_hosts(monkeypatch):
+    monkeypatch.setenv("MESH_ALLOWED_HOSTS", "node.tailnet.ts.net")
+    assert not server.host_allowed("evil.example", "127.0.0.1", 8096)
+    assert not server.host_allowed("node.tailnet.ts.net.evil.example", "127.0.0.1", 8096)
+    assert not server.host_allowed("other.tailnet.ts.net", "127.0.0.1", 8096)
+
+
+def test_allowlist_rejects_wildcards_ports_and_garbage(monkeypatch):
+    monkeypatch.setenv("MESH_ALLOWED_HOSTS", "*, *.ts.net, node.ts.net:443, , .")
+    assert server.allowed_public_hosts() == frozenset()
+    assert not server.host_allowed("anything.example", "127.0.0.1", 8096)
+
+
+def test_allowlist_parses_comma_separated_values(monkeypatch):
+    monkeypatch.setenv("MESH_ALLOWED_HOSTS", " a.ts.net , b.example.org ")
+    assert server.allowed_public_hosts() == frozenset({"a.ts.net", "b.example.org"})
+
+
+def test_public_origin_requires_https_and_the_allowlist(monkeypatch):
+    monkeypatch.setenv("MESH_ALLOWED_HOSTS", "node.tailnet.ts.net")
+    assert server.origin_allowed("https://node.tailnet.ts.net", "127.0.0.1", 8096)
+    assert server.origin_allowed("https://node.tailnet.ts.net:443", "127.0.0.1", 8096)
+    assert not server.origin_allowed("http://node.tailnet.ts.net", "127.0.0.1", 8096)
+    assert not server.origin_allowed("https://other.ts.net", "127.0.0.1", 8096)
+
+
+def test_allowlist_is_empty_without_the_variable(monkeypatch):
+    monkeypatch.delenv("MESH_ALLOWED_HOSTS", raising=False)
+    assert server.allowed_public_hosts() == frozenset()
+    assert not server.host_allowed("node.tailnet.ts.net", "127.0.0.1", 8096)

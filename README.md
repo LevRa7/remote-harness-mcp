@@ -480,6 +480,18 @@ The wizard does not offer it; use the console installer:
 
 That starts a local-only FastMCP server at `http://localhost:8096/sse`, generates a token (`%USERPROFILE%\.config\remote-harness-mcp\standalone.env`, user-only ACL) and puts a tokenized URL on the clipboard. The URL works only from this computer; do not publish it.
 
+#### Public URL without a server (Tailscale Funnel)
+
+No public IP, no port forwarding and no gateway: the node stays on loopback and `tailscale funnel` terminates TLS on the tailnet name and proxies to `127.0.0.1`.
+
+```powershell
+.\install.ps1 -Mode standalone -Port 8096 -Funnel
+```
+
+The installer resolves `<node>.<tailnet>.ts.net` from `tailscale status --json`, writes `MESH_ALLOWED_HOSTS` next to `MESH_TOKEN` in `standalone.env`, runs `tailscale funnel --bg --https=443`, registers the logon task `RemoteHarnessMCPNode` and prints `https://<node>.<tailnet>.ts.net/sse?token=…`.
+
+Requirements and limits: Funnel must be allowed for the tailnet in the ACL (`"nodeAttrs": [{"target": ["autogroup:member"], "attr": ["funnel"]}]`); only ports 443, 8443 and 10000 are available; the URL is public, so treat the token as a password; the node must be awake.
+
 ---
 
 ## 📱 Android installation (Termux)

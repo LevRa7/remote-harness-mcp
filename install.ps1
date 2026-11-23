@@ -11,7 +11,10 @@ param(
     [string]$Gateway = "",
     [int]$Port = 8096,
     [string]$Lang = "en",
-    [switch]$DryRun
+    [switch]$DryRun,
+    # Publish the standalone node through Tailscale Funnel: a public HTTPS
+    # hostname on the tailnet, no server, no domain, no open port.
+    [switch]$Funnel
 )
 
 # Ensure UTF-8 output encoding in PowerShell console
@@ -934,6 +937,60 @@ function Print-McpBox($Title, $Url, $CopiedText, $BorderColor = "Green") {
     Write-Host $Border -ForegroundColor $BorderColor
 }
 
+# ---------------------------------------------------------------------------
+# Tailscale Funnel helpers (standalone mode without a gateway).
+#
+# The node is only reachable on loopback, so an edge tunnel is the whole public
+# surface. Funnel terminates TLS on <node>.<tailnet>.ts.net and forwards to
+# 127.0.0.1, which is also why the query token stays acceptable: the node sees
+# a loopback client and accepts ?token=, while a remote caller is refused.
+# ---------------------------------------------------------------------------
+
+function Resolve-Tailscale {
+    $candidates = @()
+    $onPath = Get-Command tailscale.exe -ErrorAction SilentlyContinue
+    if ($onPath) { $candidates += $onPath.Source }
+    if ($env:ProgramFiles) { $candidates += (Join-Path $env:ProgramFiles "Tailscale\tailscale.exe") }
+    foreach ($candidate in $candidates) {
+        if ($candidate -and (Test-Path -LiteralPath $candidate)) { return $candidate }
+    }
+    return $null
+}
+
+function Get-TailnetName {
+    param([string]$Tailscale)
+    # Self.DNSName is the MagicDNS name Funnel answers on; the trailing dot is
+    # part of the JSON answer, not part of a Host header.
+    try {
+        $status = (& $Tailscale status --json 2>$null | Out-String) | ConvertFrom-Json
+        $name = [string]$status.Self.DNSName
+        if ($name) { return $name.TrimEnd(".").ToLower() }
+    } catch { }
+    return ""
+}
+
+function Register-StandaloneNodeTask {
+    param([string]$Python, [int]$Port, [string]$WorkingDirectory)
+    # pythonw keeps the logon task windowless; the token is NOT on this command
+    # line - the node reads it from standalone.env (core.server.apply_standalone_env).
+    $exe = $Python
+    $pythonw = Join-Path (Split-Path -Parent $Python) "pythonw.exe"
+    if (Test-Path -LiteralPath $pythonw) { $exe = $pythonw }
+    $nodeArgs = "-u -m core.server --host 127.0.0.1 --port=$Port"
+    $taskCommand = '"' + $exe + '" ' + $nodeArgs
+    & schtasks.exe /Create /TN "RemoteHarnessMCPNode" /TR $taskCommand /SC ONLOGON /RL LIMITED /F 2>&1 | Out-Null
+    if ($LASTEXITCODE -eq 0) { return $true }
+    try {
+        $action = New-ScheduledTaskAction -Execute $exe -Argument $nodeArgs -WorkingDirectory $WorkingDirectory
+        $triggers = @((New-ScheduledTaskTrigger -AtLogOn))
+        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+            -StartWhenAvailable -MultipleInstances IgnoreNew -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+        Register-ScheduledTask -TaskName "RemoteHarnessMCPNode" -Action $action -Trigger $triggers `
+            -Settings $settings -Force -Description "Starts the standalone Remote Harness MCP node at logon." | Out-Null
+        return $true
+    } catch { return $false }
+}
+
 if ($Mode -eq "standalone") {
     if ($Lang -eq "ru") {
         Write-Host "=== Запуск в режиме Local Standalone на порту $Port ===" -ForegroundColor Blue
@@ -951,18 +1008,54 @@ if ($Mode -eq "standalone") {
     $StandaloneToken = -join ($tokenBytes | ForEach-Object { $_.ToString('x2') })
     $StandaloneEnv = Join-Path $ConfigDir 'standalone.env'
     New-Item -ItemType Directory -Force -Path $ConfigDir | Out-Null
-    Set-Content -LiteralPath $StandaloneEnv -Value ("MESH_TOKEN=" + $StandaloneToken) -Encoding ASCII
+
+    # Resolve the Funnel hostname BEFORE the env file is written: the allowlist
+    # entry, the Funnel target and the printed link must name one host.
+    $FunnelName = ""
+    $TsExe = $null
+    if ($Funnel) {
+        $TsExe = Resolve-Tailscale
+        if ($TsExe) {
+            $FunnelName = Get-TailnetName -Tailscale $TsExe
+            if (-not $FunnelName) {
+                Write-Host "[!] Tailscale is installed but not signed in: run 'tailscale up' first." -ForegroundColor Yellow
+            }
+        } else {
+            Write-Host "[!] tailscale.exe not found. Install it (winget install -e --id Tailscale.Tailscale) and rerun with -Funnel." -ForegroundColor Yellow
+        }
+    }
+
+    $envLines = @("MESH_TOKEN=" + $StandaloneToken)
+    if ($FunnelName) { $envLines += ("MESH_ALLOWED_HOSTS=" + $FunnelName) }
+    Set-Content -LiteralPath $StandaloneEnv -Value $envLines -Encoding ASCII
     try {
         icacls $StandaloneEnv /inheritance:r /grant:r ("$env:USERNAME:F") | Out-Null
     } catch { }
-    Start-Process $pyExeOnly -ArgumentList "-m core.server --host 127.0.0.1 --port=$Port --token=$StandaloneToken" -WorkingDirectory $ScriptDir -WindowStyle Hidden
+    # No --token on purpose: the node reads standalone.env itself, so the secret
+    # stays out of the process list and out of the scheduled task.
+    Start-Process $pyExeOnly -ArgumentList "-u -m core.server --host 127.0.0.1 --port=$Port" -WorkingDirectory $ScriptDir -WindowStyle Hidden
+    $nodeTaskOk = Register-StandaloneNodeTask -Python $pyExeOnly -Port $Port -WorkingDirectory $ScriptDir
+
+    if ($FunnelName) {
+        # Tailscale terminates TLS and proxies to loopback; the node never sees a
+        # public address, which is exactly why no port and no certificate is needed.
+        $funnelOut = (& $TsExe funnel --bg --https=443 "http://127.0.0.1:$Port" 2>&1 | Out-String).Trim()
+        if ($funnelOut) { Write-Host "    $funnelOut" -ForegroundColor DarkGray }
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "[!] tailscale funnel failed. Enable Funnel for this tailnet (ACL nodeAttrs) and see 'tailscale funnel status'." -ForegroundColor Yellow
+            $FunnelName = ""
+        }
+    }
+
     $LocalUrl = "http://localhost:$Port/sse?token=$StandaloneToken"
+    $PublicUrl = if ($FunnelName) { "https://$FunnelName/sse?token=$StandaloneToken" } else { "" }
+    $CopyUrl = if ($PublicUrl) { $PublicUrl } else { $LocalUrl }
     $Copied = $false
     try {
-        Set-Clipboard -Value $LocalUrl -ErrorAction Stop
+        Set-Clipboard -Value $CopyUrl -ErrorAction Stop
         $Copied = $true
     } catch {
-        try { $LocalUrl | clip.exe 2>$null; $Copied = $true } catch {}
+        try { $CopyUrl | clip.exe 2>$null; $Copied = $true } catch {}
     }
 
     Clear-Host
@@ -970,7 +1063,18 @@ if ($Mode -eq "standalone") {
 if ($Lang -eq "ru") {
     Write-Host ""
     $copyMsg = if ($Copied) { "[OK] ССЫЛКА СКОПИРОВАНА В БУФЕР ОБМЕНА! (Вставьте через Ctrl+V)" } else { "Скопируйте ссылку выше" }
-    Print-McpBox "ССЫЛКА ЛОКАЛЬНОГО MCP-СЕРВЕРА (СКОПИРУЙТЕ):" $LocalUrl $copyMsg
+    if ($PublicUrl) {
+        Print-McpBox "ПУБЛИЧНАЯ ССЫЛКА MCP (ЭТО ПАРОЛЬ, НЕ ПУБЛИКУЙТЕ):" $PublicUrl $copyMsg
+        Write-Host "    Локальная (только с этого ПК): $LocalUrl" -ForegroundColor DarkGray
+    } else {
+        Print-McpBox "ССЫЛКА ЛОКАЛЬНОГО MCP-СЕРВЕРА (СКОПИРУЙТЕ):" $LocalUrl $copyMsg
+        Write-Host "    Публичная ссылка не создана: запустите с -Funnel и установленным Tailscale." -ForegroundColor DarkGray
+    }
+    if ($nodeTaskOk) {
+        Write-Host "    Автозапуск узла: задача RemoteHarnessMCPNode (при входе в систему)." -ForegroundColor DarkGray
+    } else {
+        Write-Host "    [!] Не удалось зарегистрировать автозапуск: узел поднимется только до перезагрузки." -ForegroundColor Yellow
+    }
     Write-Host ""
     Write-Host " Куда вставлять ссылку в Google Gemini:" -ForegroundColor Yellow
     Write-Host " 1. Откройте в браузере: https://gemini.google.com/customize/connectors" -ForegroundColor Cyan
@@ -980,7 +1084,18 @@ if ($Lang -eq "ru") {
 } else {
     Write-Host ""
     $copyMsg = if ($Copied) { "[OK] URL COPIED TO CLIPBOARD! (Press Ctrl+V to paste)" } else { "Copy the URL above" }
-    Print-McpBox "LOCAL MCP SERVER URL (COPY THIS):" $LocalUrl $copyMsg
+    if ($PublicUrl) {
+        Print-McpBox "PUBLIC MCP URL (THIS IS A PASSWORD - DO NOT SHARE):" $PublicUrl $copyMsg
+        Write-Host "    Local only (this PC): $LocalUrl" -ForegroundColor DarkGray
+    } else {
+        Print-McpBox "LOCAL MCP SERVER URL (COPY THIS):" $LocalUrl $copyMsg
+        Write-Host "    No public URL: rerun with -Funnel and Tailscale installed." -ForegroundColor DarkGray
+    }
+    if ($nodeTaskOk) {
+        Write-Host "    Node autostart: scheduled task RemoteHarnessMCPNode (at logon)." -ForegroundColor DarkGray
+    } else {
+        Write-Host "    [!] Could not register autostart: the node lives until the next reboot." -ForegroundColor Yellow
+    }
     Write-Host ""
     Write-Host " Where to paste this URL in Google Gemini:" -ForegroundColor Yellow
     Write-Host " 1. Open in your browser: https://gemini.google.com/customize/connectors" -ForegroundColor Cyan

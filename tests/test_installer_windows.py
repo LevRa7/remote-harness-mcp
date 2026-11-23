@@ -202,3 +202,42 @@ def test_dry_run_never_pins_the_microsoft_store_alias(tmp_path):
         pytest.skip("no real Python 3 on this machine to fall back to")
     assert "WindowsApps" not in reported, reported
     assert "python" in reported.lower(), reported
+
+# ---------------------------------------------------------------------------
+# TSF-03: standalone node published through Tailscale Funnel
+# ---------------------------------------------------------------------------
+
+def test_standalone_funnel_writes_the_public_hostname_to_the_env_file():
+    text = _text()
+    assert "MESH_ALLOWED_HOSTS" in text, "the node must allowlist the Funnel hostname"
+    assert "standalone.env" in text
+    assert "Get-TailnetName" in text, "the hostname comes from tailscale status, not a literal"
+
+
+def test_standalone_funnel_is_actually_started():
+    text = _text()
+    assert "funnel --bg --https=443" in text
+    assert "Resolve-Tailscale" in text, "the installer must find tailscale.exe, not assume PATH"
+
+
+def test_standalone_node_gets_an_autostart_task():
+    text = _text()
+    assert "RemoteHarnessMCPNode" in text
+    assert re.search(r"function Register-StandaloneNodeTask\b[\s\S]*?-m core\.server", text), (
+        "the logon task must start core.server, not the tunnel agent"
+    )
+
+
+def test_standalone_token_is_not_passed_on_the_command_line():
+    text = _text()
+    standalone_start = [line for line in text.splitlines() if "core.server --host" in line]
+    assert standalone_start, "the standalone start line must exist"
+    for line in standalone_start:
+        assert "--token" not in line, (
+            "the token belongs in standalone.env: a command-line secret is visible "
+            "in the process list and in the scheduled task definition"
+        )
+
+
+def test_funnel_switch_is_declared():
+    assert re.search(r"\[switch\]\$Funnel", _text())

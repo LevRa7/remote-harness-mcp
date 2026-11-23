@@ -523,6 +523,18 @@ PowerShell, которые в Windows уже есть, а собирается �
 
 Он поднимает локальный FastMCP-сервер на `http://localhost:8096/sse`, генерирует токен (файл `%USERPROFILE%\.config\remote-harness-mcp\standalone.env`, доступ только пользователю) и кладёт в буфер обмена ссылку с этим токеном. Ссылка работает только с этого компьютера; не публикуйте её.
 
+#### Публичная ссылка без сервера (Tailscale Funnel)
+
+Без белого IP, проброса портов и шлюза: узел слушает только loopback, а `tailscale funnel` терминирует TLS на имени в tailnet и проксирует на `127.0.0.1`.
+
+```powershell
+.\install.ps1 -Mode standalone -Port 8096 -Funnel
+```
+
+Установщик берёт `<узел>.<tailnet>.ts.net` из `tailscale status --json`, пишет `MESH_ALLOWED_HOSTS` рядом с `MESH_TOKEN` в `standalone.env`, запускает `tailscale funnel --bg --https=443`, регистрирует задачу входа `RemoteHarnessMCPNode` и печатает `https://<узел>.<tailnet>.ts.net/sse?token=…`.
+
+Что нужно и чего нельзя: Funnel должен быть разрешён для tailnet в ACL (`"nodeAttrs": [{"target": ["autogroup:member"], "attr": ["funnel"]}]`); доступны только порты 443, 8443 и 10000; ссылка публичная, поэтому токен — это пароль; ПК не должен спать.
+
 ---
 
 ## 📱 Установка на Android (Termux)

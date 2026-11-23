@@ -689,6 +689,45 @@ _TOKEN_QUERY_RE = re.compile(r"([?&]token=)[^&\s\"]*", re.IGNORECASE)
 #: Hosts that identify this machine without naming a network interface.
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
+#: Public hostname(s) an edge tunnel may present in Host/Origin.
+#: Comma-separated and exact: a wildcard would re-open DNS rebinding, because
+#: the attacker controls the name, and a port in the value is meaningless -
+#: the edge always terminates TLS on 443.
+_ALLOWED_HOSTS_ENV = "MESH_ALLOWED_HOSTS"
+
+#: One DNS label: letters, digits, hyphens; never empty, never edging a hyphen.
+_HOST_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+
+
+def _is_public_hostname(value: str) -> bool:
+    """True for a plain dotted hostname (node.tailnet.ts.net), else False.
+
+    Rejects a wildcard, a port, a scheme, a path, spaces and single-label
+    names: the value lands in a security predicate, so anything ambiguous is
+    refused rather than normalised.
+    """
+    if not value or len(value) > 253 or value.startswith(".") or value.endswith("."):
+        return False
+    labels = value.split(".")
+    if len(labels) < 2:
+        return False
+    return all(_HOST_LABEL_RE.match(label) for label in labels)
+
+
+def allowed_public_hosts() -> frozenset:
+    """Hostnames from MESH_ALLOWED_HOSTS; empty when unset or malformed.
+
+    The variable is read per call: it is set once for the process by the
+    installer or the service, and a cache here would only hide a config error.
+    """
+    raw = os.environ.get(_ALLOWED_HOSTS_ENV, "") or ""
+    hosts = set()
+    for part in raw.split(","):
+        candidate = part.strip().lower()
+        if _is_public_hostname(candidate):
+            hosts.add(candidate)
+    return frozenset(hosts)
+
 
 def _split_host_header(value: str) -> Tuple[str, str]:
     """Return (hostname, port) from a Host header; never raises."""
@@ -719,6 +758,10 @@ def host_allowed(host_header: str, bind_host: str = "127.0.0.1", port: int = 809
     host, header_port = _split_host_header(host_header)
     if not host:
         return False
+    if host in allowed_public_hosts():
+        # The edge terminates TLS and may or may not append :443; the port
+        # carries no security meaning for a name the attacker cannot own.
+        return True
     allowed = set(_LOOPBACK_HOSTS)
     if bind_host:
         allowed.add(bind_host.strip().lower())
@@ -742,6 +785,11 @@ def origin_allowed(origin: str, bind_host: str = "127.0.0.1", port: int = 8096) 
     if parts.scheme not in ("http", "https"):
         return False
     host = (parts.hostname or "").lower()
+    if host in allowed_public_hosts():
+        # A public host is only ever a browser origin over HTTPS on 443.
+        if parts.scheme != "https":
+            return False
+        return parts.port in (None, 443)
     allowed = set(_LOOPBACK_HOSTS)
     if bind_host:
         allowed.add(bind_host.strip().lower())
@@ -1067,6 +1115,36 @@ class StandaloneMCPHandler(BaseHTTPRequestHandler):
         logger.info("%s - - [%s] %s", self.client_address[0], self.log_date_time_string(), message)
 
 
+#: The installer writes the node token (and the Funnel hostname) here.
+_STANDALONE_ENV_FILE = "standalone.env"
+
+
+def standalone_env_path() -> str:
+    """Path of the per-user standalone env file the installer writes."""
+    from core import paths as _paths
+
+    return os.path.join(_paths.config_dir(), _STANDALONE_ENV_FILE)
+
+
+def apply_standalone_env(path: Optional[str] = None) -> Dict[str, str]:
+    """Export MESH_* keys from the standalone env file into os.environ.
+
+    The autostart task must not carry the token in its command line, where
+    every user on the machine can read it from the process list.  A real
+    environment variable always wins over the file, which keeps the explicit
+    --token/MESH_TOKEN flow working exactly as before.
+
+    Returns the parsed values (empty when the file is missing).
+    """
+    from core import domain as _domain
+
+    values = _domain.read_env_file(path or standalone_env_path())
+    for key, value in values.items():
+        if key.startswith("MESH_") and value and not os.environ.get(key):
+            os.environ[key] = value
+    return values
+
+
 def run_standalone_server(host: str = "127.0.0.1", port: int = 8096, token: Optional[str] = None) -> None:
     """Start the blocking standalone MCP HTTP server."""
     if token is None:
@@ -1118,6 +1196,9 @@ def main(argv: Optional[List[str]] = None) -> int:
              "generated and written 0600 to the config directory.",
     )
     args = parser.parse_args(argv)
+    # The token and the tunnel hostname come from the installer-written file,
+    # so the autostart entry never carries a secret on its command line.
+    apply_standalone_env()
 
     logging.basicConfig(
         level=logging.INFO,

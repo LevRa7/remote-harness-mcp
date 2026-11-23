@@ -116,3 +116,31 @@ def test_loopback_query_token_is_accepted_for_the_standalone_ui():
         server.StandaloneMCPHandler.server_mcp = None
         httpd.shutdown()
         httpd.server_close()
+
+def test_allowlisted_public_host_passes_the_gate(monkeypatch):
+    """Funnel arrives on loopback but with the public Host: it must reach auth."""
+    monkeypatch.setenv("MESH_ALLOWED_HOSTS", "node.tailnet.ts.net")
+    httpd, port = _start()
+    try:
+        status = _post(port, {
+            "Host": "node.tailnet.ts.net",
+            "Content-Type": "application/json",
+        })
+        assert status == 401, "the Host gate passed, so the request reached auth"
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_public_host_outside_the_allowlist_is_still_403(monkeypatch):
+    monkeypatch.setenv("MESH_ALLOWED_HOSTS", "node.tailnet.ts.net")
+    httpd, port = _start()
+    try:
+        status = _post(port, {
+            "Host": "evil.example",
+            "Content-Type": "application/json",
+        })
+        assert status == 403
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
