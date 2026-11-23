@@ -1855,6 +1855,12 @@ connect_tailscale() {
 }
 
 start_funnel() {
+    # Never prompt from here: the caller redirects this output, and a hidden password
+    # prompt is exactly the hang this replaced. sudo is primed once at the start.
+    if [ "$(id -u)" -ne 0 ] && ! sudo -n true 2>/dev/null; then
+        echo "sudo is not available in this session"
+        return 2
+    fi
     # A bounded call: when Funnel is not enabled for the tailnet, `tailscale funnel`
     # prints the enable link and then KEEPS RUNNING, which used to hang the install
     # after [3/3]. The timeout turns that into a readable failure.
@@ -1883,6 +1889,23 @@ funnel_acl_hint() {
 # ==============================================================================
 if [ "$MODE" = "standalone" ]; then
     STANDALONE_START=$(date +%s)
+    FUNNEL_BLOCKED=false
+    # Funnel needs root: Tailscale, its daemon and the funnel config are system
+    # services. Rather than prompting in the middle of the install - a prompt that
+    # can hide behind a redirect and look like a hang at [3/3] - stop here with the
+    # exact command to run. Cached sudo credentials are enough.
+    if [ "$FUNNEL" = true ] && [ "$(id -u)" -ne 0 ] && ! sudo -n true 2>/dev/null; then
+        if [ "$LANG_CHOICE" = "ru" ]; then
+            echo -e "${RED}[!] Для Funnel нужны права администратора.${RESET}" >&2
+            echo -e "    Запустите: ${CYAN}sudo bash install.sh --mode=funnel${RESET}" >&2
+            echo -e "    (Tailscale, его демон и настройка funnel - системные службы.)" >&2
+        else
+            echo -e "${RED}[!] Funnel needs administrator rights.${RESET}" >&2
+            echo -e "    Run: ${CYAN}sudo bash install.sh --mode=funnel${RESET}" >&2
+            echo -e "    (Tailscale, its daemon and the funnel config are system services.)" >&2
+        fi
+        exit 1
+    fi
     if [ "$LANG_CHOICE" = "ru" ]; then
         echo -e "\n${BOLD}${BLUE}=== Настройка локального Standalone FastMCP сервера ===${RESET}"
         echo "[1/3] Проверка окружения Python..."
@@ -2151,8 +2174,43 @@ EOF
             if [ -n "$funnel_output" ]; then
                 printf "%s\n" "$funnel_output" | sed "s/^/    /" >&2
             fi
+            if [ -z "$funnel_output" ]; then
+                if [ "$LANG_CHOICE" = "ru" ]; then
+                    echo -e "  Запустите вручную: ${CYAN}sudo tailscale funnel --bg --https=443 http://127.0.0.1:${PORT}${RESET}" >&2
+                    echo -e "  Если Funnel не включён, эта команда напечатает ссылку для включения." >&2
+                else
+                    echo -e "  Run it by hand: ${CYAN}sudo tailscale funnel --bg --https=443 http://127.0.0.1:${PORT}${RESET}" >&2
+                    echo -e "  If Funnel is not enabled, the command prints the enable link." >&2
+                fi
+            fi
             funnel_acl_hint
         fi
+    fi
+
+    if [ "$FUNNEL_BLOCKED" = true ]; then
+        # Requested Funnel, could not get root: a localhost link would be the same
+        # silent downgrade this whole block exists to prevent.
+        if [ "$LANG_CHOICE" = "ru" ]; then
+            echo -e "${RED}[ОШИБКА] Funnel не настроен: не было прав администратора.${RESET}" >&2
+            echo -e "  Повторите: ${CYAN}sudo bash install.sh --mode=funnel${RESET} или дайте sudo при запросе пароля." >&2
+        else
+            echo -e "${RED}[ERROR] Funnel was not configured: no administrator rights.${RESET}" >&2
+            echo -e "  Re-run: ${CYAN}sudo bash install.sh --mode=funnel${RESET} or allow sudo at the prompt." >&2
+        fi
+        exit 1
+    fi
+
+    if [ "$FUNNEL" = true ] && [ -z "$MCP_PUBLIC_URL" ]; then
+        # A localhost URL cannot be added to a cloud connector, so Funnel mode
+        # that produced no public URL is a failure, not a smaller success.
+        if [ "$LANG_CHOICE" = "ru" ]; then
+            echo -e "${RED}[ОШИБКА] Публичная ссылка не создана: узел доступен только на localhost.${RESET}" >&2
+            echo -e "  Проверьте: ${CYAN}tailscale status${RESET} (нужно BackendState=Running) и ${CYAN}tailscale funnel status${RESET}." >&2
+        else
+            echo -e "${RED}[ERROR] No public URL: the node is reachable on localhost only.${RESET}" >&2
+            echo -e "  Check ${CYAN}tailscale status${RESET} (BackendState=Running) and ${CYAN}tailscale funnel status${RESET}." >&2
+        fi
+        exit 1
     fi
 
     MCP_LOCAL_URL="http://localhost:${PORT}/sse"
@@ -2225,18 +2283,6 @@ EOF
         echo -e "  2. Click ${BOLD}'Add connector'${RESET} and name it ${BOLD}'MyDevice'${RESET}"
         echo -e "  3. Paste the URL into the ${BOLD}'Server URL'${RESET} field (${BOLD}Ctrl+V${RESET}) and click ${BOLD}Connect${RESET}."
         echo ""
-    fi
-    if [ "$FUNNEL" = true ] && [ -z "$MCP_PUBLIC_URL" ]; then
-        # A localhost URL cannot be added to a cloud connector, so Funnel mode
-        # that produced no public URL is a failure, not a smaller success.
-        if [ "$LANG_CHOICE" = "ru" ]; then
-            echo -e "${RED}[ОШИБКА] Публичная ссылка не создана: узел доступен только на localhost.${RESET}" >&2
-            echo -e "  Проверьте: ${CYAN}tailscale status${RESET} (нужно BackendState=Running) и ${CYAN}tailscale funnel status${RESET}." >&2
-        else
-            echo -e "${RED}[ERROR] No public URL: the node is reachable on localhost only.${RESET}" >&2
-            echo -e "  Check ${CYAN}tailscale status${RESET} (BackendState=Running) and ${CYAN}tailscale funnel status${RESET}." >&2
-        fi
-        exit 1
     fi
     if [ "$IS_TERMUX" = true ]; then
         print_termux_hints "rhm-standalone"
