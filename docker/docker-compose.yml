@@ -1,0 +1,31 @@
+# ==============================================================================
+#  Remote Harness MCP - one node per container
+# ==============================================================================
+#
+#  From the repository root:
+#      MESH_GATEWAY=mesh.example.test docker compose -f docker/docker-compose.yml up -d
+#      docker compose -f docker/docker-compose.yml logs -f node    # prints the MCP URL
+#
+#  The named volume keeps agent.env (the node token) across "down" and "up", so a
+#  recreated container is the same node on the gateway instead of a second one.
+# ==============================================================================
+services:
+  node:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: remote-harness-mcp:latest
+    container_name: rhm-node
+    restart: unless-stopped
+    environment:
+      MESH_GATEWAY: ${MESH_GATEWAY:?set MESH_GATEWAY to the shared gateway domain}
+      MESH_USER: ${MESH_USER:-}
+      MESH_TOKEN: ${MESH_TOKEN:-}
+      MESH_LANG: ${MESH_LANG:-en}
+    volumes:
+      - rhm-config:/data
+    # No ports: the node dials the gateway over the reverse tunnel, so it needs no
+    # inbound listener. Add one only for --mode=standalone.
+
+volumes:
+  rhm-config:

@@ -14,7 +14,18 @@ param(
     [switch]$DryRun,
     # Publish the standalone node through Tailscale Funnel: a public HTTPS
     # hostname on the tailnet, no server, no domain, no open port.
-    [switch]$Funnel
+    [switch]$Funnel,
+    # Install the MCP service with administrator rights: a machine-wide scheduled
+    # task that starts at boot, runs as SYSTEM and is allowed the highest
+    # privileges. The default install stays per-user and elevation-free; this is
+    # the opt-in variant that gives tool calls administrator rights.
+    [switch]$AdminService,
+    # Set by the elevated relaunch of this same script, so the child does not try
+    # to elevate again (which would be an endless UAC loop).
+    [switch]$Elevated,
+    # Where the elevated child writes its transcript, so the unelevated parent can
+    # print the child's output: -Verb RunAs cannot redirect stdout.
+    [string]$Transcript = ""
 )
 
 # Ensure UTF-8 output encoding in PowerShell console
@@ -24,6 +35,16 @@ try {
 } catch {}
 
 $ErrorActionPreference = "Continue"
+
+# The administrator variant relaunches itself elevated (see the elevation block
+# below), and a process started with -Verb RunAs cannot have its stdout
+# redirected. A transcript is the one channel that survives: the parent prints
+# this file after the child exits, so the operator sees the real output instead
+# of an empty console.
+if ($Transcript) {
+    try { Start-Transcript -Path $Transcript -Force | Out-Null } catch {}
+}
+
 if (Test-Path variable:global:PSNativeCommandUseErrorActionPreference) {
     $global:PSNativeCommandUseErrorActionPreference = $false
 }
@@ -552,6 +573,15 @@ $ConfigDirDefault = "$env:USERPROFILE\.config\remote-harness-mcp"
 # core/paths.py resolves it for the node itself.
 $LegacyConfigDir = "$env:USERPROFILE\.config\antigravity-mesh"
 if (-not (Test-Path $ConfigDirDefault) -and (Test-Path $LegacyConfigDir)) { $ConfigDirDefault = $LegacyConfigDir }
+# The administrator service runs as SYSTEM, whose %USERPROFILE% is not the
+# operator's: a per-user agent.env would be invisible to it, and a per-user domain
+# file would leave the service publishing links on the wrong gateway. The
+# machine-wide location is also what core/paths.py resolves once the service
+# exports MESH_CONFIG_DIR (see ops/windows/rhm-service.ps1).
+if ($AdminService) {
+    $ProgramDataRoot = if ($env:ProgramData) { $env:ProgramData } else { "C:\ProgramData" }
+    $ConfigDirDefault = Join-Path $ProgramDataRoot "remote-harness-mcp"
+}
 $DomainFilePath = if ($env:MESH_DOMAIN_FILE) { $env:MESH_DOMAIN_FILE } else { "$ConfigDirDefault\domain.env" }
 $ResolvedDomain = Get-NormalisedHost $Gateway
 if (-not $ResolvedDomain) { $ResolvedDomain = Get-NormalisedHost $env:MESH_PUBLIC_URL }
@@ -633,29 +663,116 @@ if ($DryRun) {
     } else {
         "$DomainFilePath -> MESH_PUBLIC_URL=https://$Gateway"
     }
+    # Which autostart shape the real run would build: the per-user Startup entry,
+    # or the machine-wide SYSTEM task of the administrator variant.
+    $autostartState = if ($AdminService) {
+        "scheduled task RemoteHarnessMCPService (at startup, SYSTEM)"
+    } else {
+        "$([Environment]::GetFolderPath('Startup'))\rhm-agent.vbs"
+    }
+    $modeState = if ($AdminService) {
+        "MCP service (SYSTEM, administrator rights)"
+    } else {
+        "per-user Startup entry"
+    }
     if ($Lang -eq "ru") {
         Write-Host "[DRY-RUN] Python      : $pyState"
         Write-Host "[DRY-RUN] websockets  : $wsState"
         Write-Host "[DRY-RUN] Домен       : $domainState"
-        Write-Host "[DRY-RUN] Конфиг      : $env:USERPROFILE\.config\remote-harness-mcp"
-        Write-Host "[DRY-RUN] Автозапуск  : $([Environment]::GetFolderPath('Startup'))\rhm-agent.vbs"
+        Write-Host "[DRY-RUN] Конфиг      : $ConfigDirDefault"
+        Write-Host "[DRY-RUN] Автозапуск  : $autostartState"
         Write-Host "[DRY-RUN] Узел        : $nodeState"
         Write-Host "[DRY-RUN] Архитектура : $archState"
         Write-Host "[DRY-RUN] Файл домена : $domainFileState"
+        Write-Host "[DRY-RUN] Режим       : $modeState"
         Write-Host "[DRY-RUN] Действий не выполнено." -ForegroundColor Yellow
     } else {
         Write-Host "[DRY-RUN] Python      : $pyState"
         Write-Host "[DRY-RUN] websockets  : $wsState"
         Write-Host "[DRY-RUN] Domain      : $domainState"
-        Write-Host "[DRY-RUN] Config      : $env:USERPROFILE\.config\remote-harness-mcp"
-        Write-Host "[DRY-RUN] Autostart   : $([Environment]::GetFolderPath('Startup'))\rhm-agent.vbs"
+        Write-Host "[DRY-RUN] Config      : $ConfigDirDefault"
+        Write-Host "[DRY-RUN] Autostart   : $autostartState"
         Write-Host "[DRY-RUN] Node        : $nodeState"
         Write-Host "[DRY-RUN] Arch        : $archState"
         Write-Host "[DRY-RUN] Domain file : $domainFileState"
+        Write-Host "[DRY-RUN] Mode        : $modeState"
         Write-Host "[DRY-RUN] Nothing was changed." -ForegroundColor Yellow
     }
     if ($DomainMissing -or -not $hasPython) { exit 2 }
     exit 0
+}
+
+# ------------------------------------------------------------------------------
+#  ADMINISTRATOR SERVICE VARIANT - elevation
+#
+#  Registering a task for SYSTEM is an administrative operation, so the variant
+#  asks for elevation once and re-runs this same script with -Elevated. The work
+#  happens in the elevated child rather than here: splitting it would duplicate
+#  every installation step.
+#
+#  The child's output cannot be redirected (Start-Process -Verb RunAs implies
+#  ShellExecute), hence the transcript file the parent prints afterwards.
+# ------------------------------------------------------------------------------
+function Test-ElevatedSession {
+    try {
+        $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+        $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+        return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    } catch {
+        return $false
+    }
+}
+
+if ($AdminService -and -not $Elevated -and -not $DryRun) {
+    if (Test-ElevatedSession) {
+        # Already an administrator (a shell started "as administrator"): no second
+        # process and no UAC prompt, the work simply continues here.
+        $Elevated = $true
+    } else {
+        if ($Lang -eq "ru") {
+            Write-Host "[*] Для варианта со службой MCP нужны права администратора. Запрос UAC..." -ForegroundColor Yellow
+        } else {
+            Write-Host "[*] The MCP service variant needs administrator rights. Requesting elevation..." -ForegroundColor Yellow
+        }
+        if (-not $PSCommandPath) {
+            # "irm | iex" has no file to relaunch: elevation would have nothing to run.
+            if ($Lang -eq "ru") {
+                Write-Host "[!] Вариант со службой MCP нельзя запускать через 'irm | iex': нужен файл install.ps1." -ForegroundColor Red
+                Write-Host "    Скачайте установщик и запустите его из PowerShell от имени администратора." -ForegroundColor Yellow
+            } else {
+                Write-Host "[!] The MCP service variant cannot run from 'irm | iex': it needs the install.ps1 file." -ForegroundColor Red
+                Write-Host "    Download the installer and run it from an elevated PowerShell." -ForegroundColor Yellow
+            }
+            exit 1
+        }
+        $childLog = Join-Path ([IO.Path]::GetTempPath()) ("rhm-admin-service-" + [Guid]::NewGuid().ToString('N') + ".log")
+        $childArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $PSCommandPath + '"'),
+            '-AdminService', '-Elevated', '-Transcript', $childLog, '-Lang', $Lang)
+        if ($User) { $childArgs += @('-User', ('"' + $User + '"')) }
+        if ($Gateway) { $childArgs += @('-Gateway', ('"' + $Gateway + '"')) }
+        if ($Token) { $childArgs += @('-Token', ('"' + $Token + '"')) }
+        if ($Quick) { $childArgs += '-Quick' }
+        if ($Port) { $childArgs += @('-Port', "$Port") }
+        $child = $null
+        try {
+            $child = Start-Process -FilePath 'powershell.exe' -Verb RunAs -Wait -PassThru -ArgumentList $childArgs -ErrorAction Stop
+        } catch {
+            if ($Lang -eq "ru") {
+                Write-Host "[!] Повышение прав отклонено: служба MCP не установлена." -ForegroundColor Red
+                Write-Host "    Запустите установщик от имени администратора (правая кнопка -> 'Запуск от имени администратора')." -ForegroundColor Yellow
+            } else {
+                Write-Host "[!] Elevation was refused: the MCP service was not installed." -ForegroundColor Red
+                Write-Host "    Run the installer as administrator (right-click -> 'Run as administrator')." -ForegroundColor Yellow
+            }
+            exit 1
+        }
+        if (Test-Path -LiteralPath $childLog) {
+            Get-Content -LiteralPath $childLog -Encoding UTF8 | ForEach-Object { Write-Host $_ }
+        }
+        $childExit = 0
+        if ($child) { $childExit = $child.ExitCode }
+        exit $childExit
+    }
 }
 
 function Resolve-PythonAfterInstall {
@@ -875,6 +992,7 @@ if (-not $ScriptDir -or -not (Test-Path "$ScriptDir\core\agent.py")) {
         "skills/orchestrator.md",
         "ops/windows/agent-watchdog.ps1",
         "ops/windows/rhm-tray.ps1",
+        "ops/windows/rhm-service.ps1",
         "ops/windows/run-hidden.vbs",
         "ops/update.ps1",
         "ops/doctor.ps1"
@@ -1445,7 +1563,125 @@ Write-DomainFile -Domain $Gateway -Path $DomainFilePath
 # Start agent in background
 $env:MESH_GATEWAY = $Gateway
 $env:MESH_USER = $AssignedUser
-$env:MESH_TOKEN = $AssignedToken
+if ($AdminService) {
+    # -------------------------------------------------------------------------
+    #  ADMINISTRATOR SERVICE VARIANT
+    #
+    #  Task Scheduler is the service host Windows offers without an installer
+    #  framework: a boot trigger, a machine account and restart-on-failure. A
+    #  Python process is not a service binary, so "sc.exe create" would need a
+    #  wrapper; a scheduled task needs none and still starts before anyone logs on.
+    #
+    #  The task runs as SYSTEM at the highest run level, which is exactly the
+    #  "MCP service with administrator rights" this variant promises: every tool
+    #  call inherits that token, and an unattended machine keeps its node.
+    # -------------------------------------------------------------------------
+    $serviceTaskName = "RemoteHarnessMCPService"
+    $serviceScript = Join-Path $ScriptDir "ops\windows\rhm-service.ps1"
+    $serviceEnvFile = Join-Path $ConfigDir "service.env"
+
+    # The per-user entries must go: the machine task already owns the tunnel, and a
+    # second agent would register the same node twice and fight over the socket.
+    # Retiring them here is also what makes an upgrade from the per-user variant
+    # leave exactly one agent behind.
+    $startupPaths = @(
+        (Join-Path ([Environment]::GetFolderPath("Startup")) "rhm-agent.vbs"),
+        (Join-Path ([Environment]::GetFolderPath("Startup")) "agy-agent.vbs")
+    )
+    foreach ($startupPath in $startupPaths) {
+        if (Test-Path -LiteralPath $startupPath) {
+            Remove-Item -LiteralPath $startupPath -Force -ErrorAction SilentlyContinue
+        }
+    }
+    try { Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name "RemoteHarnessMCPTray" -ErrorAction Stop } catch {}
+    foreach ($retiredTask in @("RemoteHarnessMCPWatchdog", "RemoteHarnessMCPUpdater")) {
+        $registered = $null
+        try { $registered = Get-ScheduledTask -TaskName $retiredTask -ErrorAction Stop } catch { $registered = $null }
+        if ($registered) {
+            try { Unregister-ScheduledTask -TaskName $retiredTask -Confirm:$false -ErrorAction Stop } catch {}
+        }
+    }
+
+    if (-not (Test-Path -LiteralPath $serviceScript)) {
+        if ($Lang -eq "ru") {
+            Write-Host "[!] Не найден ${serviceScript}: службу MCP зарегистрировать нельзя." -ForegroundColor Red
+            Write-Host "    Переустановите из полного пакета (в нём есть ops\windows\rhm-service.ps1)." -ForegroundColor Yellow
+        } else {
+            Write-Host "[!] $serviceScript is missing: the MCP service cannot be registered." -ForegroundColor Red
+            Write-Host "    Install from a complete package (it carries ops\windows\rhm-service.ps1)." -ForegroundColor Yellow
+        }
+        exit 1
+    }
+
+    # The interpreter was already proven usable above (the Store alias was
+    # rejected there). The service script must not search PATH again: SYSTEM's PATH
+    # is not the operator's, and a pinned path is what this installer promises.
+    @(
+        ("MESH_PYTHON=" + $pyExeOnly),
+        ("MESH_CONFIG_DIR=" + $ConfigDir)
+    ) | Out-File -FilePath $serviceEnvFile -Encoding ASCII
+
+    # A full path, not "powershell.exe": a boot-time task runs before any user PATH
+    # exists, and the system one is not guaranteed to carry the WindowsPowerShell
+    # directory either. Fall back to the bare name only if the file is gone.
+    $servicePowerShell = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+    if (-not (Test-Path -LiteralPath $servicePowerShell)) { $servicePowerShell = "powershell.exe" }
+    $serviceAction = New-ScheduledTaskAction -Execute $servicePowerShell -WorkingDirectory $ScriptDir -Argument ('-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -NonInteractive -File "' + $serviceScript + '"')
+    $serviceTrigger = New-ScheduledTaskTrigger -AtStartup
+    # SYSTEM + Highest: the service account has the privileges the variant exists
+    # for, and ServiceAccount logon type means "no user has to be logged on".
+    $servicePrincipal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+    # 3650 days is "no time limit" without the P0D serialisation a zero timespan
+    # produces (the Task Scheduler schema rejects it).
+    $serviceSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Days 3650)
+    $serviceRegistered = $false
+    $serviceError = ""
+    try {
+        Register-ScheduledTask -TaskName $serviceTaskName -Action $serviceAction -Trigger $serviceTrigger -Principal $servicePrincipal -Settings $serviceSettings -Force -Description "Runs the Remote Harness MCP node agent with administrator rights." -ErrorAction Stop | Out-Null
+        $serviceRegistered = $true
+    } catch {
+        $serviceRegistered = $false
+        $serviceError = $_.Exception.Message
+    }
+
+    if (-not $serviceRegistered) {
+        if ($Lang -eq "ru") {
+            Write-Host "[!] Не удалось зарегистрировать задачу '$serviceTaskName'." -ForegroundColor Red
+            Write-Host "    Запустите установщик от имени администратора: регистрация задачи для SYSTEM требует прав." -ForegroundColor Yellow
+        } else {
+            Write-Host "[!] Could not register the '$serviceTaskName' task." -ForegroundColor Red
+            Write-Host "    Run the installer as administrator: registering a SYSTEM task requires it." -ForegroundColor Yellow
+        }
+        if ($serviceError) { Write-Host "    $serviceError" -ForegroundColor DarkYellow }
+        exit 1
+    }
+
+    # Start it now, so the run ends with a connected node instead of a reboot.
+    $serviceStarted = $false
+    try {
+        Start-ScheduledTask -TaskName $serviceTaskName -ErrorAction Stop
+        Start-Sleep -Seconds 3
+        $serviceTask = Get-ScheduledTask -TaskName $serviceTaskName -ErrorAction SilentlyContinue
+        $serviceStarted = [bool]($serviceTask -and $serviceTask.State -ne "Disabled")
+    } catch {
+        $serviceStarted = $false
+    }
+    if ($Lang -eq "ru") {
+        Write-Host "[OK] Служба MCP '$serviceTaskName' зарегистрирована: запуск при загрузке, пользователь SYSTEM, права администратора." -ForegroundColor Green
+        Write-Host "    Конфигурация: $ConfigDir (машинная, вне профиля пользователя)" -ForegroundColor DarkGray
+        Write-Host "    Управление: Start-ScheduledTask / Stop-ScheduledTask -TaskName $serviceTaskName" -ForegroundColor DarkGray
+        if (-not $serviceStarted) {
+            Write-Host "    [!] Задача создана, но не запустилась: проверьте 'Get-ScheduledTask -TaskName $serviceTaskName'." -ForegroundColor Yellow
+        }
+    } else {
+        Write-Host "[OK] MCP service '$serviceTaskName' registered: starts at boot, runs as SYSTEM with administrator rights." -ForegroundColor Green
+        Write-Host "    Configuration: $ConfigDir (machine-wide, outside the user profile)" -ForegroundColor DarkGray
+        Write-Host "    Control it with: Start-ScheduledTask / Stop-ScheduledTask -TaskName $serviceTaskName" -ForegroundColor DarkGray
+        if (-not $serviceStarted) {
+            Write-Host "    [!] The task was created but did not start: check 'Get-ScheduledTask -TaskName $serviceTaskName'." -ForegroundColor Yellow
+        }
+    }
+} else {
 
     # Create Windows Startup launcher for persistent autostart.
     # The interpreter is pinned by full path because PATH may hold the Microsoft
@@ -1668,9 +1904,13 @@ if (Test-Path -LiteralPath $updaterScript) {
 } else {
     Write-Host "[!] $updaterScript not found: the node has no automatic update task." -ForegroundColor Yellow
 }
+}
 
-# Launch now
-Start-Process $pyExeOnly -ArgumentList "-u -m core.agent" -WorkingDirectory $ScriptDir -WindowStyle Hidden
+# Launch now. The administrator variant is already running as the scheduled task;
+# starting a second, per-user agent here would duplicate the node.
+if (-not $AdminService) {
+    Start-Process $pyExeOnly -ArgumentList "-u -m core.agent" -WorkingDirectory $ScriptDir -WindowStyle Hidden
+}
 
 Clear-Host
 

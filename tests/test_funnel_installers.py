@@ -52,7 +52,8 @@ def test_windows_installer_explains_the_funnel_acl_requirement():
 
 def test_gui_declares_funnel_and_selects_it_first():
     text = _text("install-gui.ps1")
-    assert "ValidateSet('quick', 'custom', 'ssh', 'funnel')" in text
+    assert re.search(r"ValidateSet\([^)]*'funnel'[^)]*\)", text)
+    assert re.search(r"ValidateSet\([^)]*'admin'[^)]*\)", text), "the admin variant must stay selectable"
     assert "Id = 'funnel'" in text
     assert "$script:Mode = 'funnel'" in text
     funnel_at = text.index("Id = 'funnel'")
