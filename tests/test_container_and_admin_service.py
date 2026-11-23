@@ -209,25 +209,32 @@ def test_dry_run_reports_the_variant_in_both_languages():
     assert '"MCP service (SYSTEM, administrator rights)"' in text
 
 
-def test_wizard_offers_the_service_variant():
+def test_wizard_offers_the_service_as_a_switch_not_a_mode():
     text = _read(GUI)
-    assert "@{ Id = 'admin';  Title = 'mode_admin_title';  Desc = 'mode_admin_desc' }" in text
-    assert "'admin'" in text
+    # The service is a parameter of the chosen variant: no separate radio button,
+    # one checkbox on the options page, and the flag is appended next to the
+    # variant's own arguments.
+    assert "@{ Id = 'admin'" not in text, "admin must not be an install mode of its own"
+    assert "opt_service_label" in text, "the options page needs the service checkbox"
+    assert "$script:AdminService" in text
     assert "$argList += '-AdminService'" in text, "the wizard must pass the flag to install.ps1"
-    # Every self-test loop that walks the modes has to know the new one.
-    assert text.count("@('quick', 'custom', 'ssh', 'admin')") >= 2
+    assert "($Mode -eq 'quick' -or $Mode -eq 'custom')" in text, (
+        "the machine service hosts the gateway agent: only those variants can use it"
+    )
 
 
 def test_service_variant_strings_are_bilingual():
     with open(STRINGS, "r", encoding="utf-8") as handle:
         document = json.load(handle)
     for language in ("en", "ru"):
-        for key in ("mode_admin_title", "mode_admin_desc", "opt_admin_note"):
+        for key in ("opt_service_group", "opt_service_label", "opt_service_hint",
+                    "opt_service_unavailable", "res_service_task"):
             assert key in document[language], "%s is missing in %s" % (key, language)
-    assert "администратора" in document["ru"]["mode_admin_title"]
+    assert "администратора" in document["ru"]["opt_service_label"]
+    assert "Funnel" in document["ru"]["opt_service_unavailable"]
 
 
 def test_wizard_reads_the_service_configuration_for_its_url_fallback():
     text = _read(GUI)
     assert "ServiceAgentEnvFile" in text
-    assert "if ($Mode -eq 'admin') { $ServiceAgentEnvFile }" in text
+    assert "if ($script:AdminService) { $ServiceAgentEnvFile }" in text

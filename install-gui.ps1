@@ -619,7 +619,7 @@ function Get-ResultUrl {
         [string]$AgentEnvPath = ''
     )
     if (-not $AgentEnvPath) {
-        $AgentEnvPath = if ($Mode -eq 'admin') { $ServiceAgentEnvFile } else { $AgentEnvFile }
+        $AgentEnvPath = if ($script:AdminService) { $ServiceAgentEnvFile } else { $AgentEnvFile }
     }
 
     $found = [regex]::Matches($Text, $UrlPattern)
@@ -674,7 +674,7 @@ function New-ConsoleInstallerSteps {
         # shows the sign-in prompt and publishes the loopback server.
         $argList += @('-Mode', 'standalone', '-Funnel')
     }
-    if ($Mode -eq 'custom' -or $Mode -eq 'admin') {
+    if ($Mode -eq 'custom') {
         $argList += @('-Mode', 'tunnel')
         # The administrator variant is the same install plus the machine service:
         # install.ps1 raises UAC itself and re-runs elevated, so the wizard keeps
@@ -683,6 +683,11 @@ function New-ConsoleInstallerSteps {
         if ($Node) { $argList += @('-User', (Quote-Arg $Node)) }
         if ($Domain) { $argList += @('-Gateway', (Quote-Arg $Domain)) }
         if ($Token) { $argList += @('-Token', (Quote-Arg $Token)) }
+    }
+    # The administrator service is a switch on the chosen variant, not a variant
+    # of its own: only the gateway modes have an agent a machine service can run.
+    if ($script:AdminService -and ($Mode -eq 'quick' -or $Mode -eq 'custom')) {
+        $argList += '-AdminService'
     }
     return @(New-PipelineStep -File (Get-PowerShellExe) -Arguments ($argList -join ' ') `
         -Label (Get-UiText -Key 'prog_running'))
@@ -777,6 +782,7 @@ $script:Device = @{ Hostname = ''; Raw = ''; IsLaptop = $false; Os = '' }
 
 $script:Page = 0
 $script:Mode = 'funnel'
+$script:AdminService = $false
 $script:Node = ''
 $script:Domain = ''
 $script:Token = ''
@@ -808,7 +814,7 @@ function New-GroupBox {
 }
 
 function New-ReadOnlyBox {
-    param([int]$X, [int]$Y, [int]$W, [int]$H, [switch]$MultiLine, [switch]$Monospace)
+    param([int]$X, [int]$Y, [int]$W, [int]$H, [switch]$MultiLine, [switch]$Monospace, [switch]$Wrap)
     $box = New-Object System.Windows.Forms.TextBox
     $box.Location = New-Object System.Drawing.Point($X, $Y)
     $box.Size = New-Object System.Drawing.Size($W, $H)
@@ -818,6 +824,12 @@ function New-ReadOnlyBox {
         $box.Multiline = $true
         $box.ScrollBars = [System.Windows.Forms.ScrollBars]::Both
         $box.WordWrap = $false
+        if ($Wrap) {
+            # Notes are prose, not commands: wrapping beats a horizontal scrollbar
+            # that hides the right half of every line.
+            $box.WordWrap = $true
+            $box.ScrollBars = [System.Windows.Forms.ScrollBars]::Vertical
+        }
     }
     if ($Monospace) {
         $box.Font = New-Object System.Drawing.Font('Consolas', 9)
@@ -898,8 +910,7 @@ function Build-ModePage {
         @{ Id = 'funnel'; Title = 'mode_funnel_title'; Desc = 'mode_funnel_desc' },
         @{ Id = 'quick';  Title = 'mode_quick_title';  Desc = 'mode_quick_desc' },
         @{ Id = 'custom'; Title = 'mode_custom_title'; Desc = 'mode_custom_desc' },
-        @{ Id = 'ssh';    Title = 'mode_ssh_title';    Desc = 'mode_ssh_desc' },
-        @{ Id = 'admin';  Title = 'mode_admin_title';  Desc = 'mode_admin_desc' }
+        @{ Id = 'ssh';    Title = 'mode_ssh_title';    Desc = 'mode_ssh_desc' }
     )
     # The box must grow with the list: a fixed height cut the last variant in
     # half and its radio was still clickable only in the visible strip.
@@ -920,6 +931,10 @@ function Build-ModePage {
         $radio.Add_CheckedChanged({
             if ($this.Checked) {
                 $script:Mode = [string]$this.Tag
+                # The service switch belongs to the gateway variants: carrying a
+                # stale TRUE into Funnel would make the URL fallback read the
+                # machine config for a node that runs in the user session.
+                if ($script:Mode -eq 'funnel' -or $script:Mode -eq 'ssh') { $script:AdminService = $false }
                 $script:OptionError = ''
             }
         })
@@ -935,7 +950,7 @@ function Build-ModePage {
 function Build-OptionsPage {
     if ($script:Mode -eq 'funnel') {
         $group = New-GroupBox -Text (Get-UiText -Key 'opt_funnel_group') -X 16 -Y 12 -W 760 -H 170
-        $summary = New-ReadOnlyBox -X 14 -Y 24 -W 732 -H 134 -MultiLine -Monospace
+        $summary = New-ReadOnlyBox -X 14 -Y 24 -W 732 -H 134 -MultiLine -Monospace -Wrap
         $summary.Text = (Get-UiText -Key 'opt_funnel_note')
         $group.Controls.Add($summary)
         $script:Content.Controls.Add($group)
@@ -975,34 +990,6 @@ function Build-OptionsPage {
         $script:Content.Controls.Add($group)
     }
 
-    if ($script:Mode -eq 'admin') {
-        # Same fields as Custom: the service still registers a node on the shared
-        # gateway. The note is the part that matters - this variant is the only one
-        # that elevates and the only one that moves the configuration machine-wide.
-        $group = New-GroupBox -Text (Get-UiText -Key 'page_options_title') -X 16 -Y 12 -W 760 -H 300
-
-        $group.Controls.Add((New-Label -Text ((Get-UiText -Key 'opt_node_label') + ':') -X 16 -Y 32 -W 200 -H 20))
-        $group.Controls.Add((New-InputBox -X 220 -Y 29 -W 520 -Text $script:Node -OnChange {
-            $script:Node = $this.Text; $script:OptionError = ''
-        }))
-        $group.Controls.Add((New-Label -Text (Get-UiText -Key 'opt_node_hint') -X 220 -Y 54 -W 520 -H 18 -Dim))
-
-        $group.Controls.Add((New-Label -Text ((Get-UiText -Key 'opt_domain_label') + ':') -X 16 -Y 90 -W 200 -H 20))
-        $group.Controls.Add((New-InputBox -X 220 -Y 87 -W 520 -Text $script:Domain -OnChange {
-            $script:Domain = $this.Text; $script:OptionError = ''
-        }))
-        $group.Controls.Add((New-Label -Text (Get-UiText -Key 'opt_domain_hint') -X 220 -Y 112 -W 520 -H 18 -Dim))
-
-        $group.Controls.Add((New-Label -Text ((Get-UiText -Key 'opt_token_label') + ':') -X 16 -Y 148 -W 200 -H 20))
-        $group.Controls.Add((New-InputBox -X 220 -Y 145 -W 520 -Text $script:Token -OnChange {
-            $script:Token = $this.Text; $script:OptionError = ''
-        }))
-        $group.Controls.Add((New-Label -Text (Get-UiText -Key 'opt_token_hint') -X 220 -Y 170 -W 520 -H 18 -Dim))
-
-        $group.Controls.Add((New-Label -Text (Get-UiText -Key 'opt_admin_note') -X 16 -Y 200 -W 730 -H 60 -Dim))
-        $script:Content.Controls.Add($group)
-    }
-
     if ($script:Mode -eq 'ssh') {
         $group = New-GroupBox -Text (Get-UiText -Key 'page_options_title') -X 16 -Y 12 -W 760 -H 210
 
@@ -1029,15 +1016,43 @@ function Build-OptionsPage {
         $script:Content.Controls.Add($group)
     }
 
-    $preview = New-GroupBox -Text (Get-UiText -Key 'opt_summary_group') -X 16 -Y 322 -W 760 -H 140
-    $box = New-ReadOnlyBox -X 14 -Y 22 -W 732 -H 106 -MultiLine -Monospace
+    # Administrator service: a switch on the chosen variant, not a variant of its
+    # own. The machine service hosts core.agent, so only the gateway modes can use
+    # it; Funnel runs core.server in the user session and SSH installs elsewhere.
+    $serviceTop = -1
+    if ($script:Mode -eq 'funnel') { $serviceTop = 192 }
+    elseif ($script:Mode -eq 'quick') { $serviceTop = 142 }
+    elseif ($script:Mode -eq 'custom') { $serviceTop = 252 }
+
+    if ($serviceTop -ge 0) {
+        $serviceSupported = ($script:Mode -eq 'quick' -or $script:Mode -eq 'custom')
+        $serviceGroup = New-GroupBox -Text (Get-UiText -Key 'opt_service_group') -X 16 -Y $serviceTop -W 760 -H 88
+        $serviceBox = New-Object System.Windows.Forms.CheckBox
+        $serviceBox.Text = Get-UiText -Key 'opt_service_label'
+        $serviceBox.Location = New-Object System.Drawing.Point(16, 24)
+        $serviceBox.Size = New-Object System.Drawing.Size(724, 24)
+        $serviceBox.Checked = [bool]($script:AdminService -and $serviceSupported)
+        $serviceBox.Enabled = $serviceSupported
+        $serviceBox.Add_CheckedChanged({
+            $script:AdminService = [bool]$this.Checked
+            $script:OptionError = ''
+        })
+        $serviceGroup.Controls.Add($serviceBox)
+        $serviceHintKey = if ($serviceSupported) { 'opt_service_hint' } else { 'opt_service_unavailable' }
+        $serviceGroup.Controls.Add((New-Label -Text (Get-UiText -Key $serviceHintKey) -X 16 -Y 52 -W 724 -H 28 -Dim))
+        $script:Content.Controls.Add($serviceGroup)
+    }
+
+    $previewTop = if ($serviceTop -ge 0) { $serviceTop + 96 } else { 322 }
+    $preview = New-GroupBox -Text (Get-UiText -Key 'opt_summary_group') -X 16 -Y $previewTop -W 760 -H 124
+    $box = New-ReadOnlyBox -X 14 -Y 22 -W 732 -H 92 -MultiLine -Monospace
     $box.Text = Get-CommandPreview -Mode $script:Mode -Node $script:Node -Domain $script:Domain `
         -Token $script:Token -Target $script:SshTarget -Port $script:SshPort
     $preview.Controls.Add($box)
     $script:Content.Controls.Add($preview)
 
     if ($script:OptionError) {
-        $errorLabel = New-Label -Text $script:OptionError -X 20 -Y 470 -W 750 -H 22
+        $errorLabel = New-Label -Text $script:OptionError -X 20 -Y ($previewTop + 132) -W 750 -H 22
         $errorLabel.ForeColor = [System.Drawing.Color]::FromArgb(176, 0, 0)
         $script:Content.Controls.Add($errorLabel)
     }
@@ -1182,6 +1197,14 @@ function Build-ResultPage {
         $rows = @()
         if ($script:Mode -eq 'ssh') {
             $rows = @(@((Get-UiText -Key 'res_config_file'), '~/remote-harness-mcp (remote)'))
+        } elseif ($script:AdminService) {
+            # The machine service keeps its configuration in ProgramData and is
+            # started by the boot task, not by a per-user Startup entry.
+            $rows = @(
+                @((Get-UiText -Key 'res_config_file'), (Join-Path $ServiceConfigDir 'agent.env')),
+                @((Get-UiText -Key 'res_autostart_file'), (Get-UiText -Key 'res_service_task')),
+                @((Get-UiText -Key 'res_agent_log'), (Join-Path $ServiceConfigDir 'agent.log'))
+            )
         } elseif ($script:Mode -eq 'funnel') {
             # Funnel is a standalone node: it has its own env file, its own log and
             # a Startup launcher, not the gateway agent ones.
@@ -1657,7 +1680,7 @@ function Invoke-SelfTest {
     #    without opening a single connection)
     $previewErrors = @()
     $savedMode = $script:Mode
-    foreach ($mode in @('quick', 'custom', 'ssh', 'admin')) {
+    foreach ($mode in @('quick', 'custom', 'ssh', 'funnel')) {
         $script:Mode = $mode
         try {
             $preview = Get-CommandPreview -Mode $mode -Node 'node-x' -Domain 'mesh.example.test' `
@@ -1683,7 +1706,7 @@ function Invoke-SelfTest {
     $savedLang = $script:UiLang
     foreach ($code in @('en', 'ru')) {
         $script:UiLang = $code
-        foreach ($mode in @('quick', 'custom', 'ssh', 'admin')) {
+        foreach ($mode in @('quick', 'custom', 'ssh', 'funnel')) {
             $script:Mode = $mode
             foreach ($index in @(0, 1, 2, 3, 4)) {
                 try {
@@ -1940,7 +1963,13 @@ if ($SelfTest) {
 }
 
 if ($RunInstall) {
+    if ($InstallMode -eq 'admin') {
+    # Legacy alias from before the service became a switch.
+    $script:Mode = 'quick'
+    $script:AdminService = $true
+} else {
     $script:Mode = $InstallMode
+}
     $script:Node = $InstallUser
     $script:Domain = $InstallGateway
     $script:Token = $InstallToken

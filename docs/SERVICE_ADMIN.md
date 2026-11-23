@@ -6,7 +6,7 @@ for a desktop, and it is the wrong shape for a machine that has to expose
 administrator-level tools to Gemini.
 
 `install.ps1 -AdminService` (and the "MCP service with administrator rights"
-variant of the visual installer) installs the same node as a **machine service**:
+switch of the visual installer) installs the same node as a **machine service**:
 
 | | per-user install (default) | administrator service (`-AdminService`) |
 | :--- | :--- | :--- |
@@ -33,7 +33,7 @@ elevated process cannot have its stdout redirected, the child writes a transcrip
 and the parent prints it — the output you see is the real installer output, and
 the exit code is the child's.
 
-Visual installer: choose **MCP service with administrator rights** on the variant
+Visual installer: pick the gateway variant, then tick **Install as a Windows service with administrator rights**
 page, fill in the node name and the shared domain, press Install. The wizard runs
 the same command through one pipeline step (`install.ps1 ... -AdminService`), so
 registration, the URL contract and the error reporting stay in one place.
