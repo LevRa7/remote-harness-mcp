@@ -352,8 +352,16 @@ class RemoteHarnessMCPServer(object):
     name = "remote_harness_mcp"
     version = "1.0.0"
 
+    #: Versions this server can speak, newest first. The one the client asks for
+    #: wins when it is on the list: a strict validator that offers 2025-06-18 must
+    #: not be answered with 2024-11-05, which some clients read as "not an MCP
+    #: server".
+    PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
+
     def __init__(self, name: str = "remote_harness_mcp") -> None:
         self.name = name
+        #: Streamable HTTP session id, echoed to clients that care (see the spec).
+        self.session_id = secrets.token_hex(16)
         self.tools: Dict[str, Callable[..., Any]] = {}
         self._specs: Dict[str, Dict[str, Any]] = {
             spec["name"]: spec for spec in TOOL_DEFINITIONS
@@ -459,11 +467,16 @@ class RemoteHarnessMCPServer(object):
 
         # -- method dispatch ----------------------------------------------
         if method == "initialize":
+            requested = params.get("protocolVersion")
+            if requested in self.PROTOCOL_VERSIONS:
+                negotiated = requested
+            else:
+                negotiated = self.PROTOCOL_VERSIONS[0]
             return 200, {
                 "jsonrpc": "2.0",
                 "id": req_id,
                 "result": {
-                    "protocolVersion": "2024-11-05",
+                    "protocolVersion": negotiated,
                     "capabilities": {
                         "tools": {"listChanged": False},
                         "prompts": {"listChanged": False},
@@ -999,7 +1012,13 @@ class StandaloneMCPHandler(BaseHTTPRequestHandler):
             return False
 
     def _authorized(self) -> bool:
-        if self._clean_path() in _PUBLIC_PATHS:
+        path = self._clean_path()
+        if path in _PUBLIC_PATHS:
+            return True
+        # OAuth discovery is unauthenticated by definition: a client fetches it
+        # to learn HOW to authenticate. Answering 401 there makes a connector
+        # conclude the server is unreachable rather than that it needs a token.
+        if path.startswith("/.well-known/"):
             return True
         return self._token_valid()
 
@@ -1087,9 +1106,12 @@ class StandaloneMCPHandler(BaseHTTPRequestHandler):
                 (self.headers.get("Accept") or "")[:80],
                 (self.headers.get("Sec-Fetch-Dest") or ""),
             )
-            self._stream_sse()
-        elif path.startswith("/.well-known/oauth-protected-resource"):
-            self._send_json(404, {"error": "not_found"})
+            self._stream_sse(announce_endpoint=(path == "/sse"))
+        elif path.startswith("/.well-known/"):
+            # There is no OAuth here: this node authenticates with the token in
+            # the URL. A 404 is the standard "no metadata" answer and sends the
+            # client down the no-auth path; 401 would look like a broken server.
+            self._send_json(404, {"error": "not_found", "auth": "token-in-url"})
         else:
             self._send_json(404, {"error": "not_found", "path": path})
 
@@ -1117,6 +1139,14 @@ class StandaloneMCPHandler(BaseHTTPRequestHandler):
             self._send_json(200, {"jsonrpc": "2.0", "id": None, "error": {"code": -32603, "message": "Internal error"}})
             return
 
+        logger.info(
+            "POST %s from ua=%r accept=%r content_type=%r bytes=%d",
+            path,
+            (self.headers.get("User-Agent") or "")[:80],
+            (self.headers.get("Accept") or "")[:80],
+            (self.headers.get("Content-Type") or "")[:60],
+            len(raw_body),
+        )
         status, response = self.server_mcp.handle_jsonrpc(raw_body)
         if status == 204 or response is None:
             self.send_response(204)
@@ -1124,7 +1154,34 @@ class StandaloneMCPHandler(BaseHTTPRequestHandler):
             self.end_headers()
             return
         if isinstance(response, (dict, list)):
-            self._send_json(status, response)
+            # Streamable HTTP lets the server answer a POST either with JSON or
+            # with a one-frame SSE stream. Answer SSE only when the client asked
+            # for that alone: a client that lists both (the usual MCP shape,
+            # including Gemini) gets the JSON body it is prepared to parse.
+            accept = (self.headers.get("Accept") or "").lower()
+            wants_sse = "text/event-stream" in accept and "application/json" not in accept
+            session_id = getattr(self.server_mcp, "session_id", "")
+            if wants_sse:
+                payload = json.dumps(response, ensure_ascii=False, default=str)
+                frame = ("event: message\ndata: %s\n\n" % payload).encode("utf-8")
+                self._send_headers(200, "text/event-stream")
+                self.send_header("Cache-Control", "no-store")
+                if session_id:
+                    self.send_header("Mcp-Session-Id", session_id)
+                self.send_header("Content-Length", str(len(frame)))
+                self.end_headers()
+                try:
+                    self.wfile.write(frame)
+                except Exception:
+                    pass
+                return
+            body = json.dumps(response, ensure_ascii=False, default=str).encode("utf-8")
+            self._send_headers(status, "application/json")
+            if session_id:
+                self.send_header("Mcp-Session-Id", session_id)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
         else:  # defensive: never drop the connection on a malformed handler result
             self._send_json(500, {"error": "internal_error"})
 
@@ -1143,7 +1200,24 @@ class StandaloneMCPHandler(BaseHTTPRequestHandler):
         value = query.get("token", [None])[0]
         return str(value) if value else None
 
-    def _stream_sse(self) -> None:
+    def do_DELETE(self) -> None:  # noqa: N802 - http.server API
+        # Streamable HTTP clients end a session with DELETE. Answering 405 makes
+        # some of them treat the server as broken.
+        if not self._request_allowed():
+            self._send_json(403, {"error": "forbidden", "message": "Host or Origin is not loopback"})
+            return
+        if not self._authorized():
+            self._send_unauthorized()
+            return
+        path = self._clean_path()
+        if path in ("/mcp", "/sse"):
+            self.send_response(204)
+            self._cors_headers()
+            self.end_headers()
+            return
+        self._send_json(404, {"error": "not_found", "path": path})
+
+    def _stream_sse(self, announce_endpoint: bool = True) -> None:
         self._send_headers(200, "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "keep-alive")
@@ -1156,7 +1230,8 @@ class StandaloneMCPHandler(BaseHTTPRequestHandler):
         if query_token:
             endpoint += "?token=" + quote(query_token, safe="")
         try:
-            self.wfile.write(("event: endpoint\ndata: %s\n\n" % endpoint).encode("utf-8"))
+            if announce_endpoint:
+                self.wfile.write(("event: endpoint\ndata: %s\n\n" % endpoint).encode("utf-8"))
             self.wfile.flush()
             while True:
                 time.sleep(15)
