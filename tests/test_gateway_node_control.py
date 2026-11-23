@@ -24,7 +24,7 @@ LINK = "lk_0123456789abcdef0123456789abcdef"
 
 def _post_request(path, body, headers=None, path_params=None):
     raw = json.dumps(body).encode()
-    raw_headers = [(b"host", b"smart-server.online"),
+    raw_headers = [(b"host", b"mcp.example.test"),
                    (b"content-type", b"application/json"),
                    (b"accept", b"application/json, text/event-stream")]
     for key, value in (headers or {}).items():
@@ -38,7 +38,7 @@ def _post_request(path, body, headers=None, path_params=None):
         "headers": raw_headers,
         "query_string": urlparse(path).query.encode(),
         "scheme": "https",
-        "server": ("smart-server.online", 443),
+        "server": ("mcp.example.test", 443),
         "client": ("127.0.0.1", 12345),
     }
     if path_params:

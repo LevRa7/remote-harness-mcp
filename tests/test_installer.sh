@@ -25,7 +25,7 @@ echo "[PASS] dry-run standalone passed"
 
 # Test 3: Dry-run gateway mode
 echo "[Test 3] Testing --dry-run --mode=gateway..."
-OUTPUT_GW=$(bash "$INSTALLER" --dry-run --mode=gateway --domain=smart-server.online)
+OUTPUT_GW=$(bash "$INSTALLER" --dry-run --mode=gateway --domain=mcp.example.test)
 echo "$OUTPUT_GW" | grep -q "gateway"
 echo "[PASS] dry-run gateway passed"
 
@@ -65,7 +65,7 @@ echo "[Test 6] Testing canonical URL generation..."
 URL_LINE=$(MESH_DOMAIN_FILE=/nonexistent-domain-file MESH_PUBLIC_URL= AGY_PUBLIC_BASE_URL= \
     bash "$INSTALLER" --dry-run --mode=tunnel --user=node-one --token=tok123 --lang=en \
     | grep 'Canonical MCP URL')
-echo "$URL_LINE" | grep -q 'https://smart-server.online/sse?user=node-one&token=tok123' || {
+echo "$URL_LINE" | grep -q 'https://mcp.example.test/sse?user=node-one&token=tok123' || {
     echo "[FAIL] canonical URL is wrong: $URL_LINE"
     exit 1
 }
@@ -297,7 +297,7 @@ echo "[PASS] WSL is detected before the battery (lines $WSL_LINE < $BAT_LINE)"
 # the legacy MESH_GATEWAY that agent.env carries. A node installed with only
 # agent.env therefore dials the right gateway while minting links on the built-in
 # default, which is exactly what a real Termux node did (it handed out
-# smart-server.online links while its tunnel went to the configured gateway).
+# mcp.example.test links while its tunnel went to the configured gateway).
 echo "[Test 16] Testing that the installer persists the domain..."
 grep -q '^write_domain_file() {' "$INSTALLER" || {
     echo "[FAIL] install.sh must persist the resolved domain in the domain file"

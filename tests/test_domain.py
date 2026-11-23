@@ -63,11 +63,17 @@ def _write_domain_file(path: Path, text: str, bom: bool = False) -> str:
 # Resolution order
 # ---------------------------------------------------------------------------
 
-def test_default_when_nothing_is_configured():
-    assert domain.public_base_url() == domain.DEFAULT_PUBLIC_BASE_URL
-    assert domain.public_base_url() == "https://smart-server.online"
-    assert domain.public_host() == "smart-server.online"
-    assert domain.gateway_host() == "smart-server.online"
+def test_nothing_is_configured_by_default():
+    """The project ships no domain: an unconfigured node has no public address.
+
+    A built-in default used to point every unconfigured install at a real
+    hostname the operators did not own.  Empty is the only honest answer, and
+    the installers turn it into "configure a domain" instead of a dead link.
+    """
+    assert domain.DEFAULT_PUBLIC_BASE_URL == ""
+    assert domain.public_base_url() == ""
+    assert domain.public_host() == ""
+    assert domain.gateway_host() == ""
     assert domain.source() == "default"
     assert domain.is_explicit() is False
 
@@ -303,26 +309,29 @@ def test_agent_read_env_file_delegates_to_the_shared_parser(tmp_path):
 # The point of the exercise: the domain is written down once
 # ---------------------------------------------------------------------------
 
-def test_the_domain_literal_lives_in_exactly_one_module():
-    """Every component must read the domain, not spell it out again."""
+def test_no_shipped_component_hardcodes_a_deployment_domain():
+    """No component may name a real deployment; the domain comes from config."""
     root = Path(__file__).resolve().parent.parent
     components = (
         "gateway.py",
         "core/agent.py",
         "core/mcp_tools.py",
         "core/server.py",
+        "core/domain.py",
+        "install.sh",
+        "install.ps1",
         "rhm_sync.py",
         "rhm_watcher.py",
     )
+    forbidden = "smart-server" + ".online"
     offenders = [
         name
         for name in components
-        if "smart-server.online" in (root / name).read_text(encoding="utf-8")
+        if forbidden in (root / name).read_text(encoding="utf-8")
     ]
     assert offenders == [], (
-        "the public domain must only be declared in core/domain.py, found in: %s" % offenders
+        "a deployment domain must never be baked into a shipped component: %s" % offenders
     )
-    assert "smart-server.online" in (root / "core" / "domain.py").read_text(encoding="utf-8")
 
 # ---------------------------------------------------------------------------
 # The gateway announces the domain; the node adopts it for its links

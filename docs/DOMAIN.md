@@ -13,7 +13,7 @@
 | 3 | `AGY_PUBLIC_BASE_URL` в окружении (старый алиас) | все |
 | 4 | файл `domain.env` | все |
 | 5 | `MESH_GATEWAY` (только хост туннеля узла) | узел |
-| 6 | `DEFAULT_PUBLIC_BASE_URL` в `core/domain.py` | все |
+| 6 | `DEFAULT_PUBLIC_BASE_URL` в `core/domain.py` — **пусто**: встроенного домена нет | все |
 
 Файл `domain.env` — то самое единственное место на хосте:
 

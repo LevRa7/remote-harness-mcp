@@ -24,7 +24,7 @@ import gateway
 def _request(query: str = "", method: str = "GET", body: bytes = b"",
              headers: dict | None = None, path_params: dict | None = None,
              path: str = "/v1/devices") -> Request:
-    raw_headers = [(b"host", b"smart-server.online"), (b"content-type", b"application/json")]
+    raw_headers = [(b"host", b"mcp.example.test"), (b"content-type", b"application/json")]
     for key, value in (headers or {}).items():
         raw_headers.append((key.lower().encode(), value.encode()))
     scope = {
@@ -34,7 +34,7 @@ def _request(query: str = "", method: str = "GET", body: bytes = b"",
         "headers": raw_headers,
         "query_string": urlparse(f"/{query}").query.encode(),
         "scheme": "https",
-        "server": ("smart-server.online", 443),
+        "server": ("mcp.example.test", 443),
         "client": ("127.0.0.1", 12345),
         "path_params": path_params or {},
     }

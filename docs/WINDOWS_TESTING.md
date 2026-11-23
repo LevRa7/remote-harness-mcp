@@ -213,7 +213,7 @@ grep_search   glob_find     run_job         job_output     job_kill      job_lis
 
 ### 6.1. Домен на удержании у регистратора
 
-RDAP (публичные регистрационные данные) для `smart-server.online`:
+RDAP (публичные регистрационные данные) для `<your-domain>`:
 
 ```text
 status   : client transfer prohibited, server hold
@@ -229,7 +229,7 @@ DNS-over-HTTPS от Cloudflare и Google — везде `NXDOMAIN` (`Status=3`),
 поставлен **сегодня в 05:22 UTC**.
 
 Пока удержание не снято, **не работает ничего из документированного сценария**: ни
-`irm https://smart-server.online/install.ps1 | iex`, ни `curl https://smart-server.online/install.sh`,
+`irm https://<your-domain>/install.ps1 | iex`, ни `curl https://<your-domain>/install.sh`,
 ни регистрация узла, ни туннель. Снять удержание можно только в кабинете регистратора
 (REG.RU) — с сервера это не лечится. Типичные причины: неоплаченный счёт, обращение по
 abuse или непройденная проверка контактных данных регистранта (ICANN ERRP).
@@ -239,11 +239,11 @@ abuse или непройденная проверка контактных да
 Со стороны интернета и с самого сервера:
 
 ```text
-GET https://smart-server.online/health
-{"status":"healthy","service":"remote_harness_mcp_gateway","host":"smart-server.online",
+GET https://<your-domain>/health
+{"status":"healthy","service":"remote_harness_mcp_gateway","host":"<your-domain>",
  "target_user":"anonymous","node_online":false,"active_tunnels_count":0,...}
 
-TLS: CN=smart-server.online, SAN: smart-server.online + *.smart-server.online (в т.ч. matebook16),
+TLS: CN=<your-domain>, SAN: <your-domain> + *.<your-domain> (в т.ч. matebook16),
      действителен до 2026-12-20, проверка OK
 ```
 
@@ -360,7 +360,7 @@ NameError: name 'user' is not defined. Did you mean: 'super'?
 
 ```text
 installExit=0
-MESH_GATEWAY = smart-server.online      MESH_USER = matebook16      MESH_TOKEN = 32 символа
+MESH_GATEWAY = <your-domain>      MESH_USER = matebook16      MESH_TOKEN = 32 символа
 автозапуск VBS: создан                  агент: запущен (python -m core.agent)
 GET /health?user=matebook16 -> node_online=true, active_tunnels_count=1
 ```
@@ -384,7 +384,7 @@ system_vitals-> cpu_load 13.3, ram_total_mb 15724.1, disk_total_gb 120.0
 `C:\Windows\System32\drivers\etc\hosts`:
 
 ```text
-<gateway-ip> smart-server.online  # Remote Harness MCP gateway - TEMPORARY: domain is on registry server hold
+<gateway-ip> <your-domain>  # Remote Harness MCP gateway - TEMPORARY: domain is on registry server hold
 ```
 
 Без неё агент не может разрешить имя шлюза и туннель не поднимется. Убрать — удалить эту строку.
@@ -442,23 +442,23 @@ system_vitals-> cpu_load 13.3, ram_total_mb 15724.1, disk_total_gb 120.0
 ## 8. Инцидент с фишингом: причина `serverHold` и чистка сервера
 
 `serverHold` оказался ответом реестра на жалобу о фишинге (Netcraft) на адрес
-`https://accounts.smart-server.online/v3/signin/identifier?...` — то есть на **форму входа Google,
+`https://accounts.<your-domain>/v3/signin/identifier?...` — то есть на **форму входа Google,
 отданную с нашего домена**. Источник — вчерашняя незавершённая попытка отзеркалить
 `gemini.google.com`.
 
 ### Что именно стояло на сервере
 
 ```text
-/etc/nginx/sites-available/gemini-mirror.smart-server.online
-    gemini.smart-server.online    -> proxy_pass https://gemini.google.com
-    accounts.smart-server.online  -> proxy_pass https://accounts.google.com
+/etc/nginx/sites-available/gemini-mirror.<your-domain>
+    gemini.<your-domain>    -> proxy_pass https://gemini.google.com
+    accounts.<your-domain>  -> proxy_pass https://accounts.google.com
 /etc/nginx/snippets/gemini-mirror-common.conf
-    proxy_cookie_domain ~^\.?google\.com$  .smart-server.online   <- куки Google на наш домен
+    proxy_cookie_domain ~^\.?google\.com$  .<your-domain>   <- куки Google на наш домен
     proxy_hide_header  Content-Security-Policy / X-Frame-Options / Strict-Transport-Security
     proxy_set_header   X-Forwarded-For "" / X-Real-IP "" / Forwarded "" / Via ""
     sub_filter + proxy_set_header Accept-Encoding ""              <- правка HTML на лету
 /etc/nginx/snippets/gemini-mirror-redirect.conf   (include из apex-vhost, location = /gemini)
-/etc/nginx/sites-available/gemini-mirror-acme.smart-server.online
+/etc/nginx/sites-available/gemini-mirror-acme.<your-domain>
 ```
 
 Плюс живые процессы headless Chromium с `--host-resolver-rules=MAP accounts.google.com 127.0.0.1
@@ -472,7 +472,7 @@ system_vitals-> cpu_load 13.3, ram_total_mb 15724.1, disk_total_gb 120.0
 1. Бэкап: `/root/backups/phishing-cleanup-20261006-170214/` (+ подкаталог `removed/`).
 2. Конфиг зеркала, acme-vhost и оба сниппета **вынесены** из `/etc/nginx`.
 3. `include` сниппета в apex-vhost закомментирован (строка 104).
-4. `accounts.smart-server.online` и `gemini.smart-server.online` теперь отдают **410 Gone** и по
+4. `accounts.<your-domain>` и `gemini.<your-domain>` теперь отдают **410 Gone** и по
    http, и по https; ничего никуда не проксируется.
 5. Остановлены оставшиеся headless-браузеры, удалены `/tmp/gm` и `/tmp/gemini-mirror-*`.
 6. `nginx -t` проходит, служба перезапущена и активна.
@@ -492,7 +492,7 @@ accounts. / gemini.                       : http=410 https=410 (тело — ngi
 Отдельные хосты `derp.` и `drive.` отвечают 502 — их собственные службы (`derper`, `filebrowser`)
 не запущены и до чистки; к правкам отношения не имеют.
 
-Замечание: в текущем `/var/log/nginx/access.log` запросов к `accounts.smart-server.online` — 0,
+Замечание: в текущем `/var/log/nginx/access.log` запросов к `accounts.<your-domain>` — 0,
 но логи могли ротироваться, так что «никто не заходил» этим не доказывается.
 
 ### Что отправить регистратору / Netcraft
@@ -503,15 +503,15 @@ accounts. / gemini.                       : http=410 https=410 (тело — ngi
 The reported content has been removed and the site secured.
 
 Found: nginx vhosts publishing Google's sign-in and Gemini pages under our own
-domain (accounts.smart-server.online -> accounts.google.com, and a second vhost
+domain (accounts.<your-domain> -> accounts.google.com, and a second vhost
 for gemini.google.com), including rewriting of the upstream cookie domain to
-.smart-server.online. A misconfigured reverse proxy set up during development.
+.<your-domain>. A misconfigured reverse proxy set up during development.
 
 Actions taken (6 Oct 2026, ~07:02 UTC):
 1. Removed the mirror vhosts and their rewriting snippets from the nginx
    configuration (kept out of the config tree; backup at
    /root/backups/phishing-cleanup-20261006-170214/).
-2. accounts.smart-server.online and gemini.smart-server.online now return
+2. accounts.<your-domain> and gemini.<your-domain> now return
    HTTP 410 Gone on both http and https; nothing is proxied to any external host.
 3. Verified no other vhost proxies external content and no body/cookie rewriting
    remains anywhere in the nginx configuration.
@@ -519,5 +519,5 @@ Actions taken (6 Oct 2026, ~07:02 UTC):
 5. Confirmed no cron job, timer or systemd unit can re-deploy the content.
 6. nginx configuration validates and the service is running.
 
-Please re-check and lift the serverHold status on smart-server.online.
+Please re-check and lift the serverHold status on <your-domain>.
 ```

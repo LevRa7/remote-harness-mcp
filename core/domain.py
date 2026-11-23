@@ -31,7 +31,8 @@ Resolution order, highest priority first:
 5. ``MESH_GATEWAY`` in the environment - the legacy node-side setting. It is
    honoured for the *tunnel host* only, so a node installed before ``domain.env``
    existed keeps working until its operator moves the value into the domain file;
-6. :data:`DEFAULT_PUBLIC_BASE_URL` - the single default, declared once, here.
+6. :data:`DEFAULT_PUBLIC_BASE_URL` - empty: the project ships no domain of its own,
+   so an unconfigured node simply has no public address.
 
 The only project module imported here is :mod:`core.paths` (itself standard
 library only), so any component may import this module - including
@@ -45,8 +46,12 @@ from urllib.parse import urlparse
 
 from core import paths
 
-#: The project default. Declared exactly once; every other module asks for it.
-DEFAULT_PUBLIC_BASE_URL = "https://smart-server.online"
+#: There is no built-in deployment domain, on purpose: a project must never ship
+#: a hostname its users do not own, because every unconfigured node would then
+#: mint links and dial a tunnel to someone else's machine.  Empty means "not
+#: configured"; the installers turn that into an explicit request for --domain,
+#: and standalone/Funnel mode needs no public domain at all.
+DEFAULT_PUBLIC_BASE_URL = ""
 
 #: Neutral placeholder for *display* in an unconfigured deployment. It is not a
 #: usable address and is never used to build a URL that a caller is expected to

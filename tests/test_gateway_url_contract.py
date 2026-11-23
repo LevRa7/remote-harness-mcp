@@ -21,7 +21,7 @@ from starlette.requests import Request
 import gateway
 
 
-def _request(query: str = "", host: str = "smart-server.online", method: str = "GET",
+def _request(query: str = "", host: str = "mcp.example.test", method: str = "GET",
              body: bytes = b"") -> Request:
     scope = {
         "type": "http",
@@ -83,7 +83,7 @@ def test_public_url_uses_the_shared_domain():
 def test_skill_advertises_the_shared_domain_only():
     skill = gateway.get_skill("node-one", gateway.PUBLIC_HOST)
     assert f"{gateway.PUBLIC_BASE_URL}/sse?user=node-one" in skill
-    assert "node-one.smart-server.online" not in skill
+    assert "node-one.mcp.example.test" not in skill
     assert f"Target Node: node-one (shared gateway {gateway.PUBLIC_HOST})" in skill
 
 

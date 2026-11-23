@@ -114,3 +114,26 @@ Rulings:
 - macOS: CLI берётся из `/Applications/Tailscale.app/Contents/MacOS/Tailscale`, когда
   его нет в PATH. — иначе `find_tailscale` не находил бы установленный клиент.
 - `sudo -v` перед фоновым `tailscale up`: фоновый процесс не может спросить пароль.
+
+## TSF-07 — домена по умолчанию нет
+
+`[DRY-RUN] Domain: <dead domain>` больше не появится: `DEFAULT_PUBLIC_BASE_URL` пуст.
+Встроенного домена у проекта нет, установщик требует `--domain` для режима шлюза
+и не требует его для standalone/funnel.
+
+- `core/domain.py`: `DEFAULT_PUBLIC_BASE_URL = ""` — источник №6 цепочки теперь пуст.
+- `install.sh` / `install.ps1`: сообщение «домен не задан» переписано, dry-run печатает
+  `Domain: not configured (not required for this mode)`.
+- Документация и примеры: домен заменён на `<your-domain>`; `docs/releases/*` и
+  `CHANGES_AND_STATUS.md` оставлены как исторические записи.
+- Тесты: литеральные проверки пропускаются, пока домена нет; добавлен guard
+  `test_no_shipped_component_hardcodes_a_deployment_domain`.
+
+Доказательства: `1599 passed, 22 skipped`; парсер 0 ошибок; `bash -n` 0.
+
+## TSF-08 — Funnel не подменяется на localhost
+
+Если запрошен `-Funnel` / `--mode=funnel`, а публичный URL не получен, установщик
+печатает причину (`tailscale status`, `funnel status`, ACL) и выходит с кодом 1:
+localhost-ссылка больше не выдаётся за результат. Добавлено время установки,
+чтобы видеть, какой шаг медленный.

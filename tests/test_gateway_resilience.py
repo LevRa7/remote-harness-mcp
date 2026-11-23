@@ -29,7 +29,7 @@ TOKEN = "tok"
 # ---------------------------------------------------------------------------
 
 def _request(query="", path="/sse", method="GET", body=b"", headers=None):
-    hdrs = [(b"host", b"smart-server.online"), (b"content-type", b"application/json")]
+    hdrs = [(b"host", b"mcp.example.test"), (b"content-type", b"application/json")]
     for key, value in (headers or {}).items():
         hdrs.append((key.lower().encode(), value.encode()))
 
@@ -42,7 +42,7 @@ def _request(query="", path="/sse", method="GET", body=b"", headers=None):
         "headers": hdrs,
         "query_string": query.lstrip("?").encode(),
         "scheme": "https",
-        "server": ("smart-server.online", 443),
+        "server": ("mcp.example.test", 443),
         "client": ("127.0.0.1", 12345),
     }
 

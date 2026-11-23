@@ -521,11 +521,11 @@ function Write-DomainFile {
     } catch {
         if ($Lang -eq "ru") {
             Write-Host "[!] Не удалось записать домен в $Path : $($_.Exception.Message)" -ForegroundColor Yellow
-            Write-Host "    Ссылки узла будут строиться на встроенном домене по умолчанию." -ForegroundColor Yellow
+            Write-Host "    Ссылки узла останутся без публичного домена, пока вы его не зададите." -ForegroundColor Yellow
             Write-Host "    Запишите вручную:  Set-Content '$Path' '$line'" -ForegroundColor Yellow
         } else {
             Write-Host "[!] Could not write the domain to $Path : $($_.Exception.Message)" -ForegroundColor Yellow
-            Write-Host "    The node's links would use the built-in default domain." -ForegroundColor Yellow
+            Write-Host "    The node's links stay without a public domain until you set one." -ForegroundColor Yellow
             Write-Host "    Write it by hand:  Set-Content '$Path' '$line'" -ForegroundColor Yellow
         }
         return
@@ -567,11 +567,9 @@ if ($DomainMissing) {
     if ($Lang -eq "ru") {
         Write-Host ""
         Write-Host "[!] Домен шлюза не задан." -ForegroundColor Red
-        # ${...} matters: "$DomainPlaceholder:" would be read as a drive-qualified
-        # variable reference and the whole script fails to parse in PowerShell 5.1.
-        Write-Host "    В этой копии установщика остался плейсхолдер ${DomainPlaceholder}: она не была" -ForegroundColor Red
-        Write-Host "    опубликована скриптом deploy_gateway.sh, а домена нет ни в окружении, ни в" -ForegroundColor Red
-        Write-Host "    файле $DomainFilePath." -ForegroundColor Red
+        Write-Host "    Домена нет ни в этой копии установщика, ни в окружении, ни в файле" -ForegroundColor Red
+        Write-Host "    $DomainFilePath. Встроенного домена у проекта нет намеренно: чужой" -ForegroundColor Red
+        Write-Host "    адрес не должен становиться адресом вашего узла." -ForegroundColor Red
         Write-Host "    Укажите домен одним из способов:" -ForegroundColor Yellow
         Write-Host "      .\install.ps1 -Gateway <общий-домен>" -ForegroundColor Yellow
         Write-Host "      `$env:MESH_PUBLIC_URL='https://<общий-домен>'; .\install.ps1" -ForegroundColor Yellow
@@ -581,9 +579,9 @@ if ($DomainMissing) {
     } else {
         Write-Host ""
         Write-Host "[!] No gateway domain configured." -ForegroundColor Red
-        Write-Host "    This copy of the installer still carries the $DomainPlaceholder placeholder: it" -ForegroundColor Red
-        Write-Host "    was not published by deploy_gateway.sh, and no domain was found in the" -ForegroundColor Red
-        Write-Host "    environment or in $DomainFilePath." -ForegroundColor Red
+        Write-Host "    No domain was found in this installer copy, in the environment or in" -ForegroundColor Red
+        Write-Host "    $DomainFilePath. The project ships no built-in domain on purpose: an address" -ForegroundColor Red
+        Write-Host "    you do not own must never become the address of your node." -ForegroundColor Red
         Write-Host "    Pass the domain in one of these ways:" -ForegroundColor Yellow
         Write-Host "      .\install.ps1 -Gateway <shared-domain>" -ForegroundColor Yellow
         Write-Host "      `$env:MESH_PUBLIC_URL='https://<shared-domain>'; .\install.ps1" -ForegroundColor Yellow
@@ -631,8 +629,7 @@ if ($DryRun) {
     # writer would skip, so the two never disagree.
     $domainFileState = if ($DomainMissing) {
         "$DomainFilePath (not written: no domain configured)"
-    } elseif ($Gateway -eq (Get-NormalisedHost (Get-ModuleDefaultDomain))) {
-        "$DomainFilePath (not written: the built-in default is a fallback, not a configuration)"
+
     } else {
         "$DomainFilePath -> MESH_PUBLIC_URL=https://$Gateway"
     }
@@ -1079,6 +1076,7 @@ function Register-StandaloneNodeTask {
 }
 
 if ($Mode -eq "standalone") {
+    $standaloneWatch = [System.Diagnostics.Stopwatch]::StartNew()
     if ($Lang -eq "ru") {
         Write-Host "=== Запуск в режиме Local Standalone на порту $Port ===" -ForegroundColor Blue
     } else {
@@ -1161,6 +1159,21 @@ if ($Mode -eq "standalone") {
     $LocalUrl = "http://localhost:$Port/sse?token=$StandaloneToken"
     $PublicUrl = if ($FunnelName) { "https://$FunnelName/sse?token=$StandaloneToken" } else { "" }
     $CopyUrl = if ($PublicUrl) { $PublicUrl } else { $LocalUrl }
+    $standaloneWatch.Stop()
+
+    if ($Funnel -and -not $PublicUrl) {
+        # A localhost URL is useless for a cloud connector, so this is a failure,
+        # not a "done with a smaller result": the wizard must not report success.
+        Write-Host ""
+        Write-Host "=== ПУБЛИЧНАЯ ССЫЛКА НЕ СОЗДАНА / NO PUBLIC URL ===" -ForegroundColor Red
+        Write-Host "  Узел запущен только на localhost. Проверьте по порядку:" -ForegroundColor Yellow
+        Write-Host "   1. tailscale status        -> BackendState должен быть Running" -ForegroundColor Yellow
+        Write-Host "   2. tailscale funnel status -> если пусто, запустите установщик ещё раз" -ForegroundColor Yellow
+        Write-Host "   3. ACL: nodeAttrs funnel для tailnet (https://login.tailscale.com/admin/acls)" -ForegroundColor Yellow
+        Write-Host "  Tailscale: $(if ($TsExe) { $TsExe } else { "не найден" }), состояние: $(if ($TsExe) { Get-TailscaleState -Tailscale $TsExe } else { "n/a" })" -ForegroundColor DarkGray
+        Write-Host "  Потрачено: $([int]$standaloneWatch.Elapsed.TotalSeconds) с" -ForegroundColor DarkGray
+        exit 1
+    }
     $Copied = $false
     try {
         Set-Clipboard -Value $CopyUrl -ErrorAction Stop
@@ -1213,6 +1226,9 @@ if ($Lang -eq "ru") {
     Write-Host " 2. Click 'Add connector' and name it 'MyDevice'"
     Write-Host " 3. Paste the URL into the 'Server URL' field (Ctrl+V) and click Connect." -ForegroundColor White
     Write-Host ""
+}
+if ($null -ne $standaloneWatch) {
+    Write-Host ("    Время установки / install time: {0:N1} с" -f $standaloneWatch.Elapsed.TotalSeconds) -ForegroundColor DarkGray
 }
 exit 0
 }

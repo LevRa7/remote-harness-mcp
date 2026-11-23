@@ -68,6 +68,7 @@ needs_bash = pytest.mark.skipif(not BASH, reason="bash is required for the shell
 # The audit
 # ---------------------------------------------------------------------------
 
+@pytest.mark.skipif(not DEFAULT_HOST, reason="the project ships no default domain")
 @pytest.mark.parametrize("relative", NO_LITERAL_FILES)
 def test_shipped_files_hold_no_domain_literal(relative):
     text = _read(relative)
@@ -83,6 +84,7 @@ def test_published_files_keep_the_placeholder(relative):
     assert "__MESH_DOMAIN__" in _read(relative)
 
 
+@pytest.mark.skipif(not DEFAULT_HOST, reason="the project ships no default domain")
 def test_the_default_is_declared_exactly_once_in_python():
     """Only core/domain.py may name the default; everything else asks it."""
     offenders = []
@@ -154,11 +156,19 @@ def test_shell_resolver_tolerates_a_bom_and_a_bare_host(tmp_path):
 
 
 @needs_bash
-def test_shell_resolver_falls_back_to_the_python_default(tmp_path):
-    url, host, source = _resolve({"MESH_DOMAIN_FILE": str(tmp_path / "absent.env")}).split("|")
-    assert url == domain.DEFAULT_PUBLIC_BASE_URL
-    assert host == DEFAULT_HOST
-    assert "domain.py" in source
+def test_shell_resolver_refuses_when_the_project_has_no_default(tmp_path):
+    """The project ships no domain, so a checkout alone is not a source either."""
+    script = (
+        '. "%s/ops/mesh-domain.sh" && ! mesh_resolve_domain "%s" && echo REFUSED'
+        % (REPO.replace("\\", "/"), REPO.replace("\\", "/"))
+    )
+    environment = dict(os.environ)
+    for key in ("MESH_PUBLIC_URL", "AGY_PUBLIC_BASE_URL", "MESH_DOMAIN_FILE"):
+        environment.pop(key, None)
+    environment["MESH_DOMAIN_FILE"] = str(tmp_path / "absent.env")
+    result = subprocess.run([BASH, "-c", script], capture_output=True, text=True,
+                            env=environment, timeout=60)
+    assert "REFUSED" in result.stdout
 
 
 @needs_bash

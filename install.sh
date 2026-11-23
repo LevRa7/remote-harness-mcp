@@ -228,12 +228,9 @@ write_domain_file() {
     if [ -z "$domain" ] || [ "$domain" = "$DOMAIN_PLACEHOLDER" ]; then
         return 0
     fi
-    # Never record the project's built-in default. It is a fallback, not a decision:
-    # writing it would turn "nothing is configured" into a pinned domain file, and
-    # once that file exists core/domain.py stops consulting the legacy MESH_GATEWAY
-    # at all - the operator's own agent.env knob would silently go inert. Nothing is
-    # lost by skipping it: with no file the resolver's last fallback IS that value,
-    # so the node's links and its tunnel still name the same host.
+    # The project ships no built-in domain (DEFAULT_PUBLIC_BASE_URL is empty), so
+    # there is nothing to "default to" and nothing to skip: this only records what
+    # the operator actually resolved.
     module_default="$(normalise_host "$(module_default_domain)")"
     if [ -n "$module_default" ] && [ "$domain" = "$module_default" ]; then
         return 0
@@ -257,11 +254,11 @@ write_domain_file() {
     else
         if [ "$LANG_CHOICE" = "ru" ]; then
             echo -e "${YELLOW}[!] Не удалось записать домен в ${DEFAULT_DOMAIN_FILE}.${RESET}"
-            echo -e "    Ссылки узла будут строиться на встроенном домене по умолчанию."
+            echo -e "    Ссылки узла останутся без публичного домена, пока вы его не зададите."
             echo -e "    Запишите вручную: ${CYAN}$(domain_file_write_cmd "https://${domain}")${RESET}"
         else
             echo -e "${YELLOW}[!] Could not write the domain to ${DEFAULT_DOMAIN_FILE}.${RESET}"
-            echo -e "    The node's links would use the built-in default domain."
+            echo -e "    The node's links stay without a public domain until you set one."
             echo -e "    Write it by hand: ${CYAN}$(domain_file_write_cmd "https://${domain}")${RESET}"
         fi
         return 0
@@ -1459,7 +1456,15 @@ if [ "$DRY_RUN" = true ]; then
     fi
     echo "[DRY-RUN] Port: $PORT"
     echo "[DRY-RUN] TLS: $TLS"
-    if [ -n "$GATEWAY" ]; then echo "[DRY-RUN] Domain: $GATEWAY"; fi
+    if [ "$GATEWAY" = "$DOMAIN_PLACEHOLDER" ]; then
+    if [ "$MODE" = "standalone" ]; then
+        echo "[DRY-RUN] Domain: not configured (not required for this mode)"
+    else
+        echo "[DRY-RUN] Domain: not configured - pass --domain=<shared-domain>"
+    fi
+elif [ -n "$GATEWAY" ]; then
+    echo "[DRY-RUN] Domain: $GATEWAY"
+fi
     if [ -n "$USERNAME" ]; then
         echo "[DRY-RUN] User: $USERNAME"
         if [ -n "$GATEWAY" ]; then
@@ -1477,10 +1482,9 @@ if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Domain file: $DEFAULT_DOMAIN_FILE"
         echo "[DRY-RUN] Systemd service and dependencies check: OK"
     fi
-    if [ -z "$GATEWAY" ]; then
+    if [ -z "$GATEWAY" ] || [ "$GATEWAY" = "$DOMAIN_PLACEHOLDER" ]; then
         echo "[DRY-RUN] Domain file value: not written (no domain configured)"
-    elif [ "$GATEWAY" = "$(normalise_host "$(module_default_domain)")" ]; then
-        echo "[DRY-RUN] Domain file value: not written (the built-in default is a fallback, not a configuration)"
+
     else
         echo "[DRY-RUN] Domain file value: MESH_PUBLIC_URL=https://$GATEWAY"
     fi
@@ -1721,6 +1725,7 @@ funnel_acl_hint() {
 #  BRANCH: STANDALONE MODE
 # ==============================================================================
 if [ "$MODE" = "standalone" ]; then
+    STANDALONE_START=$(date +%s)
     if [ "$LANG_CHOICE" = "ru" ]; then
         echo -e "\n${BOLD}${BLUE}=== Настройка локального Standalone FastMCP сервера ===${RESET}"
         echo "[1/3] Проверка окружения Python..."
@@ -2025,9 +2030,22 @@ EOF
         echo -e "  3. Paste the URL into the ${BOLD}'Server URL'${RESET} field (${BOLD}Ctrl+V${RESET}) and click ${BOLD}Connect${RESET}."
         echo ""
     fi
+    if [ "$FUNNEL" = true ] && [ -z "$MCP_PUBLIC_URL" ]; then
+        # A localhost URL cannot be added to a cloud connector, so Funnel mode
+        # that produced no public URL is a failure, not a smaller success.
+        if [ "$LANG_CHOICE" = "ru" ]; then
+            echo -e "${RED}[ОШИБКА] Публичная ссылка не создана: узел доступен только на localhost.${RESET}" >&2
+            echo -e "  Проверьте: ${CYAN}tailscale status${RESET} (нужно BackendState=Running) и ${CYAN}tailscale funnel status${RESET}." >&2
+        else
+            echo -e "${RED}[ERROR] No public URL: the node is reachable on localhost only.${RESET}" >&2
+            echo -e "  Check ${CYAN}tailscale status${RESET} (BackendState=Running) and ${CYAN}tailscale funnel status${RESET}." >&2
+        fi
+        exit 1
+    fi
     if [ "$IS_TERMUX" = true ]; then
         print_termux_hints "rhm-standalone"
     fi
+    echo -e "  Время установки / install time: $(( $(date +%s) - STANDALONE_START )) с"
     exit 0
 fi
 

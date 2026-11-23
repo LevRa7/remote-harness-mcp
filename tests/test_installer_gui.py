@@ -111,6 +111,8 @@ def test_gui_files_do_not_name_the_project_domain():
     from core import domain
 
     default_host = domain.DEFAULT_PUBLIC_BASE_URL.split("//", 1)[-1].rstrip("/")
+    if not default_host:
+        pytest.skip("the project ships no default domain to look for")
     for path in (GUI_SCRIPT, GUI_STRINGS, GUI_LAUNCHER):
         assert default_host not in _read_text(path), (
             "%s names the domain directly; it must be resolved at run time" % os.path.basename(path)

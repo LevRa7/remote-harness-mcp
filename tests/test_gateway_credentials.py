@@ -28,7 +28,7 @@ import gateway
 
 def _request(query: str = "", method: str = "GET", body: bytes = b"",
              headers: dict | None = None, path_params: dict | None = None,
-             path: str = "/sse", host: str = "smart-server.online") -> Request:
+             path: str = "/sse", host: str = "mcp.example.test") -> Request:
     raw_headers = [(b"host", host.encode()), (b"content-type", b"application/json")]
     for key, value in (headers or {}).items():
         raw_headers.append((key.lower().encode(), value.encode()))
