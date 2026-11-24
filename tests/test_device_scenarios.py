@@ -881,17 +881,33 @@ def test_quick_never_touches_a_slow_section(case, fake_platform):
     slow = _slow_commands(case)
     assert slow, "no slow-section command is declared for %s" % case
 
-    device.collect(sections="all", fresh=True, deadline=12.0)
-    assert set(recorder.names) & slow, (
-        "the fake host recorded no slow command, so the quick case proves nothing")
-
-    recorder.clear()
+    # The quick phase runs FIRST, and that is the whole point. collect() hands its
+    # sections to a thread pool and shuts the pool down without waiting, so a
+    # worker that is still finishing a full collect keeps calling _run - which is
+    # this fixture's recorder. The test used to run the full collect first and
+    # then read the same recorder after the quick one: on a loaded CI runner that
+    # leftover worker ran nmcli in the middle of the quick phase and the test
+    # failed with "quick collect ran ['nmcli']" although quick had never asked for
+    # the network section. Nothing is running yet when the quick call is made, so
+    # what it records is only what it did.
     device.clear_cache()
     blocks = device.collect(sections="all", quick=True, fresh=True, deadline=12.0)
 
     assert set(blocks) == set(device.ALL_SECTIONS) - set(device.SLOW_SECTIONS)
     assert not (set(recorder.names) & slow), (
         "quick collect ran %s" % sorted(set(recorder.names) & slow))
+    # No section quick kept may even declare a slow command: the structural form
+    # of the same promise, which no timing can disturb.
+    for name in blocks:
+        assert not (_commands_of(name, case) & slow), name
+
+    # The other half of the pair: the fake host does record slow commands, so the
+    # assertion above is not vacuous.
+    recorder.clear()
+    device.clear_cache()
+    device.collect(sections="all", fresh=True, deadline=12.0)
+    assert set(recorder.names) & slow, (
+        "the fake host recorded no slow command, so the quick case proves nothing")
 
 
 # ---------------------------------------------------------------------------
