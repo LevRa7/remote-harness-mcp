@@ -1228,14 +1228,23 @@ function Stop-StandaloneNode {
 }
 
 function Wait-StandaloneNode {
-    param([int]$Port, [int]$TimeoutSec = 20)
+    param([int]$Port, [int]$TimeoutSec = 20, [string]$Token = "")
+    if (-not $Token) { $Token = $script:StandaloneToken }
     # Starting a process is not the same as a listening server: without this the
     # installer can print a URL for a node that died on a busy port.
     $deadline = (Get-Date).AddSeconds($TimeoutSec)
     while ((Get-Date) -lt $deadline) {
         try {
-            $probe = Invoke-WebRequest -Uri "http://127.0.0.1:$Port/health" -TimeoutSec 2 -UseBasicParsing
-            if ($probe.StatusCode -eq 200) { return $true }
+            $probeUrl = "http://127.0.0.1:$Port/health"
+            if ($Token) { $probeUrl += "?token=" + [uri]::EscapeDataString($Token) }
+            $probe = Invoke-WebRequest -Uri $probeUrl -TimeoutSec 2 -UseBasicParsing
+            if ($probe.StatusCode -ne 200) { continue }
+            if (-not $Token) { return $true }
+            # With a token we expect OUR OWN node: only it accepts this credential
+            # and answers with vitals. Another node on the same port (a stale
+            # per-user one, a WSL relay) answers 200 without them, and the install
+            # would print a URL that node does not serve.
+            if ($probe.Content -match '"vitals"') { return $true }
         } catch { }
         Start-Sleep -Milliseconds 500
     }
@@ -1308,6 +1317,17 @@ if ($Mode -eq "standalone") {
             $existingLine = Select-String -LiteralPath $StandaloneEnv -Pattern '^MESH_TOKEN=(.+)$' | Select-Object -First 1
             if ($existingLine) { $StandaloneToken = $existingLine.Matches[0].Groups[1].Value.Trim() }
         } catch { }
+    }
+    if (-not $StandaloneToken -and $AdminService) {
+        # Upgrading a per-user node to the machine service must not change the
+        # token: the connector URL the operator already pasted would stop working.
+        $userEnv = Join-Path (Join-Path $env:USERPROFILE ".config\remote-harness-mcp") "standalone.env"
+        if (Test-Path -LiteralPath $userEnv) {
+            try {
+                $userLine = Select-String -LiteralPath $userEnv -Pattern '^MESH_TOKEN=(.+)$' | Select-Object -First 1
+                if ($userLine) { $StandaloneToken = $userLine.Matches[0].Groups[1].Value.Trim() }
+            } catch { }
+        }
     }
     if (-not $StandaloneToken) {
         $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()

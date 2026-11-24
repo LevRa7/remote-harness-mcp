@@ -1197,27 +1197,23 @@ function Build-ResultPage {
         $rows = @()
         if ($script:Mode -eq 'ssh') {
             $rows = @(@((Get-UiText -Key 'res_config_file'), '~/remote-harness-mcp (remote)'))
+        } elseif ($script:Mode -eq 'funnel') {
+            # Funnel keeps its own env file; the service (when ticked) runs it from
+            # ProgramData and logs to agent.log, the per-user launcher to standalone.log.
+            $funnelConfig = if ($script:AdminService) { Join-Path $ServiceConfigDir 'standalone.env' } else { Join-Path $ConfigDir 'standalone.env' }
+            $funnelLog = if ($script:AdminService) { Join-Path $ServiceConfigDir 'agent.log' } else { Join-Path $ConfigDir 'standalone.log' }
+            $funnelAutostart = if ($script:AdminService) { Get-UiText -Key 'res_service_task' } else { Join-Path $StartupDir 'rhm-node.vbs' }
+            $rows = @(
+                @((Get-UiText -Key 'res_config_file'), $funnelConfig),
+                @((Get-UiText -Key 'res_autostart_file'), $funnelAutostart),
+                @((Get-UiText -Key 'res_agent_log'), $funnelLog)
+            )
         } elseif ($script:AdminService) {
-            # The machine service keeps its configuration in ProgramData and is
-            # started by the boot task, not by a per-user Startup entry.
+            # Gateway + machine service: the agent configuration in ProgramData.
             $rows = @(
                 @((Get-UiText -Key 'res_config_file'), (Join-Path $ServiceConfigDir 'agent.env')),
                 @((Get-UiText -Key 'res_autostart_file'), (Get-UiText -Key 'res_service_task')),
                 @((Get-UiText -Key 'res_agent_log'), (Join-Path $ServiceConfigDir 'agent.log'))
-            )
-        } elseif ($script:Mode -eq 'funnel') {
-            # Funnel is a standalone node: it has its own env file, its own log and
-            # a Startup launcher, not the gateway agent ones.
-            $rows = @(
-                @((Get-UiText -Key 'res_config_file'), (Join-Path $ConfigDir 'standalone.env')),
-                @((Get-UiText -Key 'res_autostart_file'), (Join-Path $StartupDir 'rhm-node.vbs')),
-                @((Get-UiText -Key 'res_agent_log'), (Join-Path $ConfigDir 'standalone.log'))
-            )
-        } else {
-            $rows = @(
-                @((Get-UiText -Key 'res_config_file'), $AgentEnvFile),
-                @((Get-UiText -Key 'res_autostart_file'), $AutostartFile),
-                @((Get-UiText -Key 'res_agent_log'), $AgentLogFile)
             )
         }
         $y = 24
