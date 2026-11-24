@@ -219,6 +219,7 @@ def test_home_edit_button_survives_a_narrow_frame():
 
 
 def test_frame_shows_token_and_qr_in_a_large_window():
+    pytest.importorskip("qrcode")  # optional menu extra (requirements-menu.txt)
     env = {"MESH_USER": "node-one", "MESH_LINK_KEY": "lk_" + "a" * 32,
            "MESH_GATEWAY": "gw.test"}
     frame = menu._frame(env, columns=120, rows=40)
@@ -227,6 +228,7 @@ def test_frame_shows_token_and_qr_in_a_large_window():
 
 
 def test_frame_shows_token_and_qr_hint_in_a_small_window():
+    pytest.importorskip("qrcode")  # optional menu extra (requirements-menu.txt)
     env = {"MESH_USER": "node-one", "MESH_LINK_KEY": "lk_" + "a" * 32,
            "MESH_GATEWAY": "gw.test"}
     frame = menu._frame(env, columns=80, rows=24)

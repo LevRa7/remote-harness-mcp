@@ -1,11 +1,49 @@
+"""Policy helpers for the node's run_command tool.
+
+Two halves live here, and they have different dependencies:
+
+* the classifiers (workspace containment, "is this command safe / destructive")
+  are plain Python and are what the security tests pin;
+* the builders around them (get_mesh_policies, evaluate_policies) need the
+  private Google Antigravity SDK.
+
+The SDK is optional - the MCP server, the menu and everything the tests exercise
+work without it - so the import is guarded. A module-level import of the SDK used
+to turn *every* test session on a machine without it into a single collection
+ERROR ("ModuleNotFoundError: No module named 'google'"), which is exactly what
+the Linux CI runners did: they install the SDK on Windows only. Importing this
+module must therefore never require it.
+"""
+
+from __future__ import annotations
+
 import os
 import re
 import shlex
-from typing import List, Optional, Callable, Any, Awaitable
-from google.antigravity import types
-from google.antigravity.hooks import policy
-from google.antigravity.hooks.policy import Policy, Decision
+from typing import Awaitable, Callable, List, Optional
 
+try:  # pragma: no cover - the import succeeds on a node with the SDK installed
+    from google.antigravity import types
+    from google.antigravity.hooks import policy
+    from google.antigravity.hooks.policy import Policy, Decision
+
+    HAS_SDK = True
+except ImportError:  # pragma: no cover - exercised by tests/test_policies_without_sdk.py
+    types = None  # type: ignore[assignment]
+    policy = None  # type: ignore[assignment]
+    Policy = object  # type: ignore[assignment,misc]
+    Decision = None  # type: ignore[assignment]
+    HAS_SDK = False
+
+
+def require_sdk() -> None:
+    """Fail with a usable message instead of an AttributeError on ``None``."""
+    if not HAS_SDK:
+        raise RuntimeError(
+            "core.policies needs the Google Antigravity SDK for policy hooks; "
+            "install it with pip install google-antigravity. The workspace and "
+            "command classifiers work without it."
+        )
 def _platform_root(posix_root: str) -> str:
     """Express a documented deployment root for the host running this node.
 
@@ -132,6 +170,7 @@ def get_mesh_policies(
     allowed_workspaces: Optional[List[str]] = None,
     ask_user_handler: Optional[Callable[[types.ToolCall], Awaitable[bool]]] = None,
 ) -> List[Policy]:
+    require_sdk()
     handler = ask_user_handler or default_deny_handler
     policies: List[Policy] = []
 
@@ -157,5 +196,6 @@ def get_mesh_policies(
     return policies
 
 async def evaluate_policies(policies: List[Policy], tool_call: types.ToolCall) -> types.HookResult:
+    require_sdk()
     hook = policy._PolicyDecideHook(policies)
     return await hook.run(None, tool_call)

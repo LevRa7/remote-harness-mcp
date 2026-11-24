@@ -15,6 +15,8 @@ import base64
 import json
 import os
 
+import pytest
+
 import gateway
 from core import policies, redact, web_share
 from starlette.requests import Request
@@ -386,6 +388,7 @@ def test_share_route_is_rate_limited(monkeypatch):
 
 
 def test_hooks_normalise_quotes_before_matching():
+    pytest.importorskip("google.antigravity")  # core.hooks is built on the SDK
     from core import hooks
 
     assert "rm -rf /" in hooks._normalise("rm  -rf  /")

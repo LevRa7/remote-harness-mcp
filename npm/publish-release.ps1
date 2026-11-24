@@ -28,6 +28,10 @@ param(
     [switch]$DryRun,
     [string]$Otp = "",
     [string]$AuthToken = "",
+    # The npm dist-tag, not the git tag. A release candidate must never become
+    # `latest`, or every `npx remote-harness-mcp` picks up an alpha: publish it
+    # under `next` and promote it explicitly once it is stable.
+    [string]$DistTag = "",
     [ValidateSet('both', 'main', 'alias')]
     [string]$Stage = 'both'
 )
@@ -70,6 +74,7 @@ try {
     Write-Host "node package : remote-harness-mcp@$version"
     Write-Host "package.json : $packageVersion"
     Write-Host "alias        : $($alias.name)@$($alias.version) -> remote-harness-mcp@$($alias.dependencies.'remote-harness-mcp')"
+    Write-Host "npm dist-tag : $(if ($DistTag) { $DistTag } else { 'latest (default)' })"
 
     if ($packageVersion -ne $version) { throw "package.json ($packageVersion) and core/version.py ($version) disagree" }
     if ($alias.version -ne $version) { throw "the alias ($($alias.version)) must ship in lockstep with $version" }
@@ -92,6 +97,7 @@ try {
     }
 
     $publishArgs = @('publish', '--access', 'public')
+    if ($DistTag) { $publishArgs += @('--tag', $DistTag) }
     if ($DryRun) { $publishArgs += '--dry-run' }
     if ($Otp) { $publishArgs += @('--otp', $Otp) }
 
@@ -146,6 +152,16 @@ try {
     Write-Host "registry: remote-harness-mcp=$mainSeen  gemini-computer-use=$aliasSeen"
     if ($mainSeen -ne $version -or $aliasSeen -ne $version) {
         throw 'the registry still reports another version; check the publish output above'
+    }
+
+    if ($DistTag) {
+        foreach ($pkg in @('remote-harness-mcp', 'gemini-computer-use')) {
+            $tags = npm view $pkg dist-tags --json 2>$null | ConvertFrom-Json
+            $at = $tags.$DistTag
+            Write-Host "dist-tag: $pkg@$DistTag = $at"
+            if ($at -ne $version) { throw "$pkg@$DistTag points at $at, not $version" }
+            if ($tags.latest -eq $version) { throw "$pkg@latest moved to $version; a pre-release must not become latest" }
+        }
     }
 
     Write-Host "`nboth packages published:" -ForegroundColor Green

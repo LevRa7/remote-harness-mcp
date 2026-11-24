@@ -27,6 +27,18 @@ from core import domain, mcp_tools, server, web_share
 #: ``/<node>/<slug>/...`` back to the tunnel registered under this name).
 NODE = "test-node"
 
+# The published URL is built from core.domain, whose base comes from MESH_PUBLIC_URL,
+# the real domain file, or a default. The domain file of whatever machine runs the
+# suite used to decide the answer: a configured laptop produced "https://<its-node>/...",
+# a bare runner produced a relative "/<node>/..." path, and the same assertion passed
+# here while it failed in CI. A test that asserts a URL pins the base explicitly; the
+# precedence tests below set their own base and must keep seeing it win.
+@pytest.fixture()
+def mesh_public_base(monkeypatch):
+    base = "https://mesh.test"
+    monkeypatch.setenv("MESH_PUBLIC_URL", base)
+    return base
+
 #: The four tools the gateway advertises; they must be the last four in TOOLS.
 SHARE_TOOLS = ("share_file", "serve_dir", "share_list", "unshare")
 
@@ -184,7 +196,7 @@ def test_a_bom_in_the_registry_does_not_hide_every_share(tmp_path):
     assert relayed["status"] == 200
 
 
-def test_share_file_publishes_serves_lists_and_unshares(tmp_path):
+def test_share_file_publishes_serves_lists_and_unshares(tmp_path, mesh_public_base):
     source = tmp_path / "report.txt"
     # Bytes, not text: Path.write_text translates "\n" to CRLF on Windows and the
     # assertions below compare the published copy byte for byte.
@@ -197,8 +209,8 @@ def test_share_file_publishes_serves_lists_and_unshares(tmp_path):
     assert result["kind"] == "file"
     assert result["size"] == len(b"hello share\n")
     assert web_share.SLUG_RE.match(result["slug"]), result["slug"]
-    assert result["url"] == "https://%s/%s/%s/report.txt" % (
-        domain.public_host(), NODE, result["slug"])
+    assert result["url"] == "%s/%s/%s/report.txt" % (
+        mesh_public_base, NODE, result["slug"])
     # The published bytes are a copy, so the link cannot change under the reader.
     assert os.path.isfile(result["file"])
     assert result["file"] != str(source)
@@ -333,7 +345,7 @@ def test_unshare_accepts_the_public_url(tmp_path):
 # serve_dir
 # ---------------------------------------------------------------------------
 
-def test_serve_dir_lists_in_place_and_survives_unshare(tmp_path):
+def test_serve_dir_lists_in_place_and_survives_unshare(tmp_path, mesh_public_base):
     served = tmp_path / "site"
     served.mkdir()
     (served / "index.html").write_text("<h1>hello</h1>", encoding="utf-8")
@@ -342,7 +354,7 @@ def test_serve_dir_lists_in_place_and_survives_unshare(tmp_path):
 
     assert result.get("ok") is True, result
     assert result["kind"] == "dir"
-    assert result["url"] == "https://%s/%s/%s/" % (domain.public_host(), NODE, result["slug"])
+    assert result["url"] == "%s/%s/%s/" % (mesh_public_base, NODE, result["slug"])
     assert result["url"].endswith("/")
 
     status, body = _get(result["local_url"])

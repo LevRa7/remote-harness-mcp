@@ -56,6 +56,12 @@ jobs:
           # PyPI, and the first CI run proved that a missing one is not a skip but
           # a collection error.
           python -m pip install pytest pytest-asyncio pydantic uvicorn starlette websockets requests httpx mcp
+          # The console menu renders the endpoint as a QR code through the
+          # optional qrcode extra (requirements-menu.txt). Without it the menu
+          # degrades to "[QR unavailable]" - and the two QR tests were failing on
+          # every leg of this job, which is how a missing optional dependency
+          # looked like a broken suite.
+          python -m pip install -r requirements-menu.txt
           # pywin32 is needed by the MCP SDK on Windows only.
           python -m pip install pywin32 || true
           # Google's SDK is optional by design - the tests that need it call
