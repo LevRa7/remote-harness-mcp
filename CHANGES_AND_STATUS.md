@@ -7,6 +7,29 @@
 
 ## 1. Что было изменено и закоммичено / подготовлено
 
+### 00000. Windows: узел снова ставится в сеанс пользователя — скриншоты и шаринг вернулись
+
+- **Что было.** Мастер включал галочку «Запускать при старте системы как службу Windows» заранее, поэтому установка получалась машинной: задача `RemoteHarnessMCPService` (SYSTEM, `%ProgramData%\remote-harness-mcp`). Служба работает в сеансе 0, где нет рабочего стола: `screen_capture` отвечал `available: false`, буфер обмена и трей были недоступны, и Gemini сообщал пользователю, что узел «не может делать скриншоты».
+
+- **Установщик.** `install-gui.ps1`: `$script:AdminService = $false` по умолчанию, а переключение варианта установки больше не включает службу (раньше строка `= ($script:Mode -ne 'ssh')` армила её при каждом выборе режима). Подсказка галочки объясняет цену: скриншоты, буфер обмена и трей работают только в сеансе пользователя. `install.ps1` печатает `Show-ServiceDesktopNote` в обеих ветках службы (Funnel и шлюз), так что оператор видит предупреждение в момент установки, а не из ответа модели.
+
+- **Диагностика.** `screen_capture` на Windows при `SESSIONNAME=Services` больше не отвечает общим «нет экрана»: причина называет сеанс 0, а `fix` содержит конкретную команду (`install.ps1 -Mode funnel -Autostart logon`, `schtasks /Delete /TN RemoteHarnessMCPService /F`).
+
+- **Меню `rhm`.** `core/menu.py` считал признаком узла только `agent.env`, поэтому пользовательский Funnel-узел (`standalone.env` + `autostart.state.json`) подменялся дореименной туннельной установкой и меню показывало мёртвый адрес шлюза. Теперь узлом считается любой из трёх файлов идентичности; на этой машине `rhm --json` показывает `matebook16`, `standalone`, порт 8096 и рабочий Funnel-адрес.
+
+- **Эта машина.** Задача `RemoteHarnessMCPService` снята через UAC, системный узел остановлен, служебные маркеры в `%ProgramData%` переименованы (`service.env.removed-*`, `autostart.state.json.removed-*`), чтобы меню не описывало снятую службу. Установлен пользовательский Funnel-узел на 8096: процесс в сеансе 1, автозапуск `rhm-node.vbs`, токен и публичный URL не менялись.
+
+- **Проверено.** Через публичный URL (тот же, что в коннекторе Gemini): `initialize` — ок, 27 инструментов, `screen_capture` — PNG 2520×1680 (~230 КБ, реальный рабочий стол), `share_file` — ссылка отдаёт этот же PNG с HTTP 200, `unshare` её снимает; `bash_exec`, `system_info`, `system_vitals` — ок. Клиент Gemini (`ua='Google'`) переподключился к узлу в 16:05. `install-gui.ps1 -SelfTest` — 22/22; полный pytest — 1691 passed, 22 skipped; новый `tests/test_menu.py` покрывает выбор Funnel-узла поверх legacy.
+
+- **Документация.** `docs/SERVICE_ADMIN.md` (что именно теряет служба и как это выглядит в ответе инструмента), `docs/GUI_INSTALLER.md`, `README.md` / `README_RU.md`.
+
+### 00000. Funnel виден и починяется из `rhm`; установщик больше не молчит про мёртвый Tailscale
+- **Проблема (живая).** Публичный адрес `https://matebook16…ts.net` ответил `ERR_CONNECTION_CLOSED`, хотя узел на `127.0.0.1:8096` был здоров: backend Tailscale ушёл в `NoState`/`NeedsLogin`, serve-конфиг исчез, а меню и установщик об этом не говорили. В логах `C:\ProgramData\Tailscale\Logs` — сотни переходов `NeedsLogin ↔ NoState` с `WantRunning=true/false`; `tailscale funnel status` = `No serve config`.
+- **Меню.** `core/menu.py` показывает строку `Funnel: https://<узел>.<tailnet>.ts.net  (on)` / `Funnel: OFF · Tailscale: NoState (t — start)` / `serve config missing (t — apply)` — состояние кэшируется на 6 с, чтобы перерисовка не запускала `tailscale status` на каждую клавишу. Клавиша `t` поднимает Tailscale (`up --accept-routes`) и переприменяет Funnel на порт узла; то же из консоли: `rhm funnel` (статус) и `rhm funnel up` (починить), в `--json` добавлен объект `funnel`.
+- **Установщик.** `install.ps1` перед применением Funnel проверяет `BackendState` и, если он не `Running`, сам вызывает `Connect-Tailscale` (тот же `tailscale up` с браузерным подтверждением), а при неудаче печатает, что запустить и повторить — вместо тихого «установка прошла, адреса нет».
+- **Найденный баг.** `_autostart_state()` читал `autostart.state.json` как `utf-8`, а PowerShell 5.1 пишет его с BOM: `json.load` падал, и меню теряло всё, что записал установщик (включая Funnel-хост). Теперь `utf-8-sig`; закрыто тестом.
+- **Проверено.** `tests/test_menu.py` +9 тестов (строка Funnel в трёх состояниях, `start_funnel` с последовательностью `up` → `funnel --bg`, отказ backend, `rhm funnel` / `rhm funnel up`, BOM); полный прогон — 1690 passed, 22 skipped. Живая проверка: `rhm --once` печатает `Funnel: https://matebook16.merino-carob.ts.net  (on)`.
+
 ### 00000. Установщик Windows: каталог установки, автозапуск, PATH и ярлыки
 - **Что было.** Мастер распаковывал payload в версионированный каталог `%LOCALAPPDATA%\RemoteHarnessMCP\setup\<версия>` и жил там: команда `rhm`, автозапуск и обновления называли именно его, поэтому «поставить узел на другой диск» было невозможно, а PATH и ярлыки установщик решал за пользователя.
 - **Каталог.** В мастер добавлена страница «Куда установить» (`Build-LocationPage`): переключатель готовых дисков с остатком места (`Get-InstallDrives`), поле пути и кнопка «Обзор…»; диск лишь переписывает путь. Проверки до установки: абсолютный путь, не корень диска, не `%SystemRoot%`, диск готов, свободно больше 64 МБ, каталог создаётся. `install.ps1` получил `-InstallDir`: payload копируется функцией `Copy-NodePayload` (`robocopy /E` без `__pycache__` и `.git`, при отказе — `Copy-Item`) и установка продолжается из копии, а `$ScriptPath` указывает на неё для поднятия UAC; в `-DryRun` копирования нет. После успешной установки распакованный образец удаляется.

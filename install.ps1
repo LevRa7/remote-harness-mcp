@@ -1480,6 +1480,21 @@ function Show-FunnelAclHint {
     }
 }
 
+function Show-ServiceDesktopNote {
+    # A SYSTEM task lives in Windows session 0, which has no desktop: GDI screen
+    # capture, the clipboard and the tray icon cannot work there. An operator who
+    # ticks the service switch is trading those tools for boot-time autostart;
+    # say it during the install instead of leaving a model to report
+    # "available: false" later.
+    if ($Lang -eq "ru") {
+        Write-Host "[i] Скриншоты, буфер обмена и трей работают только в сеансе пользователя: у задачи SYSTEM (сеанс 0) нет рабочего стола." -ForegroundColor DarkGray
+        Write-Host "    Нужны эти инструменты - ставьте без -AdminService (это умолчание): узел стартует при входе в систему." -ForegroundColor DarkGray
+    } else {
+        Write-Host "[i] Screen capture, the clipboard and the tray icon need the user's own session: a SYSTEM task runs in session 0, which has no desktop." -ForegroundColor DarkGray
+        Write-Host "    For those tools install without -AdminService (the default): the node starts at logon." -ForegroundColor DarkGray
+    }
+}
+
 function Resolve-FreePort {
     param([int]$Start = 8096, [int]$Limit = 50)
     # A default port is a preference, not a promise. Something else (another
@@ -1727,6 +1742,7 @@ if ($Mode -eq "standalone") {
             ("MESH_SERVICE_MODE=server"),
             ("MESH_SERVICE_PORT=" + $Port)
         ) | Out-File -FilePath $serviceEnvFile -Encoding ASCII
+        Show-ServiceDesktopNote
 
         $serviceOk = $false
         if (Test-ElevatedSession) {
@@ -1847,6 +1863,29 @@ if ($Mode -eq "standalone") {
     }
 
     if ($FunnelName) {
+        # A Funnel exists only while the Tailscale backend is Running. In NoState
+        # (the service is up, the backend is not) or NeedsLogin (the machine was
+        # never approved) the serve config is dropped and `funnel --bg` fails,
+        # and the node then answers ERR_CONNECTION_CLOSED from outside while
+        # /health on loopback is perfectly healthy. Check the state and run the
+        # one command that fixes it before blaming the ACL.
+        $tsState = Get-TailscaleState -Tailscale $TsExe
+        if ($tsState -ne "Running") {
+            if ($Lang -eq "ru") {
+                Write-Host "[!] Tailscale не подключён (состояние: $tsState): публичного адреса не будет, пока backend не станет Running." -ForegroundColor Yellow
+            } else {
+                Write-Host "[!] Tailscale is not connected (state: $tsState): there is no public address until the backend is Running." -ForegroundColor Yellow
+            }
+            $null = Connect-Tailscale -Tailscale $TsExe -TimeoutSec 180
+            $tsState = Get-TailscaleState -Tailscale $TsExe
+            if ($tsState -ne "Running") {
+                if ($Lang -eq "ru") {
+                    Write-Host "    Поднять не удалось. Запустите 'tailscale up' (или меню rhm, клавиша t) и повторите установку." -ForegroundColor Red
+                } else {
+                    Write-Host "    Could not start it. Run 'tailscale up' (or the rhm menu, key t) and re-run the installer." -ForegroundColor Red
+                }
+            }
+        }
         # Tailscale terminates TLS and proxies to loopback; the node never sees a
         # public address, which is exactly why no port and no certificate is needed.
         # Three attempts: the certificate for the ts.net name is issued lazily and
@@ -2144,6 +2183,7 @@ if ($AdminService) {
         ("MESH_PYTHON=" + $pyExeOnly),
         ("MESH_CONFIG_DIR=" + $ConfigDir)
     ) | Out-File -FilePath $serviceEnvFile -Encoding ASCII
+    Show-ServiceDesktopNote
 
     $serviceOk = $false
     if (Test-ElevatedSession) {

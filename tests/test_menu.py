@@ -374,6 +374,22 @@ def test_a_loopback_name_never_becomes_a_public_endpoint(tmp_path):
     assert info["url"] == "http://127.0.0.1:8096/sse?token=tok"
 
 
+def test_a_funnel_node_wins_over_a_legacy_tunnel_leftover(tmp_path, monkeypatch):
+    """The live node decides, not the pre-rename directory that still has agent.env."""
+    monkeypatch.delenv("MESH_CONFIG_DIR", raising=False)
+    new = tmp_path / "home" / "config"
+    legacy = tmp_path / "home" / "legacy"
+    _write_state(new, kind="logon", mode="standalone", port=8096,
+                 funnel="matebook16.merino-carob.ts.net")
+    _write_env(new / "standalone.env", {"MESH_TOKEN": "tok-new"})
+    _write_env(legacy / "agent.env", {"MESH_USER": "old",
+                                      "MESH_GATEWAY": "racknerd-5a24bf9.merino-carob.ts.net"})
+    monkeypatch.setattr(paths, "config_dir", lambda: str(new))
+    monkeypatch.setattr(paths, "legacy_config_dir", lambda: str(legacy))
+    assert menu.config_dir() == str(new)
+    assert menu.node_mode(menu.config_dir()) == "standalone"
+
+
 def test_a_service_install_is_described_before_the_per_user_leftovers(tmp_path, monkeypatch):
     monkeypatch.delenv("MESH_CONFIG_DIR", raising=False)
     per_user = tmp_path / "home" / "config"
@@ -447,3 +463,98 @@ def test_the_health_answer_is_cached_for_a_few_seconds(monkeypatch):
     assert calls == [8096], "a repaint must not pay for another probe"
     assert menu._standalone_alive(8096, now=100.0 + menu._ALIVE_TTL + 1) is True
     assert len(calls) == 2, "a stale answer is re-checked"
+
+# ---------------------------------------------------------------------------
+# The tunnel, not only the node: a Funnel dies when Tailscale does
+# ---------------------------------------------------------------------------
+
+def test_the_frame_shows_the_public_tunnel_when_it_is_up(tmp_path, monkeypatch):
+    _funnel_config(tmp_path)
+    monkeypatch.setattr(menu, "funnel_info", lambda *a, **k: {
+        "installed": True, "state": "Running", "funnel_on": True,
+        "host": "matebook16.merino-carob.ts.net", "port": 8096})
+    text = menu.render(menu.read_agent_env())
+    assert "Funnel: https://matebook16.merino-carob.ts.net  (on)" in text
+
+
+def test_a_dead_backend_is_named_in_the_frame(tmp_path, monkeypatch):
+    """The outage that prompted this: the node is healthy, the tunnel is gone."""
+    _funnel_config(tmp_path)
+    monkeypatch.setattr(menu, "funnel_info", lambda *a, **k: {
+        "installed": True, "state": "NoState", "funnel_on": False,
+        "host": "matebook16.merino-carob.ts.net", "port": 8096})
+    text = menu.render(menu.read_agent_env())
+    assert "Funnel: OFF" in text
+    assert "NoState" in text
+    assert "(t - start)" in text
+
+
+def test_a_running_backend_without_a_serve_config_says_apply(tmp_path, monkeypatch):
+    _funnel_config(tmp_path)
+    monkeypatch.setattr(menu, "funnel_info", lambda *a, **k: {
+        "installed": True, "state": "Running", "funnel_on": False,
+        "host": "matebook16.merino-carob.ts.net", "port": 8096})
+    text = menu.render(menu.read_agent_env())
+    assert "serve config missing" in text
+    assert "(t - apply)" in text
+
+
+def test_start_funnel_brings_tailscale_up_then_applies_the_funnel(monkeypatch):
+    monkeypatch.setattr(menu, "tailscale_exe", lambda: r"C:\Program Files\Tailscale\tailscale.exe")
+    monkeypatch.setattr(menu, "funnel_info", lambda *a, **k: {
+        "installed": True, "state": "NoState", "funnel_on": False,
+        "host": "pc.tailnet.ts.net", "port": 8096})
+    calls = []
+
+    def fake_run(args, timeout=20.0):
+        calls.append(list(args))
+        if args[:2] == ["status", "--json"]:
+            probing = [c for c in calls if c[:2] == ["status", "--json"]]
+            return 0, '{"BackendState": "%s"}' % ("NoState" if len(probing) == 1 else "Running")
+        return 0, "ok"
+
+    monkeypatch.setattr(menu, "_run_tailscale", fake_run)
+    ok, message = menu.start_funnel()
+    assert ok is True
+    assert ["up", "--accept-routes", "--timeout=60s"] in calls
+    assert ["funnel", "--bg", "--https=443", "http://127.0.0.1:8096"] in calls
+    assert "8096" in message
+
+
+def test_start_funnel_reports_a_backend_that_refuses_to_start(monkeypatch):
+    monkeypatch.setattr(menu, "tailscale_exe", lambda: "tailscale")
+    monkeypatch.setattr(menu, "funnel_info", lambda *a, **k: {
+        "installed": True, "state": "NeedsLogin", "funnel_on": False,
+        "host": "pc.tailnet.ts.net", "port": 8096})
+    monkeypatch.setattr(menu, "_run_tailscale",
+                        lambda args, timeout=20.0: (0, '{"BackendState": "NeedsLogin"}'))
+    ok, message = menu.start_funnel()
+    assert ok is False
+    assert "NeedsLogin" in message
+
+
+def test_rhm_funnel_prints_the_status(monkeypatch, capsys):
+    monkeypatch.setattr(menu, "funnel_info", lambda *a, **k: {
+        "installed": True, "state": "Running", "funnel_on": True,
+        "host": "pc.tailnet.ts.net", "port": 8096})
+    assert menu.main(["funnel"]) == 0
+    out = capsys.readouterr().out
+    assert "funnel:    on" in out
+    assert "https://pc.tailnet.ts.net" in out
+
+
+def test_rhm_funnel_up_repairs_the_tunnel(monkeypatch, capsys):
+    monkeypatch.setattr(menu, "start_funnel",
+                        lambda *a, **k: (True, "funnel on for 127.0.0.1:8096"))
+    assert menu.main(["funnel", "up"]) == 0
+    assert "funnel on for 127.0.0.1:8096" in capsys.readouterr().out
+
+
+def test_the_installer_state_survives_a_bom(tmp_path):
+    """install.ps1 writes JSON with PowerShell's BOM; json.load without -sig failed."""
+    config = tmp_path / "bom"
+    config.mkdir()
+    (config / "autostart.state.json").write_text(
+        '\ufeff{"kind": "service", "mode": "standalone", "port": 8096,'
+        ' "funnel": "pc.tailnet.ts.net"}', encoding="utf-8")
+    assert menu._autostart_state(str(config))["funnel"] == "pc.tailnet.ts.net"

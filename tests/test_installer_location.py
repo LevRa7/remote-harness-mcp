@@ -128,6 +128,17 @@ def test_shortcuts_go_to_the_start_menu_and_the_desktop():
     assert "Install-RhmShortcuts -BinDir $binDir -PayloadDir $PayloadDir" in text
 
 
+def test_the_funnel_step_checks_the_tailscale_backend_first():
+    """A serve config cannot exist while the backend is not Running."""
+    text = _text("install.ps1")
+    block = text[text.index("if ($FunnelName) {"):]
+    block = block[:block.index("$funnelOk = $false")]
+    assert "Get-TailscaleState -Tailscale $TsExe" in block
+    assert "Connect-Tailscale -Tailscale $TsExe" in block, (
+        "a dead backend has to be started before the funnel is applied")
+    assert "tailscale up" in block
+
+
 def test_the_installer_keeps_the_utf8_bom_powershell_51_needs():
     with open(INSTALL_PS1, "rb") as handle:
         data = handle.read(3)

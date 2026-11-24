@@ -40,7 +40,7 @@ import socket
 import subprocess
 import sys
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from core import control, domain, goal, paths, sandbox, schedule as schedule_module
 from core import settings as node_settings, usage
@@ -226,8 +226,13 @@ def config_dir() -> str:
         return paths.config_dir()
     base = paths.config_dir()
     legacy = paths.legacy_config_dir()
-    if not os.path.exists(os.path.join(base, "agent.env")) and os.path.exists(
-        os.path.join(legacy, "agent.env")
+    # A node's identity is any of its three files, not agent.env alone: a
+    # standalone/Funnel install has just standalone.env + autostart.state.json,
+    # so asking only about agent.env described the pre-rename tunnel install
+    # while the live node was the Funnel one (and printed its dead bridge URL).
+    markers = ("agent.env", STANDALONE_ENV_FILE, AUTOSTART_STATE_FILE)
+    if not any(os.path.exists(os.path.join(base, name)) for name in markers) and (
+        os.path.exists(os.path.join(legacy, "agent.env"))
     ):
         return legacy
     return base
@@ -248,8 +253,13 @@ def read_agent_env(directory: Optional[str] = None) -> Dict[str, str]:
 
 def _autostart_state(directory: str) -> Dict[str, Any]:
     """The installer's record of what it registered, or {} when there is none."""
+    # utf-8-sig: install.ps1 writes this file with PowerShell 5.1's -Encoding UTF8,
+    # which puts a BOM in front of the JSON. Reading it as plain utf-8 raised
+    # ValueError and the menu silently lost everything the installer recorded - the
+    # Funnel hostname included, so the tunnel line and `rhm funnel` described an
+    # empty state while the node was published.
     try:
-        with open(os.path.join(directory, AUTOSTART_STATE_FILE), "r", encoding="utf-8") as handle:
+        with open(os.path.join(directory, AUTOSTART_STATE_FILE), "r", encoding="utf-8-sig") as handle:
             payload = json.load(handle)
     except (OSError, ValueError):
         return {}
@@ -569,6 +579,7 @@ def snapshot() -> Dict[str, Any]:
         "remote_control": state.get("remote_control") or control.remote_control_state(),
         "goal": goal.get() if goal.enabled() else None,
         "goal_enabled": goal.enabled(),
+        "funnel": funnel_info(),
         "usage": usage.summary(days=1),
     }
 
@@ -757,6 +768,122 @@ def node_online(info: Dict[str, Any], state: Optional[Dict[str, Any]] = None) ->
 
 
 # ---------------------------------------------------------------------------
+# Tailscale / Funnel
+#
+# A Funnel node is reachable at https://<node>.<tailnet>.ts.net only while the
+# Tailscale backend is Running *and* a serve config points at the node's loopback
+# port. When the backend drops to NoState/NeedsLogin the serve config disappears,
+# the public address answers ERR_CONNECTION_CLOSED, and /health on loopback is
+# still fine - so the menu has to show the tunnel, not only the node.
+# ---------------------------------------------------------------------------
+
+_TS_TTL = 6.0
+_TS_CACHE: Dict[str, Any] = {"at": 0.0, "value": None}
+
+
+def tailscale_exe() -> str:
+    """Full path to the Tailscale CLI, or "" when the client is not installed."""
+    candidates: List[str] = []
+    if os.name == "nt":
+        for root in (os.environ.get("ProgramFiles"), os.environ.get("ProgramFiles(x86)")):
+            if root:
+                candidates.append(os.path.join(root, "Tailscale", "tailscale.exe"))
+    found = shutil.which("tailscale") or shutil.which("tailscale.exe")
+    if found:
+        candidates.append(found)
+    for path in candidates:
+        if path and os.path.isfile(path):
+            return path
+    return ""
+
+
+def _run_tailscale(args: List[str], timeout: float = 20.0) -> Tuple[int, str]:
+    """One tailscale command, hidden, as (exit code, combined output)."""
+    exe = tailscale_exe()
+    if not exe:
+        return 127, "tailscale.exe not found"
+    creation = 0
+    if os.name == "nt":
+        creation = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        completed = subprocess.run([exe] + list(args), capture_output=True, text=True,
+                                   timeout=timeout, creationflags=creation)
+    except Exception as error:                       # timeout, cancellation, no CLI
+        return 1, str(error)
+    output = ((completed.stdout or "") + (completed.stderr or "")).strip()
+    return int(completed.returncode), output
+
+
+def _tailscale_backend() -> str:
+    """BackendState: Running, NeedsLogin, NoState, Starting, or "" when unknown."""
+    code, output = _run_tailscale(["status", "--json"], timeout=8.0)
+    try:
+        return str(json.loads(output).get("BackendState") or "")
+    except Exception:
+        return ""
+
+
+def funnel_info(state: Optional[Dict[str, Any]] = None,
+                now: Optional[float] = None) -> Dict[str, Any]:
+    """Funnel status of the installed node, cached: a repaint must not shell out."""
+    stamp = time.monotonic() if now is None else float(now)
+    cached = _TS_CACHE.get("value")
+    if cached is not None and (stamp - float(_TS_CACHE.get("at") or 0.0)) < _TS_TTL:
+        return dict(cached)
+    directory = install_dir()
+    state_data = _autostart_state(directory) if state is None else dict(state or {})
+    env = read_agent_env(directory)
+    host = _public_host(state_data.get("funnel")) or _public_host(env.get("MESH_PUBLIC_URL"))
+    port = _standalone_port(state_data) if state_data else DEFAULT_STANDALONE_PORT
+    result: Dict[str, Any] = {
+        "installed": bool(tailscale_exe()),
+        "state": "",
+        "host": host,
+        "port": port,
+        "funnel_on": False,
+    }
+    if result["installed"]:
+        result["state"] = _tailscale_backend()
+        if result["state"] == "Running" and host:
+            code, output = _run_tailscale(["funnel", "status"], timeout=8.0)
+            result["funnel_on"] = ("127.0.0.1:%d" % port) in output
+    _TS_CACHE["at"] = stamp
+    _TS_CACHE["value"] = dict(result)
+    return result
+
+
+def start_funnel(port: Optional[int] = None, timeout: float = 150.0) -> Tuple[bool, str]:
+    """Bring Tailscale up and apply the Funnel to this node; (ok, message).
+
+    The menu key and ``rhm funnel up`` both end up here: a node whose public
+    address died is repaired by the same two commands an operator would type.
+    """
+    if not tailscale_exe():
+        return False, "the Tailscale client is not installed (winget install Tailscale.Tailscale)"
+    info = funnel_info()
+    port = int(port or info.get("port") or DEFAULT_STANDALONE_PORT)
+    notes: List[str] = []
+    state = _tailscale_backend()
+    if state != "Running":
+        notes.append("tailscale up (was %s)" % (state or "unknown"))
+        code, output = _run_tailscale(["up", "--accept-routes", "--timeout=60s"], timeout=timeout)
+        if output:
+            notes.append(output.splitlines()[-1][:200])
+        state = _tailscale_backend()
+    if state != "Running":
+        _TS_CACHE["at"] = 0.0
+        return False, "Tailscale backend is %s: %s" % (state or "unknown", " | ".join(notes))
+    code, output = _run_tailscale(
+        ["funnel", "--bg", "--https=443", "http://127.0.0.1:%d" % port], timeout=60.0)
+    _TS_CACHE["at"] = 0.0
+    if output:
+        notes.append(output.splitlines()[-1][:200])
+    ok = code == 0
+    if ok:
+        notes.append("funnel on for 127.0.0.1:%d" % port)
+    return ok, " | ".join(notes)
+
+# ---------------------------------------------------------------------------
 # Rendering
 # ---------------------------------------------------------------------------
 
@@ -775,6 +902,19 @@ def _render_lines(env: Dict[str, str], *, include_endpoint: bool = True,
     status = "ONLINE" if node_online(info, state) else "OFFLINE"
     lines.append("Status: %-8s  Node: %-20s  Usage today: %s calls"
                  % (status, node, usage.summary(days=1).get("events", 0)))
+    if info["mode"] == "standalone":
+        funnel = funnel_info()
+        if funnel.get("host"):
+            if not funnel.get("installed"):
+                lines.append("Funnel: OFF  ·  the Tailscale client is not installed")
+            elif funnel.get("state") != "Running":
+                lines.append("Funnel: OFF  ·  Tailscale: %s  (t - start)"
+                             % (funnel.get("state") or "not connected"))
+            elif not funnel.get("funnel_on"):
+                lines.append("Funnel: https://%s  ·  serve config missing  (t - apply)"
+                             % funnel["host"])
+            else:
+                lines.append("Funnel: https://%s  (on)" % funnel["host"])
     mode = state["access_mode"]
     labels = control.ACCESS_LABELS
     order = control.ACCESS_MODES
@@ -841,7 +981,7 @@ def _render_lines(env: Dict[str, str], *, include_endpoint: bool = True,
         lines.extend("  " + line for line in tail(agent_log_path(), 10))
         lines.append("")
     lines.append("-" * 72)
-    lines.append("q quit   ? help   e QR/endpoint   o log")
+    lines.append("q quit   ? help   e QR/endpoint   o log   t funnel")
     if columns:
         lines = [_fit(line, columns) for line in lines]
     return lines
@@ -1027,6 +1167,7 @@ def _show_help(keys: "Keys", env: Dict[str, str]) -> None:
         "  r                    remote control on/off",
         "  p                    pause or resume calls",
         "  e                    MCP endpoint and QR code",
+        "  t                    Tailscale: start it and re-apply the public Funnel",
         "  o                    open the agent log",
         "  q                    quit",
         "",
@@ -1132,6 +1273,9 @@ def run_menu() -> int:
                 action = "resume" if control.paused() else "pause"
                 result = node_settings.apply({"action": action}, actor="tui")
                 _NOTICE = str(result.get("message") or result.get("error") or "")
+            elif key == "t":
+                ok, message = start_funnel()
+                _NOTICE = ("funnel: " if ok else "funnel failed: ") + message
             elif key == "o":
                 _open_log()
             elif key == "e":
@@ -1140,13 +1284,13 @@ def run_menu() -> int:
                 _show_help(keys, env)
             # Input prompts and external viewers leave their own text on screen,
             # so those keys force a repaint even when the frame is unchanged.
-            draw(env, force=key in ("d", "I", "o", "e", "?"))
+            draw(env, force=key in ("d", "I", "o", "e", "?", "t"))
     sys.stdout.write("\n")
     return 0
 
 
 COMMANDS = ("status", "mode", "cd", "isolation", "remote-control", "pause", "resume",
-            "goal", "schedule")
+            "goal", "schedule", "funnel")
 
 _TRUE = ("on", "true", "1", "yes")
 _FALSE = ("off", "false", "0", "no")
@@ -1166,6 +1310,11 @@ def _status_text() -> str:
         "schedules:   %s" % _schedule_line(),
         "online:      %s" % ("yes" if data.get("online") else "no"),
     ]
+    funnel = data.get("funnel") or {}
+    if funnel.get("host"):
+        lines.append("funnel:      %s"
+                     % (("https://" + funnel["host"]) if funnel.get("funnel_on")
+                        else "off (tailscale: %s)" % (funnel.get("state") or "not installed")))
     return "\n".join(lines)
 
 
@@ -1234,6 +1383,29 @@ def _run_command(args: Any) -> int:
             print(json.dumps(snapshot(), ensure_ascii=False, default=str))
         else:
             print(_status_text())
+        return 0
+
+    if command == "funnel":
+        # A Funnel node is public only while Tailscale is Running and the serve
+        # config exists; `rhm funnel` says which of the two is missing and
+        # `rhm funnel up` runs the same two commands the menu key does.
+        if value.lower() in ("up", "start", "repair", "fix"):
+            ok, message = start_funnel()
+            if args.json:
+                print(json.dumps({"ok": ok, "message": message}, ensure_ascii=False))
+            else:
+                print(("funnel: " if ok else "rhm: funnel failed: ") + message)
+            return 0 if ok else 2
+        status = funnel_info()
+        if args.json:
+            print(json.dumps(status, ensure_ascii=False, default=str))
+            return 0
+        print("tailscale: %s" % ("installed" if status["installed"] else "not installed"))
+        print("backend:   %s" % (status["state"] or "unknown"))
+        print("funnel:    %s" % ("on" if status["funnel_on"] else "off"))
+        if status["host"]:
+            print("address:   https://%s" % status["host"])
+            print("loops to:  127.0.0.1:%d" % status["port"])
         return 0
 
     if command == "goal":
