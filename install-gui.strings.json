@@ -25,6 +25,7 @@
     "loc_path_label": "Folder",
     "loc_browse": "Browse...",
     "loc_free": "Free on {0}: {1} GB",
+    "loc_free_short": "({0} GB free)",
     "loc_hint": "Keeping the node off the system drive leaves room for updates; any writable folder works.",
     "loc_err_path": "Choose a folder to install into.",
     "loc_err_root": "A drive root cannot hold the node: pick a folder on the drive.",
@@ -34,7 +35,7 @@
     "loc_err_create": "Cannot create {0}: {1}",
 
     "opt_setup_group": "Installation",
-    "opt_autostart_label": "Start the node automatically (a machine service at boot, or a per-user entry at sign-in)",
+    "opt_autostart_label": "Autostart enabled (cleared, the node runs only when started by hand)",
     "opt_autostart_hint": "The machine service needs the UAC prompt. Without admin rights the wizard writes a sign-in entry instead, and the node still survives a logoff.",
     "opt_path_label": "Add the rhm command to the user PATH",
     "opt_path_hint": "Lets you type rhm in any new console window. Clear it and PATH is not touched.",
@@ -170,6 +171,7 @@
     "loc_path_label": "Каталог",
     "loc_browse": "Обзор...",
     "loc_free": "Свободно на {0}: {1} ГБ",
+    "loc_free_short": "({0} ГБ свободно)",
     "loc_hint": "Узел вне системного диска оставляет место для обновлений; подойдёт любой каталог с правами на запись.",
     "loc_err_path": "Укажите каталог для установки.",
     "loc_err_root": "В корень диска узел не ставится: выберите папку на диске.",
@@ -179,7 +181,7 @@
     "loc_err_create": "Не удалось создать {0}: {1}",
 
     "opt_setup_group": "Установка",
-    "opt_autostart_label": "Запускать узел автоматически (служба при загрузке или запись при входе в систему)",
+    "opt_autostart_label": "Автозапуск включён (без него узел стартует только вручную)",
     "opt_autostart_hint": "Служба требует подтверждения UAC. Без прав администратора установщик пропишет запуск при входе, и узел переживёт выход из системы.",
     "opt_path_label": "Добавить команду rhm в пользовательский PATH",
     "opt_path_hint": "Позволяет набрать rhm в любом новом окне консоли. Снимите галочку — PATH останется прежним.",

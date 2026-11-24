@@ -707,7 +707,9 @@ function New-ConsoleInstallerSteps {
     }
     # The administrator service is a switch on the chosen variant, not a variant
     # of its own: only the gateway modes have an agent a machine service can run.
-    if ($script:AdminService -and ($Mode -eq 'quick' -or $Mode -eq 'custom' -or $Mode -eq 'funnel')) {
+    # "No autostart" outranks it: asking install.ps1 for -AdminService while the
+    # autostart switch is cleared would register exactly the entry it was told to skip.
+    if ($script:AdminService -and $script:AutostartEnabled -and ($Mode -eq 'quick' -or $Mode -eq 'custom' -or $Mode -eq 'funnel')) {
         $argList += '-AdminService'
     }
     if ($Mode -ne 'ssh') {
@@ -831,6 +833,7 @@ $script:Shortcuts = $true
 $script:OrigPayloadDir = $ScriptDir
 $script:PathBox = $null
 $script:FreeLabel = $null
+$script:ServiceBox = $null
 $script:Node = ''
 $script:Domain = ''
 $script:Token = ''
@@ -852,9 +855,12 @@ function Get-InstallDrives {
             if ($drive.DriveType -ne [System.IO.DriveType]::Fixed -and $drive.DriveType -ne [System.IO.DriveType]::Removable) { continue }
             $root = $drive.Name.TrimEnd('\')
             $freeGb = [string][math]::Round($drive.AvailableFreeSpace / 1GB, 1)
+            # The free-space suffix comes from the resource file: the wizard is
+            # translated, and an English '(GB free)' in a Russian window is the kind
+            # of half-translation this whole resource exists to avoid.
             $label = $root + '  ' + $drive.VolumeLabel
-            while ($label.Length -lt 24) { $label = $label + ' ' }
-            $label = $label + '(' + $freeGb + ' GB free)'
+            while ($label.Length -lt 22) { $label = $label + ' ' }
+            $label = $label + (Format-UiText -Key 'loc_free_short' -Values @($freeGb))
             $drives += @{ Root = $root; Label = $label; Free = $drive.AvailableFreeSpace }
         }
     } catch { }
@@ -1186,24 +1192,30 @@ function Build-OptionsPage {
 
     if ($serviceTop -ge 0) {
         $serviceSupported = ($script:Mode -eq 'quick' -or $script:Mode -eq 'custom' -or $script:Mode -eq 'funnel')
-        $serviceGroup = New-GroupBox -Text (Get-UiText -Key 'opt_service_group') -X 16 -Y $serviceTop -W 760 -H 88
+        # 100 rather than 88: the hint under the box wraps to three lines in Russian
+        # and the third one was cut by the border.
+        $serviceGroup = New-GroupBox -Text (Get-UiText -Key 'opt_service_group') -X 16 -Y $serviceTop -W 760 -H 100
         $serviceBox = New-Object System.Windows.Forms.CheckBox
         $serviceBox.Text = Get-UiText -Key 'opt_service_label'
         $serviceBox.Location = New-Object System.Drawing.Point(16, 24)
         $serviceBox.Size = New-Object System.Drawing.Size(724, 24)
         $serviceBox.Checked = [bool]($script:AdminService -and $serviceSupported)
-        $serviceBox.Enabled = $serviceSupported
+        # The autostart switch on this page decides whether anything is registered
+        # at all, so it owns this box: with autostart cleared, "as a service" is a
+        # choice that no longer exists and the box goes grey instead of lying.
+        $serviceBox.Enabled = ($serviceSupported -and $script:AutostartEnabled)
+        $script:ServiceBox = $serviceBox
         $serviceBox.Add_CheckedChanged({
             $script:AdminService = [bool]$this.Checked
             $script:OptionError = ''
         })
         $serviceGroup.Controls.Add($serviceBox)
         $serviceHintKey = if ($serviceSupported) { 'opt_service_hint' } else { 'opt_service_unavailable' }
-        $serviceGroup.Controls.Add((New-Label -Text (Get-UiText -Key $serviceHintKey) -X 16 -Y 52 -W 724 -H 28 -Dim))
+        $serviceGroup.Controls.Add((New-Label -Text (Get-UiText -Key $serviceHintKey) -X 16 -Y 50 -W 724 -H 42 -Dim))
         $script:Content.Controls.Add($serviceGroup)
     }
 
-    $previewTop = if ($serviceTop -ge 0) { $serviceTop + 96 } else { 322 }
+    $previewTop = if ($serviceTop -ge 0) { $serviceTop + 108 } else { 322 }
 
     # Where and how the node is installed: the same switches install.ps1 exposes,
     # asked once before anything is written. The SSH variant installs on another
@@ -1231,7 +1243,10 @@ function Build-OptionsPage {
             # variants page: rebuilding the page must not look like a user click.
             $check.Add_CheckedChanged({
                 $tag = [string]$this.Tag
-                if ($tag -eq 'autostart') { $script:AutostartEnabled = [bool]$this.Checked }
+                if ($tag -eq 'autostart') {
+                    $script:AutostartEnabled = [bool]$this.Checked
+                    if ($script:ServiceBox) { $script:ServiceBox.Enabled = [bool]$this.Checked }
+                }
                 elseif ($tag -eq 'path') { $script:AddToPath = [bool]$this.Checked }
                 elseif ($tag -eq 'shortcuts') { $script:Shortcuts = [bool]$this.Checked }
                 $script:OptionError = ''
@@ -1981,6 +1996,10 @@ function Invoke-SelfTest {
         $noAutostartCommand = Get-CommandPreview -Mode 'funnel' -Node 'node-x' -Domain 'mesh.example.test' -Token 'tok'
         if ($noAutostartCommand -notmatch '-Autostart none') { $switchErrors += 'Autostart=none' }
         if ($noAutostartCommand -match '-Shortcuts') { $switchErrors += 'Shortcuts stayed on' }
+        # "No autostart" outranks the service switch, so the command line must not
+        # ask for a machine service while the autostart box is cleared.
+        if ($noAutostartCommand -match '-AdminService') { $switchErrors += 'AdminService stayed on' }
+        if ($noAutostartCommand -notmatch '-AddToPath:\$false') { $switchErrors += 'AddToPath=false' }
     } catch {
         $switchErrors += $_.Exception.Message
     } finally {
