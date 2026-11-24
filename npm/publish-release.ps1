@@ -18,6 +18,19 @@
 #    powershell -File npm/publish-release.ps1 -DryRun           # pack only
 #    powershell -File npm/publish-release.ps1 -Otp 123456       # 2FA
 #
+#
+#  npm's publishing policy (2026): a token that bypasses 2FA is refused for a
+#  direct publish - the registry answers E_STAGE_REQUIRED and points at staged
+#  publishing, which splits one release into two steps:
+#
+#      npx -y npm@latest stage publish --tag next --access public   # in the tag worktree
+#      npx -y npm@latest stage approve <stage-id>                   # opens the browser, 2FA there
+#
+#  The approve step needs a person in front of a browser (a passkey or an
+#  authenticator code); it cannot be done by a script that has no presence. That
+#  is why the direct path below is kept: with an account that still allows it,
+#  a single command publishes both packages and verifies the dist-tags.
+#
 #  Requires `npm login` (or NODE_AUTH_TOKEN). The CLI's web flow
 #  (`npm login --auth-type=web`) authorizes a token from the browser session even
 #  when the site's own login form refuses; that is the usual unblock.
