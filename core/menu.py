@@ -6,7 +6,7 @@ Shows the node status and the switches, and switches the live access mode with
 Tab / Left / Right:
 
     read_only   observation only
-    approval    mutating calls wait for "approve" in this menu
+    full        every call runs without a node-side prompt
     full        no prompts (the operator's explicit choice)
 
 It also sets the agent's working directory, starts the isolated container and
@@ -16,7 +16,7 @@ token is printed except the link key that is already in the MCP URL.
 The same switches without a terminal, for scripts and for restoring the lock::
 
     rhm status
-    rhm mode read_only|approval|full
+    rhm mode read_only|full
     rhm cd /path/to/project
     rhm isolation on|off
     rhm remote-control on|off
@@ -36,6 +36,7 @@ import io
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -196,7 +197,33 @@ def _read_win_key(timeout: float):
         return _NO_CONSOLE
 
 
+#: What the installer recorded about the node it registered: ``kind``
+#: (service|logon|none), ``mode`` (standalone|tunnel), ``port`` and the Funnel
+#: host. ``rhm`` is the surface that tells the operator which address to paste
+#: into the MCP client, so it has to describe the *installed* node rather than
+#: the per-user leftovers of an earlier install.
+AUTOSTART_STATE_FILE = "autostart.state.json"
+
+#: Per-node environment files: a standalone/Funnel node keeps its token and its
+#: published name in ``standalone.env``, a tunnel node keeps its gateway
+#: credentials in ``agent.env`` and the gateway origin in ``domain.env``.
+STANDALONE_ENV_FILE = "standalone.env"
+STANDALONE_TOKEN_FILE = "standalone.token"
+SERVICE_ENV_FILE = "service.env"
+
+#: Port a standalone node binds when neither the installer state nor the caller
+#: names one (kept equal to ``core.server._STANDALONE_PORT``).
+DEFAULT_STANDALONE_PORT = 8096
+
+
 def config_dir() -> str:
+    # An explicit MESH_CONFIG_DIR is the node's own word about where its files
+    # are (the administrator service passes it). Deciding by "which directory
+    # happens to have an agent.env" instead described the tunnel-era install
+    # while the running service was a Funnel node: a bridge URL with no tunnel
+    # into this machine, which is the bug this whole section exists to prevent.
+    if (os.environ.get(paths.CONFIG_DIR_ENV) or "").strip():
+        return paths.config_dir()
     base = paths.config_dir()
     legacy = paths.legacy_config_dir()
     if not os.path.exists(os.path.join(base, "agent.env")) and os.path.exists(
@@ -206,31 +233,226 @@ def config_dir() -> str:
     return base
 
 
-def read_agent_env() -> Dict[str, str]:
-    path = os.path.join(config_dir(), "agent.env")
+def _read_env_file(path: str) -> Dict[str, str]:
+    """MESH_* values from one env file; an unreadable file is simply empty."""
     try:
         return domain.read_env_file(path)
     except Exception:
         return {}
 
 
-def build_mcp_url(env: Optional[Dict[str, str]] = None) -> str:
-    env = env or read_agent_env()
-    user = (env.get("MESH_USER") or "").strip()
-    link = (env.get("MESH_LINK_KEY") or "").strip()
-    if not user or not link:
+def read_agent_env(directory: Optional[str] = None) -> Dict[str, str]:
+    path = os.path.join(directory or config_dir(), "agent.env")
+    return _read_env_file(path)
+
+
+def _autostart_state(directory: str) -> Dict[str, Any]:
+    """The installer's record of what it registered, or {} when there is none."""
+    try:
+        with open(os.path.join(directory, AUTOSTART_STATE_FILE), "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _service_installed(directory: str) -> bool:
+    """True when *directory* belongs to a machine-wide service install."""
+    if os.path.isfile(os.path.join(directory, SERVICE_ENV_FILE)):
+        return True
+    return str(_autostart_state(directory).get("kind") or "").strip().lower() == "service"
+
+
+def install_dir() -> str:
+    """Configuration directory of the node this machine actually runs.
+
+    The administrator service keeps everything under ``%ProgramData%\\<app>``
+    (``service.env`` names the interpreter and ``MESH_CONFIG_DIR``), so ``rhm``
+    in an ordinary terminal has to look there first; otherwise it describes
+    whatever an older per-user install left in ``~/.config``.
+    """
+    if (os.environ.get(paths.CONFIG_DIR_ENV) or "").strip():
+        return paths.config_dir()
+    service = paths.service_config_dir()
+    if _service_installed(service):
+        return service
+    return config_dir()
+
+
+def _public_host(value: Any) -> str:
+    """A name fit to publish: dotted, no scheme, no loopback and no IP literal."""
+    text = str(value or "").strip().strip('"').strip("'")
+    if not text or "://" in text or "/" in text or " " in text:
         return ""
-    base = domain.public_base_url().rstrip("/")
-    return "%s/sse?user=%s&token=%s" % (base, user, link)
+    if "." not in text or text.lower() == "localhost":
+        return ""
+    if text.replace(".", "").isdigit():          # an IPv4 literal
+        return ""
+    return text
 
 
-def _gateway_base(env: Dict[str, str]) -> str:
+def _allowed_public_host(directory: str) -> str:
+    """First valid name in ``MESH_ALLOWED_HOSTS`` (the Funnel host the installer wrote)."""
+    values = _read_env_file(os.path.join(directory, STANDALONE_ENV_FILE))
+    for part in (values.get("MESH_ALLOWED_HOSTS") or "").split(","):
+        host = _public_host(part)
+        if host:
+            return host
+    return ""
+
+
+def node_mode(directory: str, state: Optional[Dict[str, Any]] = None) -> str:
+    """``standalone`` (the node publishes itself) or ``tunnel`` (through a gateway).
+
+    The installer's record decides. Without one, a token in ``standalone.env``
+    is the next best evidence, and ``tunnel`` is the default because that is
+    what an install with neither file is.
+    """
+    state = _autostart_state(directory) if state is None else state
+    mode = str(state.get("mode") or "").strip().lower()
+    if mode in ("standalone", "funnel"):
+        return "standalone"
+    if mode in ("tunnel", "gateway", "agent"):
+        return "tunnel"
+    values = _read_env_file(os.path.join(directory, STANDALONE_ENV_FILE))
+    if (values.get("MESH_TOKEN") or "").strip():
+        return "standalone"
+    return "tunnel"
+
+
+def _standalone_token(directory: str) -> str:
+    """The token a standalone node checks, from its env file or its token file."""
+    values = _read_env_file(os.path.join(directory, STANDALONE_ENV_FILE))
+    token = (values.get("MESH_TOKEN") or "").strip()
+    if token:
+        return token
+    try:
+        with open(os.path.join(directory, STANDALONE_TOKEN_FILE), "r", encoding="utf-8") as handle:
+            return handle.read().strip()
+    except OSError:
+        return ""
+
+
+def _standalone_port(state: Dict[str, Any]) -> int:
+    """Port the standalone node listens on (the installer records it)."""
+    try:
+        return int(state.get("port"))
+    except (TypeError, ValueError):
+        return DEFAULT_STANDALONE_PORT
+
+
+def _standalone_base(directory: str, state: Dict[str, Any]) -> str:
+    """The address a Funnel node is really published at.
+
+    Mirrors ``core.server._standalone_public_url``: the installer's
+    ``MESH_PUBLIC_URL`` wins, the Funnel host it recorded is next, the allowlist
+    after that, and loopback last. ``domain.env`` is deliberately not consulted:
+    a Funnel node never dials the gateway that file names, so a link built from
+    it points at a bridge with no tunnel into this machine.
+    """
+    values = _read_env_file(os.path.join(directory, STANDALONE_ENV_FILE))
+    for key in ("MESH_PUBLIC_URL", "AGY_PUBLIC_BASE_URL"):
+        base = domain.normalise_public_base_url(values.get(key) or os.environ.get(key))
+        if base:
+            return base
+    host = _public_host(state.get("funnel")) or _allowed_public_host(directory)
+    if host:
+        return "https://" + host
+    port = state.get("port")
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        port = DEFAULT_STANDALONE_PORT
+    return "http://127.0.0.1:%d" % port
+
+
+def _node_label(state: Dict[str, Any], env: Dict[str, str], directory: str, mode: str) -> str:
+    """Short name for the header: the node as the mesh knows it, else this host."""
+    if mode != "standalone":
+        return (env.get("MESH_USER") or "").strip() or socket.gethostname()
+    host = _public_host(state.get("funnel")) or _allowed_public_host(directory)
+    if host:
+        return host.split(".")[0]
+    return socket.gethostname()
+
+
+def _gateway_public_base(directory: str, env: Dict[str, str]) -> str:
+    """Origin of the gateway a tunnel node is reached through."""
+    for key in ("MESH_PUBLIC_URL", "AGY_PUBLIC_BASE_URL"):
+        base = domain.normalise_public_base_url(os.environ.get(key))
+        if base:
+            return base
+    values = _read_env_file(os.path.join(directory, "domain.env"))
+    for key in ("MESH_PUBLIC_URL", "AGY_PUBLIC_BASE_URL"):
+        base = domain.normalise_public_base_url(values.get(key))
+        if base:
+            return base
     raw = (env.get("MESH_GATEWAY") or "").strip()
-    if not raw:
-        return domain.public_base_url().rstrip("/")
-    if "://" not in raw:
-        raw = "https://" + raw
-    return raw.rstrip("/")
+    if raw:
+        return raw if "://" in raw else "https://" + raw
+    return domain.public_base_url().rstrip("/")
+
+
+def node_endpoint(env: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+    """Address of the installed node, and what to print next to it.
+
+    Returns ``{"mode", "dir", "url", "token", "node", "public_base", "hint"}``.
+    A standalone/Funnel node is its own public endpoint: its own ``ts.net`` name
+    with the standalone token. A tunnel node keeps the gateway shape
+    ``<gateway>/sse?user=...&token=<link key>``. ``hint`` says why a URL is
+    missing, so no caller has to guess which file was empty.
+    """
+    directory = install_dir()
+    state = _autostart_state(directory)
+    mode = node_mode(directory, state)
+    info: Dict[str, Any] = {
+        "mode": mode,
+        "dir": directory,
+        "port": _standalone_port(state),
+        "url": "",
+        "token": "",
+        "node": "",
+        "public_base": "",
+        "hint": "",
+    }
+    if mode == "standalone":
+        base = _standalone_base(directory, state)
+        token = _standalone_token(directory)
+        info["public_base"] = base
+        info["token"] = token
+        info["node"] = _node_label(state, env or {}, directory, mode)
+        if base and token:
+            info["url"] = "%s/sse?token=%s" % (base.rstrip("/"), token)
+        elif not token:
+            info["hint"] = ("MCP endpoint: the Funnel node has no token yet (no MESH_TOKEN in %s)."
+                            % os.path.join(directory, STANDALONE_ENV_FILE))
+        else:
+            info["hint"] = "MCP endpoint: the Funnel node has no public address yet."
+        return info
+    gateway_env = dict(env) if env is not None else read_agent_env(directory)
+    base = _gateway_public_base(directory, gateway_env)
+    user = (gateway_env.get("MESH_USER") or "").strip()
+    link = (gateway_env.get("MESH_LINK_KEY") or "").strip()
+    info["public_base"] = base
+    info["token"] = link
+    info["node"] = _node_label(state, gateway_env, directory, mode)
+    if user and link:
+        info["url"] = "%s/sse?user=%s&token=%s" % (base, user, link)
+    elif not user:
+        info["hint"] = "MCP endpoint: (no MESH_USER / MESH_LINK_KEY in agent.env)"
+    else:
+        info["hint"] = ("MCP endpoint: link key missing for '%s' (gateway unreachable or rotate failed)." % user)
+    return info
+
+
+def build_mcp_url(env: Optional[Dict[str, str]] = None) -> str:
+    """The URL to paste into the MCP client, for the installed node."""
+    return str(node_endpoint(env).get("url") or "")
+
+
+def _gateway_base(env: Dict[str, str], directory: Optional[str] = None) -> str:
+    """Origin of the gateway this node dials, for the key rotation call."""
+    return _gateway_public_base(directory or config_dir(), env)
 
 
 def _write_env_value(path: str, key: str, value: str) -> None:
@@ -257,14 +479,17 @@ def _write_env_value(path: str, key: str, value: str) -> None:
     os.replace(tmp, path)
 
 
-def ensure_link_key(env: Optional[Dict[str, str]] = None) -> str:
+def ensure_link_key(env: Optional[Dict[str, str]] = None,
+                     directory: Optional[str] = None) -> str:
     """Return the link key, rotating one through the gateway for old installs.
 
     Nodes installed before 0.4.6 have no ``MESH_LINK_KEY`` in ``agent.env``; the
     menu would otherwise show no endpoint at all.  The device token proves
-    ownership; the returned key is written 0600 next to the token.
+    ownership; the returned key is written 0600 next to the token in the
+    configuration directory of the node that is being described.
     """
-    env = dict(env or read_agent_env())
+    target_dir = directory or config_dir()
+    env = dict(env or read_agent_env(target_dir))
     link = (env.get("MESH_LINK_KEY") or "").strip()
     if link:
         return link
@@ -276,7 +501,7 @@ def ensure_link_key(env: Optional[Dict[str, str]] = None) -> str:
         import urllib.request
 
         request = urllib.request.Request(
-            "%s/v1/devices/%s/rotate" % (_gateway_base(env), user),
+            "%s/v1/devices/%s/rotate" % (_gateway_base(env, target_dir), user),
             method="POST",
             headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"},
         )
@@ -284,7 +509,7 @@ def ensure_link_key(env: Optional[Dict[str, str]] = None) -> str:
             payload = json.loads(response.read().decode("utf-8", "replace"))
         link = str(payload.get("link_key") or "").strip()
         if link:
-            _write_env_value(os.path.join(config_dir(), "agent.env"), "MESH_LINK_KEY", link)
+            _write_env_value(os.path.join(target_dir, "agent.env"), "MESH_LINK_KEY", link)
             env["MESH_LINK_KEY"] = link
         return link
     except Exception:
@@ -292,7 +517,8 @@ def ensure_link_key(env: Optional[Dict[str, str]] = None) -> str:
 
 
 def agent_log_path() -> str:
-    return os.path.join(config_dir(), "agent.log")
+    """The log of the installed node (the service keeps it in its own directory)."""
+    return os.path.join(install_dir(), "agent.log")
 
 
 def tail(path: str, lines: int = 12) -> List[str]:
@@ -328,14 +554,17 @@ def qr_lines(text: str) -> List[str]:
 def snapshot() -> Dict[str, Any]:
     env = read_agent_env()
     state = control.state()
+    info = node_endpoint(env)
     return {
-        "online": state["online"],
+        "online": node_online(info, state),
         "mode": state["access_mode"],
         "mode_label": state["access_label"],
         "workspace": state["workspace"] or os.getcwd(),
-        "url": build_mcp_url(env),
+        "url": info["url"],
+        "endpoint_mode": info["mode"],
+        "node": info["node"],
+        "config_dir": info["dir"],
         "log": agent_log_path(),
-        "pending": control.pending_approvals(),
         "isolation": sandbox.status(),
         "remote_control": state.get("remote_control") or control.remote_control_state(),
         "goal": goal.get() if goal.enabled() else None,
@@ -461,6 +690,72 @@ class Keys:
         return False
 
 
+def _endpoint_info(env: Dict[str, str]) -> Dict[str, Any]:
+    """``node_endpoint`` plus the key rotation a tunnel install may still need.
+
+    Old tunnel installs predate ``MESH_LINK_KEY``; rotating it is the only
+    action the menu takes here, and it is pointless for a Funnel node, whose
+    URL carries the standalone token instead.
+    """
+    info = node_endpoint(env)
+    if info["mode"] == "tunnel" and not (env.get("MESH_LINK_KEY") or "").strip():
+        link = ensure_link_key(env, info["dir"])
+        if link:
+            merged = dict(env)
+            merged["MESH_LINK_KEY"] = link
+            info = node_endpoint(merged)
+    return info
+
+
+#: How long one health answer is trusted. The menu repaints every second;
+#: probing the node on every repaint would make the cursor stutter for no
+#: reason, and a node that died is noticed within one interval anyway.
+_ALIVE_TTL = 5.0
+_ALIVE_CACHE: Dict[int, tuple] = {}
+
+
+def _probe_health(port: int, timeout: float = 0.6) -> bool:
+    """True when the local standalone node answers /health."""
+    try:
+        import urllib.request
+
+        url = "http://127.0.0.1:%d/health" % int(port)
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            return 200 <= int(getattr(response, "status", 0)) < 300
+    except Exception:
+        return False
+
+
+def _standalone_alive(port: int, now: Optional[float] = None) -> bool:
+    """``_probe_health`` with a short cache, so a repaint costs nothing."""
+    port = int(port)
+    now = time.time() if now is None else now
+    cached = _ALIVE_CACHE.get(port)
+    if cached and now - cached[0] < _ALIVE_TTL:
+        return bool(cached[1])
+    alive = _probe_health(port)
+    _ALIVE_CACHE[port] = (now, alive)
+    return alive
+
+
+def node_online(info: Dict[str, Any], state: Optional[Dict[str, Any]] = None) -> bool:
+    """Is the installed node alive? Two different proofs, one line in the menu.
+
+    A tunnel node writes ``agent.heartbeat`` and the menu reads it. A
+    standalone/Funnel node writes no heartbeat at all (``core.agent`` is the
+    tunnel), and it usually runs as a service under another account, so the
+    user-side heartbeat file is either missing or stale: the node was called
+    OFFLINE while it was answering Gemini. Its own loopback port is the only
+    proof that does not depend on which account and directory it runs in.
+    """
+    state = control.state() if state is None else state
+    if state.get("online"):
+        return True
+    if info.get("mode") == "standalone":
+        return _standalone_alive(int(info.get("port") or DEFAULT_STANDALONE_PORT))
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Rendering
 # ---------------------------------------------------------------------------
@@ -469,19 +764,17 @@ def _render_lines(env: Dict[str, str], *, include_endpoint: bool = True,
                   include_log: bool = True,
                   columns: Optional[int] = None) -> List[str]:
     env = dict(env)
-    if not env.get("MESH_LINK_KEY"):
-        link = ensure_link_key(env)
-        if link:
-            env["MESH_LINK_KEY"] = link
+    info = _endpoint_info(env)
     state = control.state()
-    url = build_mcp_url(env)
-    token = (env.get("MESH_LINK_KEY") or "").strip()
+    url = info["url"]
+    token = info["token"]
+    node = info["node"] or env.get("MESH_USER") or "?"
     lines: List[str] = []
     lines.append("Remote Harness MCP  ·  rhm")
     lines.append("=" * 72)
-    status = "ONLINE" if state["online"] else "OFFLINE"
+    status = "ONLINE" if node_online(info, state) else "OFFLINE"
     lines.append("Status: %-8s  Node: %-20s  Usage today: %s calls"
-                 % (status, env.get("MESH_USER", "?"), usage.summary(days=1).get("events", 0)))
+                 % (status, node, usage.summary(days=1).get("events", 0)))
     mode = state["access_mode"]
     labels = control.ACCESS_LABELS
     order = control.ACCESS_MODES
@@ -524,19 +817,6 @@ def _render_lines(env: Dict[str, str], *, include_endpoint: bool = True,
         lines.append("Schedules: %d active · %d fired unacknowledged%s  (rhm schedule)"
                      % (summary.get("active", 0), summary.get("pending_continuations", 0),
                         (" · next %s" % summary["next_due"]) if summary.get("next_due") else ""))
-    grant = state.get("approval_grant") or {}
-    pending = control.pending_approvals()
-    if grant.get("active"):
-        if grant.get("expires_in"):
-            lines.append("Approvals: ALL allowed for another %d min  (R — revoke)"
-                         % max(1, int(grant["expires_in"]) // 60))
-        else:
-            lines.append("Approvals: ALL allowed until revoked  (R — revoke)")
-    elif pending:
-        lines.append("Approvals: %d waiting — a approve once, A always, x deny"
-                     % len(pending))
-    else:
-        lines.append("Approvals: asked on every mutating call  (a once, A always)")
     if _NOTICE:
         lines.append("Note:  %s" % _NOTICE)
     lines.append("")
@@ -551,19 +831,10 @@ def _render_lines(env: Dict[str, str], *, include_endpoint: bool = True,
                 lines.append("")
                 lines.extend(qr)
         else:
-            if env.get("MESH_USER"):
-                lines.append("MCP endpoint: link key missing for '%s' (gateway unreachable or rotate failed)."
-                             % env.get("MESH_USER"))
+            lines.append(info["hint"] or "MCP endpoint: not configured")
+            if info["mode"] == "tunnel" and env.get("MESH_USER"):
                 lines.append("Run the installer again, or POST /v1/devices/%s/rotate with the device token."
                              % env.get("MESH_USER"))
-            else:
-                lines.append("MCP endpoint: (no MESH_USER / MESH_LINK_KEY in agent.env)")
-    pending = control.pending_approvals()
-    if pending:
-        lines.append("")
-        lines.append("Pending approval (a=approve, x=deny):")
-        for item in pending[-3:]:
-            lines.append("  %s  %-14s  %s" % (item.get("id"), item.get("tool"), item.get("summary", "")))
     lines.append("")
     if include_log:
         lines.append("Agent log (%s):" % agent_log_path())
@@ -600,23 +871,20 @@ def _frame(env: Dict[str, str], columns: int, rows: int) -> str:
     opens it full-screen. The token and URL are always visible.
     """
     env = dict(env)
-    if not (env.get("MESH_LINK_KEY") or "").strip():
-        link = ensure_link_key(env)
-        if link:
-            env["MESH_LINK_KEY"] = link
+    info = _endpoint_info(env)
     base = _render_lines(env, include_endpoint=False, include_log=False, columns=columns)
     lines_ok = len(base) >= 2
     hint = base[-1] if base else ""
     footer = base[-2:] if lines_ok else list(base)
     body = base[:-2] if lines_ok else []
 
-    url = build_mcp_url(env)
-    token = (env.get("MESH_LINK_KEY") or "").strip()
+    url = info["url"]
+    token = info["token"]
     endpoint = ["", "MCP endpoint:"]
     if url:
         endpoint.append(_fit(url, columns))
     else:
-        endpoint.append("not configured: no MESH_USER / MESH_LINK_KEY")
+        endpoint.append(_fit(info["hint"] or "not configured", columns))
     if token:
         endpoint.append("Token: %s" % _fit(token, max(8, columns - 7)))
     qr = qr_lines(url) if url else []
@@ -722,13 +990,9 @@ def draw(env: Dict[str, str], force: bool = False) -> None:
 def _show_endpoint(keys: "Keys", env: Dict[str, str]) -> None:
     """Endpoint, token and QR on a screen of their own; any key returns."""
     columns, rows = _terminal_size()
-    env = dict(env)
-    if not (env.get("MESH_LINK_KEY") or "").strip():
-        link = ensure_link_key(env)
-        if link:
-            env["MESH_LINK_KEY"] = link
-    url = build_mcp_url(env)
-    token = (env.get("MESH_LINK_KEY") or "").strip()
+    info = _endpoint_info(dict(env))
+    url = info["url"]
+    token = info["token"]
     lines = ["MCP endpoint:", ""]
     if url:
         lines.append(url)
@@ -740,7 +1004,7 @@ def _show_endpoint(keys: "Keys", env: Dict[str, str]) -> None:
         elif qr:
             lines += ["", "(window too small for the QR code)"]
     else:
-        lines.append("not configured: no MESH_USER / MESH_LINK_KEY")
+        lines.append(info["hint"] or "not configured")
     lines += ["", "press any key to return"]
     body = "\n".join(_fit(line, columns) for line in lines[:rows])
     global _LAST_FRAME
@@ -756,13 +1020,11 @@ def _show_help(keys: "Keys", env: Dict[str, str]) -> None:
     lines = [
         "keys",
         "",
-        "  Tab / Left / Right   access mode (read-only / approval / full)",
+        "  Tab / Left / Right   access mode (read-only / full)",
         "  d                    working directory",
         "  i                    isolation on/off (strict)",
         "  I                    isolation with network",
         "  r                    remote control on/off",
-        "  a / x                approve / deny the waiting call",
-        "  A / R                allow every mutating call / revoke that",
         "  p                    pause or resume calls",
         "  e                    MCP endpoint and QR code",
         "  o                    open the agent log",
@@ -866,21 +1128,6 @@ def run_menu() -> int:
                 result = node_settings.apply(
                     {"action": "remote_control", "enabled": enabled}, actor="tui")
                 _NOTICE = str(result.get("message") or result.get("error") or "")
-            elif key in ("a", "x", "A", "R"):
-                pending = control.pending_approvals()
-                if key == "A":
-                    control.approve_all(0)
-                    _NOTICE = ("all mutating calls are allowed until revoked "
-                               "(R) or the access mode changes")
-                elif key == "R":
-                    control.revoke_grant()
-                    _NOTICE = "standing approval revoked: mutating calls ask again"
-                elif pending and key == "a":
-                    control.approve(pending[-1]["id"])
-                    _NOTICE = "approved once: the waiting call continues"
-                elif pending and key == "x":
-                    control.deny(pending[-1]["id"])
-                    _NOTICE = "request denied"
             elif key == "p":
                 action = "resume" if control.paused() else "pause"
                 result = node_settings.apply({"action": action}, actor="tui")
@@ -899,7 +1146,7 @@ def run_menu() -> int:
 
 
 COMMANDS = ("status", "mode", "cd", "isolation", "remote-control", "pause", "resume",
-            "goal", "approvals", "schedule")
+            "goal", "schedule")
 
 _TRUE = ("on", "true", "1", "yes")
 _FALSE = ("off", "false", "0", "no")
@@ -909,13 +1156,6 @@ def _status_text() -> str:
     data = snapshot()
     isolation = data.get("isolation") or {}
     lock = data.get("remote_control") or {}
-    grant = data.get("approval_grant") or {}
-    if grant.get("active"):
-        approvals = ("ALL allowed" +
-                     (" for %d min" % max(1, int(grant.get("expires_in") or 0) // 60)
-                      if grant.get("expires_in") else " until revoked"))
-    else:
-        approvals = "%d pending / ask each call" % len(data.get("pending") or [])
     lines = [
         "mode:        %s" % data.get("mode"),
         "workspace:   %s" % data.get("workspace"),
@@ -923,7 +1163,6 @@ def _status_text() -> str:
         "isolation:   %s" % ("ON at %s" % isolation.get("workspace")
                              if isolation.get("enabled") else "off"),
         "remote:      %s" % ("on" if lock.get("enabled", True) else "off"),
-        "approvals:   %s" % approvals,
         "schedules:   %s" % _schedule_line(),
         "online:      %s" % ("yes" if data.get("online") else "no"),
     ]
@@ -985,47 +1224,6 @@ def _run_schedule(value: str, schedule_id: str, as_json: bool) -> int:
     return 0
 
 
-def _run_approvals(value: str, text: str, as_json: bool) -> int:
-    """``rhm approvals`` show; ``allow [minutes]`` / ``once`` / ``off`` / ``status``."""
-    word = value.strip().lower()
-    if word in ("", "status", "show"):
-        data = control.grant_status()
-        data["pending"] = control.pending_approvals()
-    elif word in ("allow", "always", "all", "on"):
-        minutes = 0
-        try:
-            minutes = int(text) if text else 0
-        except ValueError:
-            minutes = 0
-        control.approve_all(minutes * 60 if minutes > 0 else 0)
-        data = control.grant_status()
-    elif word == "once":
-        pending = control.pending_approvals()
-        if not pending:
-            print("rhm: nothing is waiting for approval", file=sys.stderr)
-            return 2
-        control.approve(pending[-1]["id"])
-        data = control.grant_status()
-    elif word in ("off", "revoke", "reset", "none"):
-        control.revoke_grant()
-        data = control.grant_status()
-    else:
-        print("rhm: approvals needs show, allow [minutes], once or off", file=sys.stderr)
-        return 2
-    if as_json:
-        print(json.dumps(data, ensure_ascii=False, default=str))
-    elif data.get("active"):
-        if data.get("expires_in"):
-            print("approvals: ALL allowed for another %d min (rhm approvals off — revoke)"
-                  % max(1, int(data["expires_in"]) // 60))
-        else:
-            print("approvals: ALL allowed until revoked (rhm approvals off)")
-    else:
-        print("approvals: ask on every mutating call (%d pending)"
-              % len(data.get("pending") or []))
-    return 0
-
-
 def _run_command(args: Any) -> int:
     """One-shot subcommands; the same mutations as the menu, over the same service."""
     command = str(args.command or "")
@@ -1041,14 +1239,15 @@ def _run_command(args: Any) -> int:
     if command == "goal":
         return _run_goal(value, str(getattr(args, "text", "") or "").strip(), args.json)
 
-    if command == "approvals":
-        return _run_approvals(value, str(getattr(args, "text", "") or "").strip(), args.json)
-
     if command == "schedule":
         return _run_schedule(value, str(getattr(args, "text", "") or "").strip(), args.json)
 
     payload: Dict[str, Any]
     if command == "mode":
+        if value == "approval":
+            # Legacy name from scripts and trays: the node no longer prompts, so
+            # it means full access instead of failing the command.
+            value = "full"
         if value not in control.ACCESS_MODES:
             print("rhm: mode must be one of %s" % ", ".join(control.ACCESS_MODES),
                   file=sys.stderr)

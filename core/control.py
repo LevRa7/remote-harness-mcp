@@ -7,13 +7,12 @@ every call, so a toggle takes effect immediately without restarting the service.
 * ``agent.paused``        - refuse every tool call with ``node_paused``.
 * ``readonly.flag``       - observation only, even if the service was started
                             without ``MESH_READ_ONLY``.
-* ``access.mode``         - ``read_only`` / ``approval`` / ``full`` (the console
+* ``access.mode``         - ``read_only`` / ``full`` (the console
                             menu's three-way switch).
 * ``workspace.txt``       - the agent's current working directory.
 * ``remote_control.json`` - ``{enabled}``: may the cabinet/model change those
                             switches remotely? On by default; once off, only the
                             console or ``rhm remote-control on`` turns it back on.
-* ``pending/``            - approval requests waiting for the console menu.
 """
 
 from __future__ import annotations
@@ -21,15 +20,13 @@ from __future__ import annotations
 import json
 import os
 import time
-import uuid
 from typing import Any, Dict, List, Optional
 
 from core import paths
 
-ACCESS_MODES = ("read_only", "approval", "full")
+ACCESS_MODES = ("read_only", "full")
 ACCESS_LABELS = {
     "read_only": "Read-only",
-    "approval": "Access on request",
     "full": "Full access",
 }
 
@@ -105,19 +102,27 @@ def access_mode() -> str:
         return explicit
     if os.path.exists(_path("readonly.flag")):
         return "read_only"
+    if explicit == "approval":
+        # This node used to queue mutating calls for a prompt. Confirmation is
+        # the MCP client's job (Gemini Web asks before a tool call); a node-side
+        # prompt only dead-ended every chat that could not answer it.
+        return "full"
     env = os.environ.get("MESH_ACCESS_MODE", "").strip().lower()
     if env in ACCESS_MODES:
         return env
+    if env == "approval":
+        return "full"
     if os.environ.get("MESH_READ_ONLY", "").strip().lower() in {"1", "true", "yes", "on"}:
         return "read_only"
-    # Safe product default: the first mutating call is queued for approval in
-    # ``rhm`` instead of running silently. Tests/embedded callers can set
-    # MESH_ACCESS_MODE=full explicitly.
-    return "approval"
+    return "full"
 
 
 def set_access_mode(mode: str) -> str:
     mode = str(mode or "").strip().lower()
+    if mode == "approval":
+        # Legacy name kept for old scripts and tray entries: there is no node-side
+        # prompt any more, so it means full access.
+        mode = "full"
     if mode not in ACCESS_MODES:
         raise ValueError("mode must be one of %r" % (ACCESS_MODES,))
     os.makedirs(control_dir(), mode=0o700, exist_ok=True)
@@ -128,9 +133,6 @@ def set_access_mode(mode: str) -> str:
         os.chmod(path, 0o600)
     except OSError:
         pass
-    # "Always allow" must not survive a deliberate mode change: switching to
-    # approval has to mean approval again, otherwise the switch lies.
-    revoke_grant()
     # Keep the old marker in sync so existing tray/agent checks keep working.
     flag = _path("readonly.flag")
     if mode == "read_only":
@@ -170,180 +172,6 @@ def set_workspace(path: str) -> str:
     except OSError:
         pass
     return value
-
-
-# ---------------------------------------------------------------------------
-# Access-on-request: pending request + a one-shot grant for a tool.
-# ---------------------------------------------------------------------------
-
-def _pending_dir() -> str:
-    return _path("pending")
-
-
-def request_approval(tool: str, summary: str = "") -> Dict[str, Any]:
-    """Record a mutating call and return ``{id, tool, summary, expires}``."""
-    os.makedirs(_pending_dir(), mode=0o700, exist_ok=True)
-    request_id = uuid.uuid4().hex[:12]
-    payload = {
-        "id": request_id,
-        "tool": str(tool)[:80],
-        "summary": str(summary)[:240],
-        "ts": time.time(),
-        "expires": time.time() + 300,
-    }
-    path = os.path.join(_pending_dir(), request_id + ".json")
-    with open(path, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, ensure_ascii=False)
-    try:
-        os.chmod(path, 0o600)
-    except OSError:
-        pass
-    return payload
-
-
-def pending_approvals() -> List[Dict[str, Any]]:
-    directory = _pending_dir()
-    if not os.path.isdir(directory):
-        return []
-    result = []
-    now = time.time()
-    for name in sorted(os.listdir(directory)):
-        if not name.endswith(".json"):
-            continue
-        path = os.path.join(directory, name)
-        try:
-            payload = json.loads(open(path, "r", encoding="utf-8").read())
-        except Exception:
-            continue
-        if not isinstance(payload, dict) or payload.get("expires", 0) < now:
-            try:
-                os.remove(path)
-            except OSError:
-                pass
-            continue
-        result.append(payload)
-    return result[-10:]
-
-
-def _grant_path() -> str:
-    return _path("approval.grant")
-
-
-def approve(request_id: str, seconds: int = 60) -> Optional[Dict[str, Any]]:
-    """Approve one pending request; the next matching tool call may run once."""
-    target = os.path.join(_pending_dir(), str(request_id) + ".json")
-    try:
-        payload = json.loads(open(target, "r", encoding="utf-8").read())
-    except Exception:
-        return None
-    _write_grant({
-        "tool": payload.get("tool"),
-        "persist": False,
-        "approved_at": time.time(),
-        "expires": time.time() + max(5, int(seconds)),
-    })
-    try:
-        os.remove(target)
-    except OSError:
-        pass
-    return payload
-
-
-def approve_all(seconds: int = 0, tool: str = "*") -> Dict[str, Any]:
-    """Allow mutating calls without asking: "always" (``seconds<=0``) or for a while.
-
-    The grant is a file, so it survives an agent restart. It is revoked by an
-    explicit ``revoke_grant()`` (``rhm approvals off``, key ``R`` in the menu) or
-    by changing the access mode - switching to approval must mean approval.
-    """
-    grant = {
-        "tool": str(tool or "*"),
-        "persist": True,
-        "approved_at": time.time(),
-        "expires": 0 if int(seconds) <= 0 else time.time() + int(seconds),
-    }
-    _write_grant(grant)
-    return grant
-
-
-def _write_grant(grant: Dict[str, Any]) -> None:
-    os.makedirs(control_dir(), mode=0o700, exist_ok=True)
-    with open(_grant_path(), "w", encoding="utf-8") as handle:
-        json.dump(grant, handle)
-    try:
-        os.chmod(_grant_path(), 0o600)
-    except OSError:
-        pass
-
-
-def revoke_grant() -> bool:
-    try:
-        os.remove(_grant_path())
-        return True
-    except OSError:
-        return False
-
-
-def grant_status() -> Dict[str, Any]:
-    """What the standing approval covers; ``active: false`` when there is none."""
-    path = _grant_path()
-    if not os.path.exists(path):
-        return {"active": False}
-    try:
-        grant = json.loads(open(path, "r", encoding="utf-8").read())
-    except Exception:
-        return {"active": False}
-    if not isinstance(grant, dict):
-        return {"active": False}
-    expires = float(grant.get("expires", 0) or 0)
-    if expires and expires < time.time():
-        revoke_grant()
-        return {"active": False}
-    return {
-        "active": True,
-        "tool": grant.get("tool") or "*",
-        "persist": bool(grant.get("persist")),
-        "expires_in": int(expires - time.time()) if expires else None,
-    }
-
-
-def deny(request_id: str) -> bool:
-    target = os.path.join(_pending_dir(), str(request_id) + ".json")
-    try:
-        os.remove(target)
-        return True
-    except OSError:
-        return False
-
-
-def approval_granted(tool: str) -> bool:
-    """True when a standing grant covers *tool*.
-
-    A one-shot grant (pressed ``a``) is consumed here; a persistent one
-    (``approve_all`` / pressed ``A``) is left in place until it expires or is
-    revoked, so the following calls of the same task do not ask again.
-    """
-    path = _grant_path()
-    if not os.path.exists(path):
-        return False
-    try:
-        grant = json.loads(open(path, "r", encoding="utf-8").read())
-    except Exception:
-        grant = {}
-    if not isinstance(grant, dict):
-        grant = {}
-    expires = float(grant.get("expires", 0) or 0)
-    if expires and expires < time.time():
-        revoke_grant()
-        return False
-    if grant.get("tool") not in (tool, "*"):
-        return False
-    if not grant.get("persist"):
-        try:
-            os.remove(path)
-        except OSError:
-            pass
-    return True
 
 
 # ---------------------------------------------------------------------------
@@ -460,8 +288,6 @@ def state() -> Dict[str, Any]:
         "access_mode": access_mode(),
         "access_label": ACCESS_LABELS.get(access_mode(), access_mode()),
         "workspace": workspace(),
-        "pending_approvals": len(pending_approvals()),
-        "approval_grant": grant_status(),
         "remote_control": remote_control_state(),
         "heartbeat_age_sec": age,
         "online": age is not None and age <= 60,

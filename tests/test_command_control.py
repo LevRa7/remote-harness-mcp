@@ -76,39 +76,17 @@ def test_missing_heartbeat_is_offline(workspace):
     assert state["heartbeat_age_sec"] is None
 
 
-def test_approval_mode_queues_and_grants_one_call(workspace):
-    control.set_access_mode("approval")
-    blocked = mcp_tools.call_tool("bash_exec", {"command": "echo approved"})
-    assert blocked["error"].startswith("approval_required")
-    pending = control.pending_approvals()
-    assert len(pending) == 1
-    assert pending[0]["tool"] == "bash_exec"
-
-    assert control.approve(pending[0]["id"]) is not None
-    allowed = mcp_tools.call_tool("bash_exec", {"command": "echo approved"})
-    assert "stdout" in allowed
-    assert "approved" in allowed["stdout"]
-
-    # The grant is one-shot: the next mutating call asks again.
-    again = mcp_tools.call_tool("bash_exec", {"command": "echo again"})
-    assert again["error"].startswith("approval_required")
-
-
-def test_approval_mode_deny_removes_request(workspace):
-    control.set_access_mode("approval")
-    mcp_tools.call_tool("write_file", {"path": "blocked.txt", "content": "x"})
-    pending = control.pending_approvals()
-    assert pending
-    assert control.deny(pending[0]["id"]) is True
-    assert control.pending_approvals() == []
-    assert not (workspace / "blocked.txt").exists()
-
-
-def test_full_mode_does_not_queue(workspace):
-    control.set_access_mode("full")
+def test_mutating_calls_run_without_a_node_side_prompt(workspace):
+    # The client draws the confirmation dialog; the node executes the call.
     result = mcp_tools.call_tool("bash_exec", {"command": "echo free"})
-    assert "stdout" in result
-    assert control.pending_approvals() == []
+    assert "stdout" in result, result
+    assert "approval_required" not in result.get("error", "")
+
+
+def test_a_legacy_approval_setting_means_full(workspace):
+    assert control.set_access_mode("approval") == "full"
+    result = mcp_tools.call_tool("bash_exec", {"command": "echo legacy"})
+    assert "stdout" in result, result
 
 
 def test_workspace_override_is_live(workspace):
@@ -145,7 +123,7 @@ def test_explicit_menu_mode_wins_over_env(workspace, monkeypatch):
     assert "allowed" in result["stdout"]
 
 
-def test_product_default_is_access_on_request(workspace, monkeypatch):
+def test_the_product_default_is_full_access(workspace, monkeypatch):
     monkeypatch.delenv("MESH_ACCESS_MODE", raising=False)
     monkeypatch.delenv("MESH_READ_ONLY", raising=False)
     for name in ("access.mode", "readonly.flag"):
@@ -153,4 +131,4 @@ def test_product_default_is_access_on_request(workspace, monkeypatch):
             (workspace / "control" / name).unlink()
         except FileNotFoundError:
             pass
-    assert control.access_mode() == "approval"
+    assert control.access_mode() == "full"

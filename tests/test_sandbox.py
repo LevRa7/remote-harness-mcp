@@ -88,15 +88,12 @@ def test_system_root_is_refused_as_workspace():
     assert sandbox.workspace_refusal(os.path.expanduser("~"))
 
 
-def test_networked_isolation_requires_operator_approval():
+def test_networked_isolation_has_no_node_side_prompt():
+    """The client may ask before a networked container; the node does not queue it."""
     from core import settings
 
-    assert settings.requires_approval(
-        {"action": "sandbox", "enabled": True, "network": True}
-    ) is True
-    assert settings.requires_approval(
-        {"action": "sandbox", "enabled": True, "network": False}
-    ) is False
+    assert not hasattr(settings, "requires_approval"), (
+        "the node no longer owns confirmation: the MCP client does")
 
 
 def test_enable_uses_hardened_flags_and_no_host_mounts(tmp_path, monkeypatch):

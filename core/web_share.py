@@ -53,6 +53,7 @@ import os
 import re
 import secrets
 import shutil
+import socket
 import threading
 from datetime import datetime, timezone
 from functools import partial
@@ -147,11 +148,12 @@ def configure(**kwargs: Any) -> None:
     """(Re)configure the module.
 
     Recognised keys: ``web_dir``, ``public_url``, ``user``, ``max_bytes``,
-    ``max_shares``, ``listing``. Unset keys keep their previous value; an empty
-    string resets a key so it falls back to the ``MESH_*`` environment and then
-    to the built-in default, which keeps tests order-independent.
+    ``max_shares``, ``listing``, ``direct``. Unset keys keep their previous
+    value; an empty string resets a key so it falls back to the ``MESH_*``
+    environment and then to the built-in default, which keeps tests
+    order-independent. ``direct`` is a flag, not a path: it is stored as given.
     """
-    for key in ("web_dir", "public_url", "user", "max_bytes", "max_shares", "listing"):
+    for key in ("web_dir", "public_url", "user", "max_bytes", "max_shares", "listing", "direct"):
         if key not in kwargs or kwargs[key] is None:
             continue
         if kwargs[key] == "":
@@ -224,16 +226,47 @@ def _public_base() -> str:
     return domain.public_base_url()
 
 
+def _default_node_name() -> str:
+    """The name a share link may use when nobody configured one.
+
+    The gateway routes ``/<node>/<slug>/...`` back to the tunnel registered
+    under ``<node>``, so a placeholder here is not cosmetic: "anonymous" is
+    never registered and every such link answered 404. The machine name is what
+    the installers register, so it is the only honest fallback.
+    """
+    try:
+        hostname = socket.gethostname()
+    except Exception:
+        hostname = ""
+    return "".join(c for c in str(hostname).strip().lower() if c.isalnum() or c in "-_")
+
+
 def _user() -> str:
-    raw = _CONFIG.get("user") or os.environ.get("MESH_USER") or "anonymous"
+    raw = _CONFIG.get("user") or os.environ.get("MESH_USER") or _default_node_name()
     user = str(raw).strip().lower()
     return user or "anonymous"
+
+
+def _direct_links() -> bool:
+    """True when this node - not a gateway - is the public endpoint.
+
+    A standalone/Funnel node is reached at its own HTTPS address, where the
+    share lives at ``/<slug>/...``: there is no gateway to route
+    ``/<node>/<slug>/...`` back into a tunnel. A tunnel node keeps the
+    gateway-shaped link because only the gateway can reach it.
+    """
+    value = _CONFIG.get("direct")
+    if value is None:
+        return str(os.environ.get("MESH_WEB_DIRECT", "")).strip().lower() in ("1", "true", "yes", "on")
+    return bool(value)
 
 
 def _public_url(slug: str, suffix: str = "/") -> str:
     suffix = suffix or "/"
     if not suffix.startswith("/"):
         suffix = "/" + suffix
+    if _direct_links():
+        return "%s/%s%s" % (_public_base(), slug, suffix)
     return "%s/%s/%s%s" % (_public_base(), _user(), slug, suffix)
 
 
@@ -443,15 +476,31 @@ class _ShareHandler(SimpleHTTPRequestHandler):
         logger.debug("%s - %s", self.address_string(), fmt % args)
 
 
+class _ShareHTTPServer(ThreadingHTTPServer):
+    """The loopback server one share listens on.
+
+    ``ThreadingHTTPServer`` inherits ``request_queue_size = 5`` from
+    ``socketserver.TCPServer``. Ten parallel readers (a page with ten assets is
+    enough) overflowed that backlog: the proxy could not connect and answered
+    502 "share server error" for bytes that were perfectly readable, so the
+    share looked broken under exactly the load a web page creates.
+    """
+
+    daemon_threads = True
+    allow_reuse_address = True
+    request_queue_size = 128
+
+
 def _start_server(slug: str, share: Dict[str, Any]) -> Dict[str, Any]:
+    public_prefix = "/%s" % slug if _direct_links() else "/%s/%s" % (_user(), slug)
     handler = partial(
         _ShareHandler,
         directory=share.get("root") or "",
-        public_prefix="/%s/%s" % (_user(), slug),
+        public_prefix=public_prefix,
         listing=_listing_enabled(),
     )
     # Port 0 -> the OS assigns a free loopback port; nothing is ever bound publicly.
-    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    httpd = _ShareHTTPServer(("127.0.0.1", 0), handler)
     httpd.daemon_threads = True
     thread = threading.Thread(target=httpd.serve_forever, name="mesh-share-%s" % slug[:24], daemon=True)
     thread.start()

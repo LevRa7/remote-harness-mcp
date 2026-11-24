@@ -17,10 +17,11 @@ Two properties beyond "it works" are pinned here on purpose:
 import base64
 import os
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from core import domain, mcp_tools, web_share
+from core import domain, mcp_tools, server, web_share
 
 #: Node name used for every link in this module (the gateway routes
 #: ``/<node>/<slug>/...`` back to the tunnel registered under this name).
@@ -40,7 +41,7 @@ DEVICE_TOOLS = ("device_info", "device_control", "device_capture", "device_messa
 #: (``goal``) landed next to self-update for the same reason the device branch
 #: did: after the legacy surface and before the device block, so no block that
 #: already had a position had to move.
-SETTINGS_TOOLS = ("approve", "node_control", "schedule")
+SETTINGS_TOOLS = ("node_control", "schedule")
 
 #: The tool surface that existed before shares were added, in order. Self-update
 #: (mesh_update) was added in the same slot: before the share tools, after the
@@ -105,6 +106,7 @@ def isolated_shares(tmp_path, monkeypatch):
         max_shares="",
         web_listing="",
         public_url="",
+        web_share_direct=False,
     )
     yield
     web_share.stop_all()
@@ -121,6 +123,7 @@ def isolated_shares(tmp_path, monkeypatch):
         max_shares="",
         web_listing="",
         public_url="",
+        web_share_direct=False,
     )
 
 
@@ -139,7 +142,7 @@ def test_the_share_tools_are_the_last_four_and_do_not_disturb_the_rest():
     assert names[settings_at:device_at] == list(SETTINGS_TOOLS)
     assert names[device_at:shares_at] == list(DEVICE_TOOLS)
     assert tuple(names[shares_at:]) == SHARE_TOOLS
-    assert len(names) == 28, (
+    assert len(names) == 27, (
         "the node must advertise 16 legacy tools, screen_capture, node_control, "
         "schedule, 4 device tools and 4 share tools")
 
@@ -223,6 +226,69 @@ def test_share_file_publishes_serves_lists_and_unshares(tmp_path):
     assert mcp_tools.call_tool("share_list")["count"] == 0
     again = mcp_tools.call_tool("unshare", {"name": "my-report"})
     assert "error" in again and "no share named" in again["error"]
+
+
+def test_a_direct_node_publishes_links_without_the_gateway_segment(tmp_path):
+    """A Funnel node is its own public endpoint: the link is /<slug>/<file>.
+
+    The gateway-shaped link names a node the bridge routes back into a tunnel.
+    A Funnel node never opens that tunnel, so the same link answered 404 ("not
+    found") while the share existed and was perfectly readable.
+    """
+    source = tmp_path / "direct.txt"
+    source.write_bytes(b"direct\n")
+    mcp_tools.configure(public_url="https://node.example.test", web_share_direct=True)
+    try:
+        result = mcp_tools.call_tool("share_file", {"path": str(source)})
+        assert result.get("ok") is True, result
+        assert result["url"] == "https://node.example.test/%s/direct.txt" % result["slug"]
+
+        listed = mcp_tools.call_tool("share_list")
+        assert listed["shares"][0]["url"] == result["url"]
+
+        relayed = mcp_tools.call_tool("_http_share", {
+            "slug": result["slug"], "path": "/direct.txt", "method": "GET", "query": ""})
+        assert relayed["status"] == 200
+    finally:
+        mcp_tools.configure(public_url="", web_share_direct=False)
+
+
+def test_an_unconfigured_node_name_is_the_machine_not_anonymous():
+    """``anonymous`` is never a registered node, so a link built from it is dead.
+
+    The fallback is the machine name - the same name the installers register.
+    """
+    mcp_tools.configure(mesh_user="")
+    try:
+        assert web_share._user() == web_share._default_node_name()
+        assert web_share._user() != "anonymous"
+    finally:
+        mcp_tools.configure(mesh_user=NODE)
+
+
+def test_ten_parallel_readers_do_not_break_a_share(tmp_path):
+    """The default listen backlog (5) answered 502 under the load of one web page."""
+    source = tmp_path / "big.bin"
+    source.write_bytes(b"x" * 65536)
+    published = mcp_tools.call_tool("share_file", {"path": str(source)})
+    assert published.get("ok") is True, published
+    slug = published["slug"]
+
+    def fetch(_index):
+        return mcp_tools.call_tool("_http_share", {
+            "slug": slug, "path": "/big.bin", "method": "GET", "query": ""})
+
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        results = list(pool.map(fetch, range(10)))
+
+    assert [item.get("status") for item in results] == [200] * 10, results
+    assert all(len(base64.b64decode(item["body_b64"])) == 65536 for item in results)
+
+
+def test_the_servers_raise_the_listen_backlog():
+    """A page with ten assets must not exhaust the accept queue."""
+    assert web_share._ShareHTTPServer.request_queue_size >= 64
+    assert server._StandaloneHTTPServer.request_queue_size >= 64
 
 
 def test_share_file_refuses_a_directory_and_a_missing_path(tmp_path):

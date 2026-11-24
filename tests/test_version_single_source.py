@@ -82,11 +82,24 @@ def test_every_other_declaration_of_the_version_is_derived():
 def test_the_docs_name_the_current_version():
     """The README's copy/paste examples must match the shipped installer."""
     readme = _read("README.md")
-    mentioned = set(re.findall(r"RemoteHarnessMCP-Setup-(\d+\.\d+\.\d+)\.exe", readme))
+    mentioned = set(re.findall(
+        r"RemoteHarnessMCP-Setup-(\d+\.\d+\.\d+(?:-[0-9A-Za-z.\-]+)?)\.exe", readme))
     assert mentioned, "the README should show the setup executable's name at least once"
     assert mentioned == {version_module.__version__}, (
         "the README advertises %s while the node is %s"
         % (sorted(mentioned), version_module.__version__))
+
+
+def test_the_release_workflow_flags_a_pre_release():
+    """An alpha must not become "latest", or every stable node installs it.
+
+    The updater only looks at pre-releases with MESH_UPDATE_CHANNEL=prerelease,
+    but GitHub calls an unflagged release the latest one - so the workflow has to
+    pass --prerelease for a tag whose version carries a suffix.
+    """
+    workflow = _read(os.path.join(".github", "workflows", "release.yml"))
+    assert "--prerelease" in workflow
+    assert "*-*)" in workflow, "the pre-release decision keys off the tag suffix"
 
 
 def test_the_release_notes_file_exists_for_this_version():

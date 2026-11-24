@@ -173,4 +173,122 @@ def test_funnel_activation_link_waits_and_retries():
 def test_windows_installer_refuses_a_foreign_port_owner():
     text = _text("install.ps1")
     assert "is held by $portOwner" in text
-    assert "$nodeProc.HasExited" in text
+
+
+def test_the_node_is_started_through_its_autostart_entry_not_as_an_installer_child():
+    """A child of the installer died with it: "installed" node gone minutes later."""
+    text = _text("install.ps1")
+    assert "Register-StandaloneStartup -Python $pyExeOnly" in text
+    assert "wscript.exe" in text, "the node must start detached through the Startup launcher"
+    assert "$nodeProc.HasExited" not in text, "a direct child cannot outlive the install"
+
+
+def test_the_installer_records_which_autostart_it_really_registered():
+    text = _text("install.ps1")
+    assert "autostart.state.json" in text
+    assert "kind = $autostartKind" in text
+    assert '$autostartKind = "service"' in text
+    assert '$autostartKind = "logon"' in text
+
+
+def test_a_replaced_service_task_restarts_its_running_instance():
+    """Re-registering a task does not restart it; the 502 came from the old mode."""
+    text = _text("install.ps1")
+    service = text[text.index("function Register-McpServiceTask"):]
+    service = service[:service.index("function Remove-PerUserNodeAutostart")]
+    assert "Stop-ScheduledTask -TaskName $taskName" in service
+    assert "Stop-Process" in service, "Stop-ScheduledTask leaves the python child alive"
+    assert "Start-ScheduledTask -TaskName $taskName" in service
+
+
+def test_installing_the_service_removes_a_per_user_autostart():
+    text = _text("install.ps1")
+    assert "function Remove-PerUserNodeAutostart" in text
+    assert "Unregister-ScheduledTask -TaskName \"RemoteHarnessMCPNode\"" in text
+    assert "rhm-node.vbs" in text
+
+
+def test_the_windows_installer_ships_the_rhm_command():
+    text = _text("install.ps1")
+    assert "function Install-RhmCommand" in text
+    assert "rhm.cmd" in text
+    assert "-m core.menu" in text
+    assert 'SetEnvironmentVariable("Path", $newPath, "User")' in text
+
+
+
+# ---------------------------------------------------------------------------
+# The `rhm` command must not carry the payload path
+# ---------------------------------------------------------------------------
+
+def test_the_windows_rhm_command_reads_its_payload_from_a_file():
+    """A payload that moved used to leave the shim pointing at the old folder.
+
+    The failure was silent: cmd printed "No module named core.menu", which names
+    neither the stale path nor the file to fix. The path now lives in rhm.env,
+    which every install rewrites.
+    """
+    text = _text("install.ps1")
+    assert "rhm.env" in text
+    assert '("RHM_PAYLOAD=" + $PayloadDir)' in text
+    assert '("RHM_PYTHON=" + $Python)' in text
+    assert 'for /f "usebackq tokens=1,* delims=="' in text, "the shim parses rhm.env"
+    assert 'pushd "%RHM_PAYLOAD%"' in text
+    assert "rhm_missing" in text, "a stale path needs its own message, not a Python traceback"
+    assert 'pushd "' + "$PayloadDir" not in text, "the old shim baked the path in"
+
+
+def test_the_shell_rhm_command_reads_its_payload_from_launcher_env():
+    """The POSIX shim did not even change into the payload: `rhm` from another
+    directory failed no matter how correct the path was."""
+    text = _text("install.sh")
+    assert "launcher.env" in text
+    assert "RHM_PAYLOAD='%s'" in text
+    assert 'cd "$RHM_PAYLOAD" || exit 1' in text
+    assert 'exec "${RHM_PYTHON:-python3}" -m core.menu "$@"' in text
+    assert "exit 127" in text, "a missing payload is an error, not an empty menu"
+
+def test_a_wsl_install_does_not_take_the_windows_port():
+    """WSL2 forwards Windows localhost: the Windows node owns 8096 there."""
+    text = _text("install.sh")
+    assert "PORT_EXPLICIT=true" in text
+    assert "[ \"$PORT_EXPLICIT\" != true ] && grep -q -i \"microsoft\" /proc/version" in text
+    assert 'PORT="8097"' in text
+
+
+def test_the_shell_installer_puts_rhm_on_the_login_path():
+    text = _text("install.sh")
+    launcher = text[text.index("install_rhm_launcher()"):]
+    launcher = launcher[:launcher.index("start_tailscaled()")]
+    assert "remote-harness-mcp: rhm" in launcher, "the PATH line must be idempotent"
+    assert '"$HOME/.profile"' in launcher and '"$HOME/.bashrc"' in launcher
+    assert "ln -sf \"$bindir/rhm\" /usr/local/bin/rhm" in launcher
+
+
+def test_a_distro_without_systemd_gets_a_login_autostart():
+    text = _text("install.sh")
+    assert "install_profile_autostart()" in text
+    assert "elif ! systemctl --user show-environment" in text
+    hook = text[text.index("install_profile_autostart()"):]
+    hook = hook[:hook.index("if [ \"$MODE\" = \"standalone\" ]")]
+    assert "rhm-node-autostart.sh" in hook
+    assert "nohup" in hook, "the hook must actually start the server"
+    assert "rhm-node-autostart" in hook, "the profile hook must be installable once"
+    assert "curl -fsS --max-time 2" in hook, "an already-running server must not be duplicated"
+
+def test_a_busy_default_port_does_not_fail_the_windows_install():
+    text = _text("install.ps1")
+    assert "function Resolve-FreePort" in text
+    assert "$PortExplicit = $PSBoundParameters.ContainsKey('Port')" in text
+    assert "$chosenPort = Resolve-FreePort -Start $Port" in text
+    assert "$Port = $chosenPort" in text
+    assert "if ($portOwner -and $PortExplicit)" in text, "an explicit port is never overridden"
+    assert "укажите другой -Port" in text
+
+
+def test_a_busy_default_port_does_not_fail_the_shell_install():
+    text = _text("install.sh")
+    assert "first_free_port()" in text
+    assert 'FREE_PORT=$(first_free_port "$PORT")' in text
+    assert 'PORT="$FREE_PORT"' in text
+    assert 'if [ "$PORT_EXPLICIT" != true ]' in text

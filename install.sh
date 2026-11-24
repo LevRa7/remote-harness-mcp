@@ -11,6 +11,8 @@ MODE=""
 MODE_EXPLICIT=false
 TLS="none"
 PORT="8096"
+# True once --port is given: the WSL default below must not override an explicit choice.
+PORT_EXPLICIT=false
 DOMAIN=""
 GATEWAY=""
 USERNAME=""
@@ -751,6 +753,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         --port=*)
             PORT="${1#*=}"
+            PORT_EXPLICIT=true
             shift
             ;;
         --ssh=*)
@@ -1273,6 +1276,14 @@ detect_device() {
 }
 
 detect_device
+
+# WSL2 forwards Windows localhost into the distro. A Windows install of this node
+# already owns 8096 on that machine, and the Windows side wins the bind: the WSL
+# node then answers nowhere and its Funnel returns 502. A WSL install therefore
+# defaults to 8097 and both nodes coexist; --port still wins.
+if [ "$PORT_EXPLICIT" != true ] && grep -q -i "microsoft" /proc/version 2>/dev/null; then
+    PORT="8097"
+fi
 
 print_device_info() {
     if [ "$LANG_CHOICE" = "ru" ]; then
@@ -1802,9 +1813,50 @@ tailscaled_running() {
 # in the user PATH, or the menu is unreachable after install.
 install_rhm_launcher() {
     local bindir="$HOME/.local/bin"
+    local launcher_env="${XDG_CONFIG_HOME:-$HOME/.config}/remote-harness-mcp/launcher.env"
     mkdir -p "$bindir" 2>/dev/null || return 0
-    printf '#!/bin/sh\nexec "%s" -m core.menu "$@"\n' "$PYTHON_BIN" > "$bindir/rhm" 2>/dev/null || return 0
+    mkdir -p "$(dirname "$launcher_env")" 2>/dev/null || true
+    # The payload location lives beside the node configuration, never inside the
+    # command: a shim with the path baked in kept pointing at a checkout that had
+    # moved ("No module named core.menu"), and the previous shim did not even
+    # change into the payload, so it worked only when the caller happened to stand
+    # in it. Every install rewrites launcher.env, so the newest install wins.
+    {
+        printf "RHM_PAYLOAD='%s'\n" "$SCRIPT_DIR"
+        printf "RHM_PYTHON='%s'\n" "$PYTHON_BIN"
+    } > "$launcher_env" 2>/dev/null || return 0
+    cat > "$bindir/rhm" <<'RHM_SHIM'
+#!/bin/sh
+# rhm - Remote Harness MCP console. The payload location is read from launcher.env
+# (written by install.sh): a payload that moved is a reinstall, never an edit here.
+ENV_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/remote-harness-mcp/launcher.env"
+[ -f "$ENV_FILE" ] && . "$ENV_FILE"
+if [ -z "${RHM_PAYLOAD:-}" ] || [ ! -f "$RHM_PAYLOAD/core/menu.py" ]; then
+    echo "rhm: the node payload is not where ${ENV_FILE} points (RHM_PAYLOAD=${RHM_PAYLOAD:-unset})." >&2
+    echo "     Re-run install.sh from the folder the payload lives in, or edit that file." >&2
+    exit 127
+fi
+cd "$RHM_PAYLOAD" || exit 1
+exec "${RHM_PYTHON:-python3}" -m core.menu "$@"
+RHM_SHIM
     chmod 755 "$bindir/rhm" 2>/dev/null || true
+    # A command that exists but is not on PATH is the same as no command: add the
+    # directory to the login shells instead of only printing a hint. The guard keeps
+    # repeated installs from appending the same line again.
+    for profile in "$HOME/.profile" "$HOME/.bashrc"; do
+        [ -e "$profile" ] || : > "$profile" 2>/dev/null || continue
+        grep -q "remote-harness-mcp: rhm" "$profile" 2>/dev/null && continue
+        {
+            echo ""
+            echo "# remote-harness-mcp: rhm"
+            echo 'case ":$PATH:" in *":'"$bindir"':"*) : ;; *) PATH="'"$bindir"':$PATH" ;; esac'
+            echo "export PATH"
+        } >> "$profile" 2>/dev/null || true
+    done
+    # A writable /usr/local/bin makes the command visible to non-login shells too.
+    if [ -d /usr/local/bin ] && [ -w /usr/local/bin ]; then
+        ln -sf "$bindir/rhm" /usr/local/bin/rhm 2>/dev/null || true
+    fi
     case ":$PATH:" in
         *":$bindir:"*) : ;;
         *)
@@ -1911,6 +1963,68 @@ funnel_acl_hint() {
 # ==============================================================================
 #  BRANCH: STANDALONE MODE
 # ==============================================================================
+first_free_port() {
+    # A default port is a preference: something else may own it (on WSL that is the
+    # Windows node; on a server it can be any service). The first free port above
+    # the default keeps the install working; an explicit --port still wins.
+    local start="$1" candidate
+    if [ -z "$PYTHON_BIN" ] || ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+        echo "$start"
+        return 0
+    fi
+    for candidate in $(seq "$start" $((start + 50))); do
+        if "$PYTHON_BIN" - "$candidate" >/dev/null 2>&1 <<'PYEOF'
+import socket, sys
+sock = socket.socket()
+# SO_REUSEADDR: a node stopped a moment ago leaves TIME_WAIT sockets on its port.
+# Without it the probe called that port busy and the install moved to the next one
+# on every reinstall.
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+try:
+    sock.bind(("127.0.0.1", int(sys.argv[1])))
+except OSError:
+    raise SystemExit(1)
+finally:
+    sock.close()
+PYEOF
+        then
+            echo "$candidate"
+            return 0
+        fi
+    done
+    echo "$start"
+}
+install_profile_autostart() {
+    # WSL (and a distro without systemd) has no service manager: a systemd unit here
+    # would be a unit nothing ever loads, and the node would simply not come back.
+    # A guarded login hook starts the same server and does nothing when it answers.
+    local hook="$CONFIG_DIR/rhm-node-autostart.sh"
+    {
+        echo '#!/bin/sh'
+        echo "# Remote Harness MCP: start the standalone server if it is not answering."
+        echo "PORT=$PORT"
+        echo 'if command -v curl >/dev/null 2>&1 && curl -fsS --max-time 2 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then exit 0; fi'
+        echo "cd \"$SCRIPT_DIR\" || exit 0"
+        echo "if [ -f \"$STANDALONE_ENV_FILE\" ]; then set -a; . \"$STANDALONE_ENV_FILE\"; set +a; fi"
+        echo "nohup \"$PYTHON_BIN\" -u -m core.server --host 127.0.0.1 --port=\"\$PORT\" >> \"$CONFIG_DIR/standalone.log\" 2>&1 &"
+    } > "$hook"
+    chmod 755 "$hook" 2>/dev/null || true
+    for profile in "$HOME/.profile" "$HOME/.bashrc"; do
+        [ -e "$profile" ] || : > "$profile" 2>/dev/null || continue
+        grep -q "rhm-node-autostart" "$profile" 2>/dev/null && continue
+        printf '\n# remote-harness-mcp node autostart (no systemd)\n[ -x "%s" ] && "%s" >/dev/null 2>&1\n' "$hook" "$hook" >> "$profile" 2>/dev/null || true
+    done
+    # Start it now, so the endpoint check at the end of the branch has something to
+    # talk to; the same hook does it after the next login.
+    "$hook" >/dev/null 2>&1 || true
+    if [ "$LANG_CHOICE" = "ru" ]; then
+        echo "[OK] Автозапуск: при входе в дистрибутив (systemd не найден)."
+        echo "    Запуск при загрузке Windows: включите systemd в /etc/wsl.conf ([boot] systemd=true)."
+    else
+        echo "[OK] Autostart: at distro login (no systemd found)."
+        echo "    Boot-time start on Windows: enable systemd in /etc/wsl.conf ([boot] systemd=true)."
+    fi
+}
 if [ "$MODE" = "standalone" ]; then
     STANDALONE_START=$(date +%s)
     FUNNEL_BLOCKED=false
@@ -1971,6 +2085,23 @@ if [ "$MODE" = "standalone" ]; then
     # A standalone node answers share_file too, so the domain it resolved is written
     # down here as well - before the server is started, not after.
     write_domain_file "$GATEWAY"
+    # Pick the port BEFORE anything names it: the env file, the Funnel target, the
+    # autostart entry and the printed URL must all agree on one number.
+    if [ "$PORT_EXPLICIT" != true ]; then
+        pkill -f "core.server --host 127.0.0.1 --port=$PORT" 2>/dev/null || true
+        run_privileged pkill -f "core.server --host 127.0.0.1 --port=$PORT" >/dev/null 2>&1 || true
+        sleep 1
+        FREE_PORT=$(first_free_port "$PORT")
+        if [ "$FREE_PORT" != "$PORT" ]; then
+            if [ "$LANG_CHOICE" = "ru" ]; then
+                echo "  Порт $PORT занят процессом не из этой установки: узел займёт $FREE_PORT."
+            else
+                echo "  Port $PORT is held by something else: the node will use $FREE_PORT."
+            fi
+            PORT="$FREE_PORT"
+        fi
+    fi
+
 
     # Funnel first: the public host name has to exist before the env file is
     # written, because the node allowlists exactly that name and refuses every
@@ -2026,6 +2157,9 @@ if [ "$MODE" = "standalone" ]; then
         printf 'MESH_TOKEN=%s\n' "$TOKEN" > "$STANDALONE_ENV_FILE"
         if [ -n "$FUNNEL_NAME" ]; then
             printf 'MESH_ALLOWED_HOSTS=%s\n' "$FUNNEL_NAME" >> "$STANDALONE_ENV_FILE"
+            # Share links must name this node's own public address: Funnel mode
+            # never dials a gateway, so a gateway-domain link relays nowhere.
+            printf 'MESH_PUBLIC_URL=https://%s\n' "$FUNNEL_NAME" >> "$STANDALONE_ENV_FILE"
         fi
         chmod 600 "$STANDALONE_ENV_FILE"
         ENV_FILE_LINE="EnvironmentFile=$STANDALONE_ENV_FILE"
@@ -2114,6 +2248,8 @@ EOF
         # Android: neither systemd nor launchd exists - runit inside Termux
         # supervises the server, and Termux:Boot brings it back after a reboot.
         configure_termux_node "rhm-standalone" "core.server" "--host 127.0.0.1 --port=$PORT" "$STANDALONE_ENV_FILE"
+    elif ! systemctl --user show-environment >/dev/null 2>&1; then
+        install_profile_autostart
     else
         USER_SYSTEMD_DIR="$HOME/.config/systemd/user"
         mkdir -p "$USER_SYSTEMD_DIR"

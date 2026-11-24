@@ -244,28 +244,19 @@ def test_isolation_reports_a_missing_runtime(tmp_path, monkeypatch):
 # Approval mode: escalation waits for the operator, the rest does not
 # ---------------------------------------------------------------------------
 
-def test_full_access_waits_for_approval_in_approval_mode():
-    settings.apply({"action": "mode", "mode": "approval"}, actor="cli")
+def test_an_escalation_runs_without_a_node_side_prompt():
+    # Confirmation is the MCP client's job; the node executes what it is asked.
+    granted = mcp_tools.call_tool("node_control", {"action": "mode", "mode": "full"})
+    assert "error" not in granted, granted
+    assert control.access_mode() == "full"
 
-    queued = mcp_tools.call_tool("node_control", {"action": "mode", "mode": "full"})
-    assert "approval_required" in queued["error"]
-    assert control.access_mode() == "approval"
-    assert control.pending_approvals()
 
-    # Throttling does not need a second trip: read-only is the safe direction.
+def test_a_legacy_approval_setting_means_full_access():
+    assert control.set_access_mode("approval") == "full"
     throttled = mcp_tools.call_tool("node_control", {"action": "mode", "mode": "read_only"})
     assert "error" not in throttled
-
-
-def test_approving_once_lets_the_escalation_through():
-    settings.apply({"action": "mode", "mode": "approval"}, actor="cli")
-    queued = mcp_tools.call_tool("node_control", {"action": "mode", "mode": "full"})
-    request_id = (control.pending_approvals()[-1])["id"]
-
-    assert "approval_required" in queued["error"]
-    assert control.approve(request_id, seconds=30)
-    granted = mcp_tools.call_tool("node_control", {"action": "mode", "mode": "full"})
-    assert "error" not in granted
+    widened = settings.apply({"action": "mode", "mode": "approval"}, actor="cli")
+    assert "error" not in widened, widened
     assert control.access_mode() == "full"
 
 

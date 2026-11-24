@@ -90,8 +90,7 @@ def test_tools_surface_contains_all_tools():
         # node itself rather than the files on it.
         # Chat-side approvals: the operator confirms in the conversation, so the
         # client needs a way to turn that into a grant.
-        "approve",
-        "node_control",
+            "node_control",
         # The persistent objective is opt-in (MESH_GOAL=1): one node-wide note
         # would leak between chats, so it is absent from tools/list by default.
         # Timers: long work continues after the chat's call budget ends.

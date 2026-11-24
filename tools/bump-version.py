@@ -44,7 +44,7 @@ path.write_text(json.dumps(alias, indent=2, ensure_ascii=False) + "\n",
 for name in ("README.md", "README_RU.md"):
     path = ROOT / name
     text = path.read_text(encoding="utf-8")
-    updated = re.sub(r"RemoteHarnessMCP-Setup-\d+\.\d+\.\d+\.exe",
+    updated = re.sub(r"RemoteHarnessMCP-Setup-\d+\.\d+\.\d+(?:-[0-9A-Za-z.\-]+)?\.exe",
                      "RemoteHarnessMCP-Setup-%s.exe" % NEW, text)
     if updated != text:
         path.write_text(updated, encoding="utf-8", newline="\n")

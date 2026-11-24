@@ -186,6 +186,20 @@ internal static class Launcher
 
     private static string Version()
     {
+        // MAJOR.MINOR.PATCH[-pre]: the numeric assembly version cannot carry a
+        // pre-release suffix (0.7.0-rc1-alpha), so the full string is written to
+        // InformationalVersion by the build and preferred here. The numeric
+        // fallback keeps an older build readable.
+        object[] informational = Assembly.GetExecutingAssembly().GetCustomAttributes(
+            typeof(AssemblyInformationalVersionAttribute), false);
+        if (informational.Length > 0)
+        {
+            string text = ((AssemblyInformationalVersionAttribute)informational[0]).InformationalVersion;
+            if (!string.IsNullOrEmpty(text))
+            {
+                return text.Trim();
+            }
+        }
         System.Version version = Assembly.GetExecutingAssembly().GetName().Version;
         return string.Format("{0}.{1}.{2}", version.Major, version.Minor, version.Build);
     }

@@ -6,11 +6,21 @@ import os
 
 import pytest
 
-from core import control, menu
+from core import control, menu, paths
+
+
+@pytest.fixture(autouse=True)
+def isolated_node_config(tmp_path, monkeypatch):
+    """Never describe the host's own install: ``rhm`` reports the node, a test
+
+    reports the fixture. Without this the endpoint tests would read the
+    machine that runs them.
+    """
+    monkeypatch.setenv("MESH_CONFIG_DIR", str(tmp_path / "config"))
 
 
 def test_build_url_from_agent_env(monkeypatch):
-    monkeypatch.setattr(menu, "read_agent_env", lambda: {
+    monkeypatch.setattr(menu, "read_agent_env", lambda *args, **kwargs: {
         "MESH_USER": "desktop-01",
         "MESH_LINK_KEY": "lk_" + "a" * 32,
     })
@@ -26,34 +36,34 @@ def test_qr_lines_render_when_encoder_is_available():
 
 
 def test_missing_link_key_has_no_url(monkeypatch):
-    monkeypatch.setattr(menu, "read_agent_env", lambda: {"MESH_USER": "desktop-01"})
+    monkeypatch.setattr(menu, "read_agent_env", lambda *args, **kwargs: {"MESH_USER": "desktop-01"})
     assert menu.build_mcp_url() == ""
 
 
-def test_mode_cycles_read_only_approval_full():
-    assert control.next_access_mode("read_only") == "approval"
-    assert control.next_access_mode("approval") == "full"
+def test_mode_toggles_between_read_only_and_full():
+    assert control.next_access_mode("read_only") == "full"
+    assert control.next_access_mode("full") == "read_only"
     assert control.next_access_mode("full") == "read_only"
 
 
 def test_render_contains_mode_endpoint_and_log(monkeypatch, tmp_path):
-    monkeypatch.setattr(menu, "read_agent_env", lambda: {
+    monkeypatch.setattr(menu, "read_agent_env", lambda *args, **kwargs: {
         "MESH_USER": "desktop-01",
         "MESH_LINK_KEY": "lk_" + "b" * 32,
     })
     monkeypatch.setattr(menu, "agent_log_path", lambda: str(tmp_path / "agent.log"))
     (tmp_path / "agent.log").write_text("agent line\n", encoding="utf-8")
-    control.set_access_mode("approval")
+    control.set_access_mode("read_only")
 
     text = menu.render(menu.read_agent_env())
     assert "MCP endpoint" in text
     assert "desktop-01" in text
-    assert "Access on request" in text
+    assert "Read-only" in text
     assert "agent line" in text
 
 
 def test_json_snapshot_is_machine_readable(monkeypatch, capsys, tmp_path):
-    monkeypatch.setattr(menu, "read_agent_env", lambda: {"MESH_USER": "n", "MESH_LINK_KEY": "lk_x"})
+    monkeypatch.setattr(menu, "read_agent_env", lambda *args, **kwargs: {"MESH_USER": "n", "MESH_LINK_KEY": "lk_x"})
     monkeypatch.setattr(menu, "agent_log_path", lambda: str(tmp_path / "agent.log"))
     menu.main(["--json"])
     payload = json.loads(capsys.readouterr().out.strip())
@@ -82,7 +92,7 @@ def test_cd_subcommand_sets_the_workspace(tmp_path, capsys):
 def test_status_subcommand_prints_every_switch(capsys):
     assert menu.main(["status"]) == 0
     text = capsys.readouterr().out
-    for line in ("mode:", "workspace:", "isolation:", "remote:", "paused:", "approvals:"):
+    for line in ("mode:", "workspace:", "isolation:", "remote:", "paused:", "schedules:"):
         assert line in text
 
 
@@ -128,39 +138,17 @@ def test_goal_clear_still_works_when_disabled(capsys):
     assert "cleared" in capsys.readouterr().out
 
 
-def test_approvals_command_allows_and_revokes(capsys):
-    assert menu.main(["approvals"]) == 0
-    assert "ask on every" in capsys.readouterr().out
-
-    assert menu.main(["approvals", "allow"]) == 0
-    assert "ALL allowed" in capsys.readouterr().out
-    assert control.grant_status()["active"] is True
-
-    assert menu.main(["approvals", "off"]) == 0
-    assert control.grant_status()["active"] is False
-    assert "ask on every" in capsys.readouterr().out
-
-
-def test_approvals_allow_for_a_limited_time(capsys):
-    assert menu.main(["approvals", "allow", "30"]) == 0
-    status = control.grant_status()
-    assert status["active"] is True
-    assert 1500 < status["expires_in"] <= 1800
-    assert "min" in capsys.readouterr().out
-
-
-def test_render_shows_the_approval_state(monkeypatch, tmp_path):
-    monkeypatch.setattr(menu, "read_agent_env", lambda: {"MESH_USER": "n"})
-    monkeypatch.setattr(menu, "agent_log_path", lambda: str(tmp_path / "agent.log"))
-    menu.main(["approvals", "allow"])
-    text = menu.render(menu.read_agent_env())
-    assert "Approvals: ALL allowed" in text
-    menu.main(["approvals", "off"])
+def test_the_approvals_command_is_gone(capsys):
+    # Confirmation belongs to the MCP client; the node exposes no approval queue.
+    with pytest.raises(SystemExit) as exit_info:
+        menu.main(["approvals"])
+    assert exit_info.value.code == 2
+    assert "invalid choice" in capsys.readouterr().err
 
 
 def test_render_hides_the_disabled_goal(monkeypatch, tmp_path):
     monkeypatch.delenv("MESH_GOAL", raising=False)
-    monkeypatch.setattr(menu, "read_agent_env", lambda: {"MESH_USER": "n"})
+    monkeypatch.setattr(menu, "read_agent_env", lambda *args, **kwargs: {"MESH_USER": "n"})
     monkeypatch.setattr(menu, "agent_log_path", lambda: str(tmp_path / "agent.log"))
     text = menu.render(menu.read_agent_env())
     assert "Goal:" not in text
@@ -183,7 +171,7 @@ def test_keys_is_a_context_manager(monkeypatch):
 
 
 def test_render_keeps_the_full_text_for_scripts(monkeypatch):
-    monkeypatch.setattr(menu, "read_agent_env", lambda: {
+    monkeypatch.setattr(menu, "read_agent_env", lambda *args, **kwargs: {
         "MESH_USER": "node-one", "MESH_LINK_KEY": "lk_" + "a" * 32})
     text = menu.render(menu.read_agent_env())
     assert "MCP endpoint:" in text
@@ -216,7 +204,7 @@ def test_cyrillic_character_maps_to_the_latin_key():
 
 
 def test_home_line_has_an_edit_button(monkeypatch):
-    monkeypatch.setattr(menu, "read_agent_env", lambda: {"MESH_USER": "n"})
+    monkeypatch.setattr(menu, "read_agent_env", lambda *args, **kwargs: {"MESH_USER": "n"})
     text = menu.render(menu.read_agent_env())
     assert "Home:" in text
     assert "[d] edit" in text
@@ -269,3 +257,191 @@ def test_paint_falls_back_to_ansi(monkeypatch):
     written = out.getvalue()
     assert written.startswith("\x1b[H")
     assert written.endswith("\x1b[J")
+
+
+# ---------------------------------------------------------------------------
+# The endpoint belongs to the installed node, not to what an older install left
+# ---------------------------------------------------------------------------
+
+def _write_env(path, values):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    body = "".join("%s=%s\n" % item for item in values.items())
+    path.write_text(body, encoding="utf-8")
+
+
+def _write_state(directory, **state):
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "autostart.state.json").write_text(json.dumps(state), encoding="utf-8")
+
+
+def _funnel_config(tmp_path):
+    """The machine this bug was reported on: a Funnel service plus stale tunnel files."""
+    config = tmp_path / "config"
+    _write_state(config, kind="service", mode="standalone", port=8096,
+                 funnel="matebook16.merino-carob.ts.net")
+    _write_env(config / "standalone.env", {
+        "MESH_TOKEN": "tok-standalone",
+        "MESH_ALLOWED_HOSTS": "matebook16.merino-carob.ts.net",
+        "MESH_PUBLIC_URL": "https://matebook16.merino-carob.ts.net",
+    })
+    # Left behind by the tunnel-era install: a bridge this node is not dialled
+    # through. A URL built from these files has no tunnel into the machine.
+    _write_env(config / "domain.env", {
+        "MESH_PUBLIC_URL": "https://racknerd-5a24bf9.merino-carob.ts.net"})
+    _write_env(config / "agent.env", {
+        "MESH_GATEWAY": "racknerd-5a24bf9.merino-carob.ts.net",
+        "MESH_USER": "matebook16",
+        "MESH_LINK_KEY": "lk_" + "c" * 32,
+    })
+    return config
+
+
+def test_a_funnel_node_publishes_its_own_address(tmp_path):
+    _funnel_config(tmp_path)
+    info = menu.node_endpoint()
+    assert info["mode"] == "standalone"
+    assert info["url"] == "https://matebook16.merino-carob.ts.net/sse?token=tok-standalone"
+    assert "racknerd" not in info["url"], "the bridge has no tunnel into a Funnel node"
+    assert info["token"] == "tok-standalone"
+    assert info["node"] == "matebook16"
+
+
+def test_the_menu_prints_the_funnel_endpoint(tmp_path):
+    _funnel_config(tmp_path)
+    text = menu.render({"MESH_USER": "matebook16",
+                        "MESH_GATEWAY": "racknerd-5a24bf9.merino-carob.ts.net",
+                        "MESH_LINK_KEY": "lk_" + "c" * 32})
+    assert "https://matebook16.merino-carob.ts.net/sse?token=tok-standalone" in text
+    assert "Node: matebook16" in text
+    assert "racknerd" not in text
+
+
+def test_a_tunnel_node_keeps_the_gateway_shape(tmp_path):
+    config = tmp_path / "config"
+    _write_state(config, kind="logon", mode="tunnel", port=8096)
+    _write_env(config / "agent.env", {"MESH_USER": "desktop-01",
+                                      "MESH_LINK_KEY": "lk_" + "d" * 32})
+    _write_env(config / "domain.env", {"MESH_PUBLIC_URL": "https://mesh.example"})
+    info = menu.node_endpoint()
+    assert info["mode"] == "tunnel"
+    assert info["url"] == "https://mesh.example/sse?user=desktop-01&token=lk_" + "d" * 32
+
+
+def test_a_standalone_env_without_installer_state_is_still_standalone(tmp_path):
+    config = tmp_path / "config"
+    config.mkdir(parents=True)
+    _write_env(config / "standalone.env", {"MESH_TOKEN": "tok",
+                                           "MESH_ALLOWED_HOSTS": "node.tailnet.ts.net"})
+    info = menu.node_endpoint()
+    assert info["mode"] == "standalone"
+    assert info["url"] == "https://node.tailnet.ts.net/sse?token=tok"
+
+
+def test_the_installer_state_decides_over_a_leftover_standalone_env(tmp_path):
+    config = tmp_path / "config"
+    _write_state(config, kind="logon", mode="tunnel")
+    _write_env(config / "standalone.env", {"MESH_TOKEN": "tok"})
+    _write_env(config / "agent.env", {"MESH_USER": "n", "MESH_LINK_KEY": "lk_x",
+                                      "MESH_GATEWAY": "gw.example"})
+    info = menu.node_endpoint()
+    assert info["mode"] == "tunnel", "the installer record wins over an orphan file"
+
+
+def test_the_recorded_funnel_host_names_the_node_when_no_url_is_written(tmp_path):
+    config = tmp_path / "config"
+    _write_state(config, kind="service", mode="standalone", port=8096, funnel="pc.tailnet.ts.net")
+    _write_env(config / "standalone.env", {"MESH_TOKEN": "tok"})
+    info = menu.node_endpoint()
+    assert info["url"] == "https://pc.tailnet.ts.net/sse?token=tok"
+
+
+def test_a_funnel_node_without_a_token_has_no_url(tmp_path):
+    config = tmp_path / "config"
+    _write_state(config, kind="service", mode="standalone", funnel="pc.tailnet.ts.net")
+    info = menu.node_endpoint()
+    assert info["url"] == ""
+    assert "token" in info["hint"].lower()
+
+
+def test_a_loopback_name_never_becomes_a_public_endpoint(tmp_path):
+    config = tmp_path / "config"
+    _write_state(config, mode="standalone", port=8096, funnel="127.0.0.1")
+    _write_env(config / "standalone.env", {"MESH_TOKEN": "tok",
+                                           "MESH_ALLOWED_HOSTS": "127.0.0.1, localhost"})
+    info = menu.node_endpoint()
+    assert info["url"] == "http://127.0.0.1:8096/sse?token=tok"
+
+
+def test_a_service_install_is_described_before_the_per_user_leftovers(tmp_path, monkeypatch):
+    monkeypatch.delenv("MESH_CONFIG_DIR", raising=False)
+    per_user = tmp_path / "home" / "config"
+    legacy = tmp_path / "home" / "legacy"
+    service = tmp_path / "programdata"
+    _write_env(per_user / "agent.env", {"MESH_USER": "old", "MESH_LINK_KEY": "lk_old",
+                                        "MESH_GATEWAY": "racknerd-5a24bf9.merino-carob.ts.net"})
+    legacy.mkdir(parents=True)
+    _write_env(service / "service.env", {"MESH_CONFIG_DIR": str(service),
+                                         "MESH_SERVICE_MODE": "server"})
+    _write_state(service, kind="service", mode="standalone", port=8096,
+                 funnel="matebook16.merino-carob.ts.net")
+    _write_env(service / "standalone.env", {"MESH_TOKEN": "tok-service",
+                                            "MESH_PUBLIC_URL": "https://matebook16.merino-carob.ts.net"})
+    monkeypatch.setattr(paths, "config_dir", lambda: str(per_user))
+    monkeypatch.setattr(paths, "legacy_config_dir", lambda: str(legacy))
+    monkeypatch.setattr(paths, "service_config_dir", lambda: str(service))
+    assert menu.install_dir() == str(service)
+    info = menu.node_endpoint()
+    assert info["url"] == "https://matebook16.merino-carob.ts.net/sse?token=tok-service"
+    assert info["node"] == "matebook16"
+
+# ---------------------------------------------------------------------------
+# A live standalone node is ONLINE without a heartbeat to read
+# ---------------------------------------------------------------------------
+
+def test_a_live_standalone_node_is_online_without_a_heartbeat(tmp_path, monkeypatch):
+    """The service node runs under another account and writes no heartbeat, so the
+    menu called it OFFLINE while it was answering Gemini. Its loopback port is the
+    proof that does not depend on the account or the directory."""
+    _funnel_config(tmp_path)
+    monkeypatch.setattr(menu, "_probe_health", lambda port, timeout=0.6: int(port) == 8096)
+    monkeypatch.setattr(menu, "_ALIVE_CACHE", {})
+    info = menu.node_endpoint()
+    assert info["port"] == 8096, "the installer records the port the node listens on"
+    assert menu.node_online(info, {"online": False}) is True
+    assert "Status: ONLINE" in menu.render({})
+
+
+def test_a_dead_standalone_node_is_offline(tmp_path, monkeypatch):
+    _funnel_config(tmp_path)
+    monkeypatch.setattr(menu, "_probe_health", lambda *args, **kwargs: False)
+    monkeypatch.setattr(menu, "_ALIVE_CACHE", {})
+    info = menu.node_endpoint()
+    assert menu.node_online(info, {"online": False}) is False
+    assert "Status: OFFLINE" in menu.render({})
+
+
+def test_a_tunnel_node_still_trusts_only_the_heartbeat(tmp_path, monkeypatch):
+    config = tmp_path / "config"
+    _write_state(config, kind="logon", mode="tunnel", port=8096)
+    _write_env(config / "agent.env", {"MESH_USER": "n", "MESH_LINK_KEY": "lk_x"})
+    monkeypatch.setattr(menu, "_probe_health",
+                        lambda *args, **kwargs: pytest.fail("no local server to probe"))
+    info = menu.node_endpoint()
+    assert menu.node_online(info, {"online": False}) is False
+    assert menu.node_online(info, {"online": True}) is True
+
+
+def test_the_health_answer_is_cached_for_a_few_seconds(monkeypatch):
+    calls = []
+
+    def probe(port, timeout=0.6):
+        calls.append(port)
+        return True
+
+    monkeypatch.setattr(menu, "_probe_health", probe)
+    monkeypatch.setattr(menu, "_ALIVE_CACHE", {})
+    assert menu._standalone_alive(8096, now=100.0) is True
+    assert menu._standalone_alive(8096, now=100.5) is True
+    assert calls == [8096], "a repaint must not pay for another probe"
+    assert menu._standalone_alive(8096, now=100.0 + menu._ALIVE_TTL + 1) is True
+    assert len(calls) == 2, "a stale answer is re-checked"

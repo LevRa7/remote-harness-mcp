@@ -55,9 +55,13 @@ Write-Host ''
 $packagePath = Join-Path $repo 'package.json'
 $package = Get-Content -LiteralPath $packagePath -Raw -Encoding UTF8 | ConvertFrom-Json
 $version = [string]$package.version
-if ($version -notmatch '^\d+\.\d+\.\d+$') {
-    throw ("package.json version is not MAJOR.MINOR.PATCH: '" + $version + "'")
+# MAJOR.MINOR.PATCH with an optional pre-release suffix (0.7.0-rc1-alpha): the
+# same shape core/version.py declares and the release tag carries. The suffix
+# never reaches the numeric assembly fields - .NET only accepts digits there.
+if ($version -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.\-]+)?$') {
+    throw ("package.json version is not MAJOR.MINOR.PATCH[-pre]: '" + $version + "'")
 }
+$numericVersion = ($version -split '-')[0]
 Write-Step ("version      : " + $version)
 
 # --- 1b. the Python node must declare the same version ------------------------
@@ -134,8 +138,9 @@ try {
         '[assembly: AssemblyDescription("Visual installer for an Remote Harness MCP node")]',
         '[assembly: AssemblyCompany("LevRa7")]',
         '[assembly: AssemblyCopyright("MIT License")]',
-        ('[assembly: AssemblyVersion("' + $version + '.0")]'),
-        ('[assembly: AssemblyFileVersion("' + $version + '.0")]'),
+        ('[assembly: AssemblyVersion("' + $numericVersion + '.0")]'),
+        ('[assembly: AssemblyFileVersion("' + $numericVersion + '.0")]'),
+        ('[assembly: AssemblyInformationalVersion("' + $version + '")]'),
         '[assembly: ComVisible(false)]'
     )
     Set-Content -LiteralPath $assemblyInfo -Value $lines -Encoding ASCII

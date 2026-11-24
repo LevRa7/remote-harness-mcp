@@ -145,9 +145,9 @@ def test_the_goal_survives_read_only_and_needs_no_approval():
     assert control.access_mode() == "read_only"
 
     settings.apply({"action": "mode", "mode": "approval"}, actor="cli")
-    queued = mcp_tools.call_tool("goal", {"action": "complete"})
-    assert "error" not in queued, "a note is not a system change; it must not wait for approval"
-    assert not control.pending_approvals()
+    assert control.access_mode() == "full"
+    done = mcp_tools.call_tool("goal", {"action": "complete"})
+    assert "error" not in done, "a note is not a system change"
 
 
 def test_mesh_status_carries_the_objective():

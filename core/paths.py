@@ -76,12 +76,40 @@ def config_dir() -> str:
     )
 
 
+#: Environment variable that relocates the *service* configuration directory.
+#: The Windows administrator service keeps its files under ``%ProgramData%``
+#: instead of the operator's home, and ``rhm`` run from an ordinary terminal has
+#: to find that directory to describe the node it is looking at.
+SERVICE_CONFIG_DIR_ENV = "MESH_SERVICE_CONFIG_DIR"
+
+
 def etc_dir() -> str:
     """Host-level configuration on POSIX: ``/etc/<app>`` (``domain.env``, registry)."""
     return _prefer_existing(
         os.path.join("/etc", APP_NAME),
         os.path.join("/etc", LEGACY_APP_NAME),
     )
+
+
+def service_config_dir() -> str:
+    """Where a machine-wide (service) install keeps its configuration.
+
+    On Windows that is ``%ProgramData%\\<app>`` - the directory the administrator
+    service passes as ``MESH_CONFIG_DIR``; on POSIX it is the same ``/etc/<app>``
+    a system-wide install uses. The path is returned whether or not it exists:
+    the caller decides what an existing ``service.env`` means, so a test host
+    with no service installed never looks like one.
+    """
+    override = _env_override(SERVICE_CONFIG_DIR_ENV)
+    if override:
+        return override
+    if os.name == "nt":
+        base = (os.environ.get("ProgramData") or "").strip() or "C:\\ProgramData"
+        return _prefer_existing(
+            os.path.join(base, APP_NAME),
+            os.path.join(base, LEGACY_APP_NAME),
+        )
+    return etc_dir()
 
 
 def cache_dir() -> str:

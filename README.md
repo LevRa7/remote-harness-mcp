@@ -20,18 +20,120 @@ Gemini in a browser or on a phone can talk, but it cannot *do* anything on your 
 
 ```text
  📱 Gemini app / 🌐 gemini.google.com (Spark)
-              │  MCP (SSE / Streamable HTTP)
+              │  MCP (SSE / Streamable HTTP) over HTTPS
               ▼
-     ☁️  Gateway  racknerd-5a24bf9.merino-carob.ts.net   ← relay only, TLS
-              │  outbound WebSocket tunnel (no open ports)
+     ☁️  Tailscale Funnel  https://<node>.<tailnet>.ts.net   ← ingress and TLS
+              │  127.0.0.1:<port>
               ▼
-   💻 Your PC · laptop · VPS · home server  →  executes the task
+   💻 Your machine: the MCP node executes the task · PC · laptop · server
 ```
+
+Since 0.7.0 no separate relay gateway is required: the node publishes itself. Details below.
 
 **Result:** your phone becomes a remote control for every machine you own — and Gemini is the agent that operates them.
 
 ---
 
+## 🏗️ Architecture in 0.7.0 — the whole stack runs on your machine
+
+**Up to and including 0.6.x** every node needed a bridge: a separate VPS with a
+shared domain that terminated TLS and forwarded calls over an outbound WebSocket
+tunnel. The node had no address of its own — the link named the bridge's domain and
+`?user=` picked the node, so without that server the machine was unreachable.
+
+**From 0.7.0 there is no bridge.** By default the installer puts the whole stack on
+the machine itself and publishes it with **Tailscale Funnel**: the node has its own
+HTTPS address `https://<node>.<your-tailnet>.ts.net`, and Gemini's calls arrive
+directly at the local MCP server on `127.0.0.1:<port>`. No VPS, no domain, no DNS,
+no ports opened on the router, and no second place that holds your token. The public
+ingress and the TLS certificate come from Tailscale, which stays the only external
+dependency.
+
+```text
+ 📱 Gemini (App/Web)
+        │  HTTPS  https://<node>.<tailnet>.ts.net/sse?token=…
+        ▼
+ ☁️  Tailscale Funnel  ← public ingress and TLS; no server or domain of your own
+        │  127.0.0.1:<port>
+        ▼
+ 💻  The MCP node on your machine: tools, files, shares, autostart
+```
+
+### What now lives on the machine
+
+| Component | Where | Written by |
+| :--- | :--- | :--- |
+| MCP server | `127.0.0.1:<port>` (8096, or the next free port) | the node's autostart |
+| Public address and TLS | Tailscale Funnel on 443 | `tailscale funnel --bg --https=443` |
+| Token and allowed hosts | `<ConfigDir>/standalone.env` (0600) | the installer |
+| What was actually registered | `<ConfigDir>/autostart.state.json` | the installer |
+| File and page shares | the node itself | `share_file` / `serve_dir` |
+
+### How installation works now
+
+1. Start the wizard (**`install-gui.cmd`**) or the console installer
+   (`install.ps1 -Mode standalone -Funnel` on Windows, `./install.sh --mode=funnel`
+   on Linux/macOS). **Funnel is the default option** in both.
+2. The installer installs the Tailscale client when it is missing, opens the browser
+   once for the tailnet sign-in, and waits for `BackendState=Running`.
+3. It reads `<node>.<tailnet>.ts.net` from `tailscale status --json` and writes
+   `MESH_TOKEN`, `MESH_ALLOWED_HOSTS` and `MESH_PUBLIC_URL` into `standalone.env`.
+4. It picks a free port and registers autostart: the `RemoteHarnessMCPService` task
+   (SYSTEM, starts before anyone logs on, restarts on failure) or `rhm-node.vbs` at
+   logon when elevation was refused. What was registered is recorded in
+   `autostart.state.json`, and the wizard reports that record, not a checkbox.
+5. It runs `tailscale funnel --bg --https=443 http://127.0.0.1:<port>` and checks
+   that the public address answers.
+6. It prints the ready link `https://<node>.<tailnet>.ts.net/sse?token=…` — that is
+   what you paste into the Gemini connector. The token is already inside it.
+7. Once per tailnet: allow Funnel in the ACL —
+   `"nodeAttrs": [{"target": ["autogroup:member"], "attr": ["funnel"]}]`.
+
+A reinstall restarts the running task: otherwise the old process keeps serving in its
+previous mode and the Funnel answers `502`.
+
+### How it differs from the old scheme
+
+| | Up to 0.6.x: bridge | From 0.7.0: the node publishes itself |
+| :--- | :--- | :--- |
+| What you must run | a VPS with a shared domain | nothing but Tailscale |
+| Public address | `https://<bridge-domain>/sse?user=<node>` | `https://<node>.<tailnet>.ts.net/sse?token=…` |
+| Where TLS terminates | on the bridge | at the Tailscale Funnel ingress |
+| What the middleman sees | call metadata and share payloads | only Tailscale's network ingress |
+| File and page links | built by the bridge: `<domain>/<node>/<slug>/…` | built by the node: `<node>.<tailnet>/<slug>/…` |
+| Where the token lives | the node's `agent.env` + the bridge registry | `standalone.env` on the machine |
+| The bridge goes down | every node is unreachable at once | other machines are unaffected |
+| Several machines | one domain, `?user=` selects the node | one address and one connector per node |
+| Inbound ports | none (outbound tunnel) | none (Funnel accepts the ingress itself) |
+| Upkeep | VPS, domain, certificates, bridge upgrades | the Tailscale client |
+
+### What did not change
+
+Same MCP server and tools, same access modes (`read_only` / `full`), timers and cron,
+the chat goal, self-update, the `rhm` menu and the web settings page. The link is
+still a secret: whoever holds it can run commands on that machine.
+
+### If you still want the bridge
+
+Tunnel mode is still there: `./install.sh --mode=tunnel` (or
+`install.ps1 -Mode tunnel`) sets up the old shared-domain scheme, which makes sense
+when you run many nodes behind one address. It is simply no longer the default, and
+`rhm` now reports the address of the node that is actually installed, not what an
+earlier install left behind.
+
+### Migrating from 0.6.x
+
+1. Run the installer again (the wizard already offers Funnel first).
+2. Take the new `https://<node>.<tailnet>.ts.net/sse?token=…` link and update the
+   Gemini connector — a Funnel node has its own address and token.
+3. Files from the previous install (`agent.env`, `domain.env`) stay on disk as
+   history: a Funnel node does not read them and never dials the bridge.
+4. If the old bridge is no longer needed, its VPS can be switched off.
+
+> ⚠️ 0.7.0-rc1-alpha is a pre-release of the architecture change. It installs and
+> runs on this machine, but try it on one node before rolling it out.
+
+---
 ## 🔥 What you can do with it
 
 Just ask Gemini in plain language, from anywhere:
@@ -77,10 +179,10 @@ Every answer was produced by `system_vitals`, `device_info`, `device_capture` an
 | :--- | :--- |
 | 📱 **Mobile-first agent** | Works in the official Gemini mobile app and on the web through Gemini Spark. |
 | 🖥️ **Any PC** | Linux, macOS, Windows — desktops, laptops, VPS, containers. **Android phones and tablets** run the same node inside Termux. |
-| 🌐 **Behind any NAT** | The node opens an *outbound* WebSocket tunnel. No public IP, no port forwarding, no router setup. |
+| 🌐 **Behind any NAT** | The node publishes itself through Tailscale Funnel. No public IP, no port forwarding, no router setup. |
 | ⚡ **One-line install** | Detects OS, architecture and device type; installs autostart (`systemd` / `launchd` / Windows task / runit + Termux:Boot on Android); copies your connection link to the clipboard. |
-| 🛡️ **Two credentials, no secret in a URL** | The **device token** opens the tunnel and travels only in an `Authorization: Bearer` header. The **link key** (`lk_…`) is what goes into a URL; it can run tools but cannot open a tunnel, and it is rotatable — so a leaked link is fixed in one call, not by reinstalling the node. Everything else gets HTTP 401. |
-| 🔁 **Many machines, one gateway** | Each node is addressed by `?user=<node-name>` on one shared domain. |
+| 🛡️ **The link is the credential** | In Funnel mode the URL carries the node's own token (`/sse?token=…`), exactly as the installer prints it; treat the link as a password and rotate the token by reinstalling. In tunnel mode the URL carries only the rotatable **link key** (`lk_…`), while the **device token** that opens the tunnel travels in an `Authorization: Bearer` header. Everything else gets HTTP 401. |
+| 🔁 **One address per machine** | Every node has its own HTTPS address `https://<node>.<tailnet>.ts.net` and its own Gemini connector; no separate relay is needed. |
 | 🆓 **Free & open source** | MIT license, works with the free Gemini tier. |
 
 ---
@@ -214,20 +316,11 @@ One tool for the node's own switches — the same ones the `rhm` console menu an
 
 The cabinet (`/account`) shows the same switch right after login; a device is linked once with its node name and key (`lk_…` from the MCP URL, or the device token). Cabinet buttons, the menu and `rhm` subcommands go through one implementation ([core/settings.py](core/settings.py)), so they share the validation and the `settings.log` audit trail in the node's config directory.
 
-### Approvals (approval mode)
+### Confirmation belongs to the client, not to the node
 
-In `approval` mode a mutating call is not cut off: the node queues it, **waits for the operator** (up to `MESH_APPROVAL_WAIT`, 12 s by default) and, once confirmed, runs the same call and returns its real result. The model does not stop on every step.
+The node never asks for confirmation. The “run this tool?” dialog is drawn by the MCP client — Gemini Web, ChatGPT, an IDE — and only that client decides when to show it; that is what the MCP annotations in `tools/list` are for. The node executes what it is sent and returns the result.
 
-| How to confirm | What it gives |
-| :--- | :--- |
-| `a` in `rhm` | once: the waiting call runs |
-| `A` in `rhm` | **always allow** (until revoked or the mode changes) |
-| `R` in `rhm` | revoke "always allow" |
-| `x` | deny the waiting request |
-| `rhm approvals allow [minutes]` / `once` / `off` | the same from the command line |
-| `rhm mode full` | switch approvals off entirely |
-
-From the chat: ask for `node_control(action="mode", mode="full")` — that transition itself needs one confirmation, and after it nothing asks again. If a call still answers `approval_required`, it did **not** run: the model must say it is waiting and retry the same call, not end the task. Changing the access mode revokes "always allow", so switching to approval means approvals again.
+There are therefore two modes: `read_only` (observation; mutations are refused) and `full` (normal work). The old name `approval` is still accepted for compatibility and means `full`. The approval queue, the `a`/`A`/`x`/`R` keys in the menu and the `approve` tool are gone: if the client did not show a dialog, it does not want one.
 
 ### Timers and cron from the chat (`schedule`)
 
@@ -259,12 +352,14 @@ identity.
 
 ### Publishing files and web pages
 
-These four make something on your machine readable from the internet. The link is served by the gateway on the shared domain, so **the node has to stay connected for it to work**.
+These four make something on your machine readable from the internet. Whoever exposes the node serves the link: the gateway on its shared domain (tunnel mode) or the node itself (Funnel mode), so **the node has to stay reachable** — connected to the gateway, or running behind Funnel.
+
+The mode decides the link shape. Behind the gateway the path starts with the node name, because that is how the gateway finds the tunnel: `https://<shared-domain>/<node>/<name>-<random>/<filename>`. In Funnel mode the node is published on its own address and serves shares itself, so there is no node segment: `https://<node>.<tailnet>.ts.net/<name>-<random>/<filename>`. The installer records that address in `standalone.env` as `MESH_PUBLIC_URL`, so a link never names a gateway this node is not connected to.
 
 | Tool | What it does |
 | :--- | :--- |
-| `share_file(path, name, overwrite)` | Publishes **one file**: it is copied into the node's share root and you get `https://<shared-domain>/<node>/<name>-<random>/<filename>`. `overwrite` replaces an existing share with the same name. |
-| `serve_dir(path, name)` | Serves a **directory** in place — no copy is made. `index.html` is used when present, otherwise a directory listing is shown. Read-only (GET/HEAD only). Returns `https://<shared-domain>/<node>/<name>-<random>/`. |
+| `share_file(path, name, overwrite)` | Publishes **one file**: it is copied into the node's share root and you get a link to it (see the shape above). `overwrite` replaces an existing share with the same name. |
+| `serve_dir(path, name)` | Serves a **directory** in place — no copy is made. `index.html` is used when present, otherwise a directory listing is shown. Read-only (GET/HEAD only). Returns a link to the directory root (see the shape above). |
 | `share_list()` | Lists active shares with their URLs, their roots, and whether the local server is running. |
 | `unshare(name)` | Stops a share and revokes its link. Accepts the share name, its slug or the full URL. A file share also deletes the copy in the share root; a served directory is left untouched on disk. |
 
@@ -297,19 +392,19 @@ These four make something on your machine readable from the internet. The link i
 
 **🐧 Linux / 🍎 macOS**
 ```bash
-curl -fsSL https://racknerd-5a24bf9.merino-carob.ts.net/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/LevRa7/remote-harness-mcp/main/install.sh | bash
 ```
 
 **📱 Android (Termux)** — no root, works from F-Droid's Termux
 ```bash
-curl -fsSL https://racknerd-5a24bf9.merino-carob.ts.net/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/LevRa7/remote-harness-mcp/main/install.sh | bash
 ```
 Autostart on a phone is a runit service plus the Termux:Boot app, and the node is
 named after the device model — see [docs/TERMUX.md](docs/TERMUX.md).
 
 **🪟 Windows (PowerShell)**
 ```powershell
-irm https://racknerd-5a24bf9.merino-carob.ts.net/install.ps1 | iex
+irm https://raw.githubusercontent.com/LevRa7/remote-harness-mcp/main/install.ps1 | iex
 ```
 
 **🪟 Windows — visual installer** (from a clone or a release)
@@ -334,12 +429,13 @@ that depends on `remote-harness-mcp` and forwards every argument to the same CLI
 ```bash
 git clone https://github.com/LevRa7/remote-harness-mcp.git
 cd remote-harness-mcp
-./install.sh --quick
+./install.sh                        # Funnel mode (the default)
+./install.sh --mode=tunnel          # the previous shared-gateway scheme
 ```
 
 At the end the installer prints your personal MCP link and copies it to the clipboard:
 ```text
-https://racknerd-5a24bf9.merino-carob.ts.net/sse?user=<your-node-name>&token=<your_secret_token>
+https://<your-node-name>.<your-tailnet>.ts.net/sse?token=<your_secret_token>
 ```
 
 ### 2. Connect it to Gemini Spark
@@ -377,7 +473,7 @@ Windows already ships PowerShell 5.1, so there is nothing to prepare — no Pyth
 
 |  | Console installer | Visual installer |
 | :--- | :--- | :--- |
-| Start | `irm https://racknerd-5a24bf9.merino-carob.ts.net/install.ps1 \| iex` | `.\install-gui.cmd` |
+| Start | `irm https://raw.githubusercontent.com/LevRa7/remote-harness-mcp/main/install.ps1 \| iex` | `.\install-gui.cmd` |
 | Needs | nothing but PowerShell | a clone or an unpacked release — it drives `install.ps1`, `core/` and `install.sh` |
 | Variants | `-Mode tunnel` (default), `-Mode standalone`, `-User`, `-Gateway`, `-Token`, `-Port`, `-DryRun` | Quick setup, Custom setup, Remote over SSH |
 | Language | `-Lang en` / `-Lang ru` | switch in the window header, or `-Lang` |
@@ -424,10 +520,10 @@ The release also ships a single compiled installer, for machines where you would
 not clone or download anything else — `RemoteHarnessMCP-Setup-<version>.exe`:
 
 ```powershell
-.\RemoteHarnessMCP-Setup-0.6.0.exe            # open the visual installer
-.\RemoteHarnessMCP-Setup-0.6.0.exe -Lang ru   # start in Russian
-.\RemoteHarnessMCP-Setup-0.6.0.exe -SelfTest  # headless self-check, prints JSON
-.\RemoteHarnessMCP-Setup-0.6.0.exe --version  # print the version
+.\RemoteHarnessMCP-Setup-0.7.0-rc1-alpha.exe            # open the visual installer
+.\RemoteHarnessMCP-Setup-0.7.0-rc1-alpha.exe -Lang ru   # start in Russian
+.\RemoteHarnessMCP-Setup-0.7.0-rc1-alpha.exe -SelfTest  # headless self-check, prints JSON
+.\RemoteHarnessMCP-Setup-0.7.0-rc1-alpha.exe --version  # print the version
 ```
 
 It carries the wizard, `install.ps1`, `core/` and `install.sh` inside itself, unpacks them
@@ -489,13 +585,21 @@ No public IP, no port forwarding and no gateway: the node stays on loopback and 
 .\install.ps1 -Mode standalone -Port 8096 -Funnel
 ```
 
-The installer resolves `<node>.<tailnet>.ts.net` from `tailscale status --json`, writes `MESH_ALLOWED_HOSTS` next to `MESH_TOKEN` in `standalone.env`, runs `tailscale funnel --bg --https=443`, registers the logon task `RemoteHarnessMCPNode` and prints `https://<node>.<tailnet>.ts.net/sse?token=…`.
+The installer resolves `<node>.<tailnet>.ts.net` from `tailscale status --json`, writes `MESH_ALLOWED_HOSTS` and `MESH_PUBLIC_URL` next to `MESH_TOKEN` in `standalone.env`, runs `tailscale funnel --bg --https=443` and prints `https://<node>.<tailnet>.ts.net/sse?token=…`.
+
+**Autostart at system startup is the default.** The installer registers `RemoteHarnessMCPService` (SYSTEM, starts before anyone logs on, restarts on failure); the wizard's "Start at system startup as a Windows service" switch is already ticked. Clear it, or refuse elevation, and the node starts at logon through `rhm-node.vbs` instead — and the installer records which one it really registered (`autostart.state.json` in the configuration directory). A reinstall restarts the running task: otherwise the old process keeps serving in its previous mode and the Funnel answers `502`.
+
+The `rhm` command (the node menu) is installed into `%LOCALAPPDATA%\Programs\RemoteHarnessMCP\bin` and added to the user `PATH`: in a new PowerShell or cmd window, `rhm` is enough. The menu describes the **installed** node: in Funnel mode it prints that node's own `https://<node>.<tailnet>.ts.net/sse?token=…` and the token from `standalone.env`, not the gateway link an earlier tunnel install left in `agent.env`/`domain.env`.
 
 Requirements and limits: Funnel must be allowed for the tailnet in the ACL (`"nodeAttrs": [{"target": ["autogroup:member"], "attr": ["funnel"]}]`); only ports 443, 8443 and 10000 are available; the URL is public, so treat the token as a password; the node must be awake.
 
 The wizard (`install-gui.cmd`) offers the same variant as its first, pre-selected option: it installs Tailscale, opens the sign-in page, and only then publishes the node.
 
 The other wizard variants stay available: quick (shared gateway), custom, remote SSH, the administrator service (`-AdminService`: machine-wide task, runs as SYSTEM) and the container install (`docker/`, `--container` in `install.sh`). On Linux and macOS the console installer does it with `./install.sh --mode=funnel` (Termux is the exception: Android has no `tailscaled`, so the URL stays local).
+
+#### WSL
+
+Inside a WSL distribution the node is installed with the same `./install.sh --mode=standalone` and takes **8097** by default: port 8096 on that machine belongs to the Windows node, and WSL2 localhost forwarding hands it to Windows. Both nodes then run side by side (`http://localhost:8096` — Windows, `http://localhost:8097` — WSL); `--port` still wins. When the distribution has no systemd, the installer writes the login hook `~/.config/remote-harness-mcp/rhm-node-autostart.sh` into `~/.profile` and `~/.bashrc` — it does nothing when the server already answers. For boot-time start on Windows, enable systemd in `/etc/wsl.conf` (`[boot] systemd=true`). The `rhm` command lands in `~/.local/bin` and on the profile `PATH`.
 
 Opening the MCP link in a browser does not start a stream: the node recognises a browser (`Sec-Fetch-Dest: document` / `Accept: text/html`) and returns a connection card with both endpoints, the token and the steps for Gemini, ChatGPT and Claude. An MCP client sends `Accept: text/event-stream` and gets its stream exactly as before.
 
@@ -513,7 +617,7 @@ then shows up in Gemini Spark like any other machine. Full guide:
 # 1. Termux from F-Droid (not Google Play); optionally Termux:Boot and Termux:API
 pkg update -y
 # 2. the usual one-liner
-curl -fsSL https://racknerd-5a24bf9.merino-carob.ts.net/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/LevRa7/remote-harness-mcp/main/install.sh | bash
 ```
 
 What a phone changes, and how the installer handles it:

@@ -31,6 +31,11 @@ param(
     [string]$Transcript = ""
 )
 
+# Whether the operator pinned the port. A default is a preference: when the port
+# already belongs to something else, the installer takes the first free one above
+# it instead of failing the bind (and the Funnel target with it).
+$PortExplicit = $PSBoundParameters.ContainsKey('Port')
+
 # Funnel is the default variant on Windows too: it needs neither a gateway nor a
 # domain, and the node stays on loopback. An explicit -Mode standalone keeps the
 # plain local server without publishing it.
@@ -769,6 +774,28 @@ function Register-McpServiceTask {
         }
         return $false
     }
+    # A replaced task keeps the instance it is already running: a gateway-era
+    # install has core.agent in memory, a Funnel install expects core.server, and
+    # the running process keeps the mode it read at start. Registering the new
+    # definition therefore changed nothing until the next boot - the Funnel
+    # answered 502 while the task looked "Running". Stop it, kill the python it
+    # spawned (Stop-ScheduledTask ends the PowerShell host, not its child) and
+    # start it again, so the mode in service.env takes effect now.
+    try { Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue } catch { }
+    Start-Sleep -Seconds 2
+    try {
+        Get-CimInstance Win32_Process -Filter "Name='python.exe' or Name='pythonw.exe'" | ForEach-Object {
+            $cmdline = [string]$_.CommandLine
+            if ($cmdline -match 'core\.(agent|server)') {
+                $ownerName = ""
+                try { $ownerName = [string](Invoke-CimMethod -InputObject $_ -MethodName GetOwner).User } catch { }
+                if ($ownerName -match '^(SYSTEM|СИСТЕМА)$') {
+                    Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+                }
+            }
+        }
+    } catch { }
+    Start-Sleep -Seconds 1
     $started = $false
     try {
         Start-ScheduledTask -TaskName $taskName -ErrorAction Stop
@@ -794,12 +821,123 @@ function Register-McpServiceTask {
     return $true
 }
 
+function Remove-PerUserNodeAutostart {
+    # Exactly one autostart may own the MCP port. The machine task starts the server
+    # at boot; a leftover per-user logon entry (or a per-user Scheduled Task created
+    # by an earlier elevated install) starts a *second* server at logon, loses the
+    # race for the port and answers with its own token and its own share links.
+    # Switching a no-UAC install to the service therefore removes them here, where
+    # the process is already elevated.
+    $removed = @()
+    try {
+        $startup = [Environment]::GetFolderPath("Startup")
+        $vbs = Join-Path $startup "rhm-node.vbs"
+        if (Test-Path -LiteralPath $vbs) {
+            Remove-Item -LiteralPath $vbs -Force -ErrorAction Stop
+            $removed += "rhm-node.vbs"
+        }
+    } catch { }
+    try {
+        $task = Get-ScheduledTask -TaskName "RemoteHarnessMCPNode" -ErrorAction SilentlyContinue
+        if ($task) {
+            Unregister-ScheduledTask -TaskName "RemoteHarnessMCPNode" -Confirm:$false -ErrorAction SilentlyContinue
+            $removed += "RemoteHarnessMCPNode"
+        }
+    } catch { }
+    return ($removed -join ", ")
+}
+
+function Install-RhmCommand {
+    param([string]$Python, [string]$PayloadDir, [string]$Language)
+    # The npm package ships a 'rhm' bin; a PowerShell install has to place the same
+    # command where a fresh shell finds it. %LOCALAPPDATA%\Programs\<product>\bin
+    # belongs to the user (no elevation), and the directory is added to the *user*
+    # PATH once, so 'rhm' works in cmd.exe and PowerShell alike.
+    #
+    # The shim must NOT carry the payload path. Baked in, it outlived the install:
+    # a checkout that moved (or a second install from another folder) left "rhm"
+    # answering "No module named core.menu" with no hint about the stale path. The
+    # path now lives in rhm.env next to the shim, and every install rewrites it -
+    # one file to look at, one place to fix.
+    $binDir = Join-Path $env:LOCALAPPDATA "Programs\RemoteHarnessMCP\bin"
+    try { New-Item -ItemType Directory -Force -Path $binDir -ErrorAction Stop | Out-Null } catch { return $false }
+    $envFile = Join-Path $binDir "rhm.env"
+    $envLines = @(
+        ("RHM_PAYLOAD=" + $PayloadDir),
+        ("RHM_PYTHON=" + $Python)
+    )
+    $lines = @(
+        '@echo off',
+        'rem rhm - Remote Harness MCP console. The payload path lives in rhm.env next',
+        'rem to this file, so a reinstalled or moved payload needs no edit here.',
+        'setlocal',
+        'set "RHM_HOME=%~dp0"',
+        'set "RHM_PAYLOAD="',
+        'set "RHM_PYTHON="',
+        'if exist "%RHM_HOME%rhm.env" for /f "usebackq tokens=1,* delims==" %%A in ("%RHM_HOME%rhm.env") do set "%%A=%%B"',
+        'if not defined RHM_PAYLOAD goto :rhm_missing',
+        'if not defined RHM_PYTHON set "RHM_PYTHON=python"',
+        'if not exist "%RHM_PAYLOAD%\core\menu.py" goto :rhm_missing',
+        'pushd "%RHM_PAYLOAD%"',
+        '"%RHM_PYTHON%" -m core.menu %*',
+        'set "RHM_EXIT=%ERRORLEVEL%"',
+        'popd',
+        'exit /b %RHM_EXIT%',
+        ':rhm_missing',
+        'echo rhm: the node payload is not where "%RHM_HOME%rhm.env" says. 1>&2',
+        'echo      RHM_PAYLOAD=%RHM_PAYLOAD% 1>&2',
+        'echo      Re-run install.ps1 from the folder the payload lives in, or edit that file. 1>&2',
+        'exit /b 127'
+    )
+    $launcher = Join-Path $binDir "rhm.cmd"
+    try {
+        [System.IO.File]::WriteAllLines($envFile, [string[]]$envLines, (New-Object System.Text.UTF8Encoding($false)))
+        [System.IO.File]::WriteAllLines($launcher, [string[]]$lines, (New-Object System.Text.UTF8Encoding($false)))
+    } catch { return $false }
+    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    $parts = @()
+    if ($userPath) { $parts = @($userPath -split ';' | Where-Object { $_ -and $_.Trim() }) }
+    $already = $false
+    foreach ($part in $parts) {
+        if ($part.TrimEnd('\') -ieq $binDir.TrimEnd('\')) { $already = $true; break }
+    }
+    if (-not $already) {
+        $newPath = ((@($binDir) + $parts) -join ';')
+        try {
+            [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
+            # Tell running Explorer/shells the environment changed; a new console
+            # of its own accord only reads PATH at start, which is why the hint
+            # below still says "open a new window".
+            $signature = '[DllImport("user32.dll", SetLastError=true, CharSet=CharSet.Auto)] public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);'
+            $win32 = Add-Type -MemberDefinition $signature -Name RhmEnvBroadcast -Namespace Rhm -PassThru -ErrorAction Stop
+            $result = [UIntPtr]::Zero
+            $null = $win32::SendMessageTimeout([IntPtr]0xffff, 0x001A, [UIntPtr]::Zero, "Environment", 2, 5000, [ref]$result)
+        } catch { }
+    }
+    if ($Language -eq "ru") {
+        Write-Host "[OK] Команда rhm: $launcher" -ForegroundColor Green
+        Write-Host "     Новое окно PowerShell/cmd -> rhm (меню узла)." -ForegroundColor DarkGray
+    } else {
+        Write-Host "[OK] The rhm command: $launcher" -ForegroundColor Green
+        Write-Host "     A new PowerShell/cmd window -> rhm (the node menu)." -ForegroundColor DarkGray
+    }
+    return $true
+}
+
 # The elevated child of -AdminService has exactly one job. It must not repeat the
 # node registration: the parent already did that before asking for elevation.
 if ($ServiceOnly) {
     $payloadDir = if ($PSCommandPath) { Split-Path -Parent $PSCommandPath } else { (Get-Location).Path }
     $ok = Register-McpServiceTask -ConfigDirPath $ConfigDir -PayloadDir $payloadDir -Language $Lang
-    if ($ok) { exit 0 } else { exit 1 }
+    if ($ok) {
+        $removed = Remove-PerUserNodeAutostart
+        if ($removed) {
+            if ($Lang -eq "ru") { Write-Host "    Убраны прежние автозапуски: $removed" -ForegroundColor DarkGray }
+            else { Write-Host "    Removed earlier autostart entries: $removed" -ForegroundColor DarkGray }
+        }
+        exit 0
+    }
+    exit 1
 }
 
 function Resolve-PythonAfterInstall {
@@ -1199,6 +1337,26 @@ function Show-FunnelAclHint {
     }
 }
 
+function Resolve-FreePort {
+    param([int]$Start = 8096, [int]$Limit = 50)
+    # A default port is a preference, not a promise. Something else (another
+    # product, a node of a different install) may own 8096; the Funnel and the
+    # printed URL must then name the port the server really bound.
+    for ($offset = 0; $offset -lt $Limit; $offset++) {
+        $candidate = $Start + $offset
+        $probe = $null
+        try {
+            $probe = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, $candidate)
+            $probe.Start()
+            return $candidate
+        } catch {
+        } finally {
+            if ($probe) { try { $probe.Stop() } catch { } }
+        }
+    }
+    return $Start
+}
+
 function Stop-StandaloneNode {
     param([int]$Port)
     # A node left by an earlier install keeps the port and answers with ITS
@@ -1373,7 +1531,13 @@ if ($Mode -eq "standalone") {
     }
 
     $envLines = @("MESH_TOKEN=" + $StandaloneToken)
-    if ($FunnelName) { $envLines += ("MESH_ALLOWED_HOSTS=" + $FunnelName) }
+    if ($FunnelName) {
+        $envLines += ("MESH_ALLOWED_HOSTS=" + $FunnelName)
+        # Share links (and the connection card) must name the address this node is
+        # really reached at. The gateway domain belongs to tunnel mode: a Funnel
+        # node never dials it, so a link built from it relays nowhere.
+        $envLines += ("MESH_PUBLIC_URL=https://" + $FunnelName)
+    }
     Set-Content -LiteralPath $StandaloneEnv -Value $envLines -Encoding ASCII
     if ($AdminService) {
         # The machine task runs the server as SYSTEM, so SYSTEM must be able to read
@@ -1389,10 +1553,24 @@ if ($Mode -eq "standalone") {
 
     $nodeUp = $false
     $nodeTaskOk = $false
+    # Which autostart shape the node really got: "service" (SYSTEM task at boot),
+    # "logon" (per-user Startup entry) or "none". The summary prints this instead
+    # of assuming the requested variant succeeded.
+    $autostartKind = "none"
     if ($AdminService) {
         # Funnel + Administrator service: the task runs core.server (not core.agent),
         # keeps its configuration in ProgramData and starts at boot without a logon.
         Stop-StandaloneNode -Port $Port
+        # The service has to publish the port it really binds: take the first free
+        # one when the default is taken, and let the Funnel target follow it.
+        if (-not $PortExplicit) {
+            $chosenPort = Resolve-FreePort -Start $Port
+            if ($chosenPort -ne $Port) {
+                if ($Lang -eq "ru") { Write-Host "[i] Порт $Port занят: служба займёт $chosenPort." -ForegroundColor DarkGray }
+                else { Write-Host "[i] Port $Port is taken: the service will use $chosenPort." -ForegroundColor DarkGray }
+                $Port = $chosenPort
+            }
+        }
         # The machine task owns the node now: a leftover per-user launcher would
         # start a second server on the same port at logon.
         try {
@@ -1430,40 +1608,84 @@ if ($Mode -eq "standalone") {
                 $serviceOk = ($child -and $child.ExitCode -eq 0)
             } catch { $serviceOk = $false }
         }
-        if (-not $serviceOk) {
+        if ($serviceOk) {
+            $autostartKind = "service"
+            # The machine task starts the server itself; give it time to bind.
+            $nodeUp = Wait-StandaloneNode -Port $Port -TimeoutSec 45
+            $nodeTaskOk = $true
+        } else {
+            # Elevation was refused, or the SYSTEM task could not be registered.
+            # The node itself works: fail the *boot* autostart, not the install.
+            # A per-user logon entry is exactly what a no-UAC install gets, and the
+            # Funnel keeps running either way (it proxies to loopback, not to a
+            # specific account).
             if ($Lang -eq "ru") {
-                Write-Host "[!] Повышение прав отклонено или регистрация не удалась: служба MCP не установлена." -ForegroundColor Red
-                Write-Host "    Повторите:  .\install.ps1 -Mode standalone -Funnel -AdminService" -ForegroundColor Yellow
+                Write-Host "[!] Служба при старте системы не установлена (UAC отклонён или задача не создана)." -ForegroundColor Yellow
+                Write-Host "    Узел продолжит работу: автозапуск при входе в систему вместо загрузки." -ForegroundColor Yellow
+                Write-Host "    Повторить позже:  .\install.ps1 -Mode standalone -Funnel -AdminService" -ForegroundColor DarkGray
             } else {
-                Write-Host "[!] Elevation was refused or registration failed: the MCP service was not installed." -ForegroundColor Red
-                Write-Host "    Re-run:  .\install.ps1 -Mode standalone -Funnel -AdminService" -ForegroundColor Yellow
+                Write-Host "[!] The boot-time service was not installed (elevation refused or the task was not created)." -ForegroundColor Yellow
+                Write-Host "    The node keeps working: it autostarts at logon instead of at boot." -ForegroundColor Yellow
+                Write-Host "    Retry later:  .\install.ps1 -Mode standalone -Funnel -AdminService" -ForegroundColor DarkGray
             }
-            exit 1
+            $nodeTaskOk = Register-StandaloneStartup -Python $pyExeOnly -Port $Port -WorkingDirectory $ScriptDir
+            if ($nodeTaskOk) {
+                $autostartKind = "logon"
+                $portOwner = Stop-StandaloneNode -Port $Port
+                if (-not $portOwner) {
+                    try {
+                        $startupVbs = Join-Path ([Environment]::GetFolderPath("Startup")) "rhm-node.vbs"
+                        Start-Process -FilePath 'wscript.exe' -ArgumentList ('"' + $startupVbs + '"') | Out-Null
+                    } catch { }
+                }
+            }
+            $nodeUp = Wait-StandaloneNode -Port $Port -TimeoutSec 45
         }
-        # The service starts the server itself; give it time to bind the port.
-        $nodeUp = Wait-StandaloneNode -Port $Port -TimeoutSec 45
-        $nodeTaskOk = $serviceOk
     } else {
         # No --token on purpose: the node reads standalone.env itself, so the secret
         # stays out of the process list and out of the scheduled task.
         $portOwner = Stop-StandaloneNode -Port $Port
-        if ($portOwner) {
+        if ($portOwner -and $PortExplicit) {
+            # Pinned by the operator: refusing is better than silently moving the
+            # port a Funnel or a connector URL already points at.
             if ($Lang -eq "ru") {
                 Write-Host "[!] Порт $Port занят процессом $portOwner - узел не сможет его занять." -ForegroundColor Red
-                Write-Host "    Остановите этот процесс и повторите установку." -ForegroundColor Yellow
+                Write-Host "    Остановите этот процесс или укажите другой -Port." -ForegroundColor Yellow
             } else {
                 Write-Host "[!] Port $Port is held by $portOwner - the node cannot bind it." -ForegroundColor Red
-                Write-Host "    Stop that process and re-run the installer." -ForegroundColor Yellow
+                Write-Host "    Stop that process or pass another -Port." -ForegroundColor Yellow
             }
             exit 1
         }
-        $nodeProc = Start-Process $pyExeOnly -ArgumentList "-u -m core.server --host 127.0.0.1 --port=$Port" -WorkingDirectory $ScriptDir -WindowStyle Hidden -PassThru
-        $nodeUp = Wait-StandaloneNode -Port $Port
-        if ($nodeProc -and $nodeProc.HasExited) { $nodeUp = $false }
-        # The Startup entry is the reliable one: it needs no elevation. A scheduled
-        # task is only a bonus (restart on failure) and is attempted afterwards.
+        if (-not $PortExplicit) {
+            # The default is a preference: something else owning 8096 must not make
+            # the install fail. The Funnel, the printed URL and the autostart entry
+            # all follow the port the node really binds.
+            $chosenPort = Resolve-FreePort -Start $Port
+            if ($chosenPort -ne $Port) {
+                if ($Lang -eq "ru") { Write-Host "[i] Порт $Port занят процессом $portOwner - узел займёт $chosenPort." -ForegroundColor DarkGray }
+                else { Write-Host "[i] Port $Port is held by $portOwner - the node will use $chosenPort." -ForegroundColor DarkGray }
+                $Port = $chosenPort
+            }
+        }
+        # The Startup entry is the only autostart a normal account can install:
+        # creating a Scheduled Task answers "Access is denied" without elevation.
+        # It is written BEFORE the node starts, and the node is started through it,
+        # so the server is not a child of this installer session. A child died with
+        # the install, and a node reported as "installed" was gone minutes later.
         $nodeTaskOk = Register-StandaloneStartup -Python $pyExeOnly -Port $Port -WorkingDirectory $ScriptDir
-        try { Register-StandaloneNodeTask -Python $pyExeOnly -Port $Port -WorkingDirectory $ScriptDir | Out-Null } catch { }
+        if ($nodeTaskOk) {
+            $autostartKind = "logon"
+            try {
+                $startupVbs = Join-Path ([Environment]::GetFolderPath("Startup")) "rhm-node.vbs"
+                Start-Process -FilePath 'wscript.exe' -ArgumentList ('"' + $startupVbs + '"') | Out-Null
+            } catch { }
+        }
+        if (-not $nodeTaskOk) {
+            # No autostart at all: at least leave a working node for this session.
+            $null = Start-Process $pyExeOnly -ArgumentList "-u -m core.server --host 127.0.0.1 --port=$Port" -WorkingDirectory $ScriptDir -WindowStyle Hidden -PassThru
+        }
+        $nodeUp = Wait-StandaloneNode -Port $Port
     }
 
     if ($FunnelName) {
@@ -1483,6 +1705,24 @@ if ($Mode -eq "standalone") {
             $FunnelName = ""
         }
     }
+
+    # What the node really got, for the wizard and for the operator: a label that
+    # says "service (at boot)" while the task was never created is how a 502 after
+    # a "successful" install happened.
+    $autostartTask = if ($autostartKind -eq "service") { "RemoteHarnessMCPService" } else { "" }
+    try {
+        $statePath = Join-Path $ConfigDir "autostart.state.json"
+        New-Item -ItemType Directory -Force -Path $ConfigDir | Out-Null
+        [ordered]@{
+            kind = $autostartKind
+            task = $autostartTask
+            port = $Port
+            funnel = $FunnelName
+            mode = "standalone"
+            updated = (Get-Date).ToString("s")
+        } | ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding UTF8
+    } catch { }
+    $null = Install-RhmCommand -Python $pyExeOnly -PayloadDir $ScriptDir -Language $Lang
 
     $LocalUrl = "http://localhost:$Port/sse?token=$StandaloneToken"
     $PublicUrl = if ($FunnelName) { "https://$FunnelName/sse?token=$StandaloneToken" } else { "" }
@@ -1522,12 +1762,11 @@ if ($Lang -eq "ru") {
         Print-McpBox "ССЫЛКА ЛОКАЛЬНОГО MCP-СЕРВЕРА (СКОПИРУЙТЕ):" $LocalUrl $copyMsg
         Write-Host "    Публичная ссылка не создана: запустите с -Funnel и установленным Tailscale." -ForegroundColor DarkGray
     }
-    if ($nodeTaskOk) {
-        if ($AdminService) {
-            Write-Host "    Автозапуск узла: служба RemoteHarnessMCPService (SYSTEM, при загрузке)." -ForegroundColor DarkGray
-        } else {
-            Write-Host "    Автозапуск узла: при входе в систему (rhm-node.vbs в папке Автозагрузки)." -ForegroundColor DarkGray
-        }
+    if ($autostartKind -eq "service") {
+        Write-Host "    Автозапуск узла: служба RemoteHarnessMCPService (SYSTEM, при загрузке)." -ForegroundColor DarkGray
+    } elseif ($autostartKind -eq "logon") {
+        Write-Host "    Автозапуск узла: при входе в систему (rhm-node.vbs в папке Автозагрузки)." -ForegroundColor DarkGray
+        Write-Host "    Запуск при загрузке (до входа): переустановите с -AdminService." -ForegroundColor DarkGray
     } else {
         Write-Host "    [!] Не удалось зарегистрировать автозапуск: узел поднимется только до перезагрузки." -ForegroundColor Yellow
     }
@@ -1547,12 +1786,11 @@ if ($Lang -eq "ru") {
         Print-McpBox "LOCAL MCP SERVER URL (COPY THIS):" $LocalUrl $copyMsg
         Write-Host "    No public URL: rerun with -Funnel and Tailscale installed." -ForegroundColor DarkGray
     }
-    if ($nodeTaskOk) {
-        if ($AdminService) {
-            Write-Host "    Node autostart: the RemoteHarnessMCPService task (SYSTEM, at boot)." -ForegroundColor DarkGray
-        } else {
-            Write-Host "    Node autostart: at logon (rhm-node.vbs in the Startup folder)." -ForegroundColor DarkGray
-        }
+    if ($autostartKind -eq "service") {
+        Write-Host "    Node autostart: the RemoteHarnessMCPService task (SYSTEM, at boot)." -ForegroundColor DarkGray
+    } elseif ($autostartKind -eq "logon") {
+        Write-Host "    Node autostart: at logon (rhm-node.vbs in the Startup folder)." -ForegroundColor DarkGray
+        Write-Host "    Boot-time start (before logon): reinstall with -AdminService." -ForegroundColor DarkGray
     } else {
         Write-Host "    [!] Could not register autostart: the node lives until the next reboot." -ForegroundColor Yellow
     }
@@ -1698,6 +1936,10 @@ Write-DomainFile -Domain $Gateway -Path $DomainFilePath
 # Start agent in background
 $env:MESH_GATEWAY = $Gateway
 $env:MESH_USER = $AssignedUser
+# The console menu must be reachable in a new shell in every variant, not only in
+# Funnel mode: the npm package ships a 'rhm' bin, and a PowerShell install places
+# the same command itself.
+$null = Install-RhmCommand -Python $pyExeOnly -PayloadDir $ScriptDir -Language $Lang
 if ($AdminService) {
     # -------------------------------------------------------------------------
     #  ADMINISTRATOR SERVICE VARIANT

@@ -4,7 +4,7 @@
 
 The console menu (``rhm``), the CLI subcommands and the MCP tool
 ``node_control`` all change the same four things: the access mode (read-only /
-approval / full), the working directory, pausing, the isolated container and the
+full), the working directory, pausing, the isolated container and the
 remote-control lock. When each surface wrote its own marker the three could
 disagree - the menu says read-only, the cabinet still shows full, and the tool
 refuses for a third reason. This module is the single writer; every caller goes
@@ -30,7 +30,6 @@ Public interface::
 
     apply(payload, actor) -> dict
     snapshot() -> dict
-    requires_approval(payload) -> bool
 """
 
 from __future__ import annotations
@@ -93,7 +92,6 @@ def snapshot() -> Dict[str, Any]:
         "paused": state.get("paused"),
         "workspace": state.get("workspace") or os.getcwd(),
         "online": state.get("online"),
-        "pending_approvals": state.get("pending_approvals", 0),
         "remote_control": state.get("remote_control") or control.remote_control_state(),
         "sandbox": isolation,
         "modes": list(control.ACCESS_MODES),
@@ -113,7 +111,7 @@ def _ok(action: str, actor: str, message: str, **extra: Any) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Approval hints
+# Payload helpers
 # ---------------------------------------------------------------------------
 
 def _normalise(payload: Any) -> Dict[str, Any]:
@@ -122,41 +120,6 @@ def _normalise(payload: Any) -> Dict[str, Any]:
 
 def _action(payload: Dict[str, Any]) -> str:
     return str(payload.get("action") or "status").strip().lower()
-
-
-def requires_approval(payload: Any) -> bool:
-    """True when this call escalates the node past the operator's default.
-
-    Only one action does: leaving the console in charge by switching to full
-    access while the node is in ``approval`` mode. Everything else either
-    throttles the node or changes where it works, and the operator asked the
-    cabinet to be able to do that without a second trip to the machine.
-    """
-    data = _normalise(payload)
-    action = _action(data)
-    if action == "sandbox" and data.get("enabled") and data.get("network"):
-        # Networked isolation can reach the host/LAN; a remote caller must ask
-        # the person at the machine first.
-        return True
-    return action == "mode" and str(data.get("mode") or "").lower() == "full"
-
-
-def summary(payload: Any) -> str:
-    """One short human line for the approval queue."""
-    data = _normalise(payload)
-    action = _action(data)
-    if action == "mode":
-        return "access mode -> %s" % (data.get("mode") or "?")
-    if action == "cd":
-        return "working directory -> %s" % (data.get("path") or "?")
-    if action == "sandbox":
-        return "isolation%s -> %s" % (
-            " (network)" if data.get("network") else "",
-            "on" if data.get("enabled") else "off",
-        )
-    if action == "remote_control":
-        return "remote control -> %s" % ("on" if data.get("enabled") else "off")
-    return action
 
 
 # ---------------------------------------------------------------------------
@@ -221,6 +184,9 @@ def _apply(data: Dict[str, Any], action: str, actor: str, remote: bool) -> Dict[
 
 def _mode(data: Dict[str, Any], actor: str, remote: bool) -> Dict[str, Any]:
     mode = str(data.get("mode") or "").strip().lower()
+    if mode == "approval":
+        # Legacy name: this node no longer prompts, so it means full access.
+        mode = "full"
     if mode not in control.ACCESS_MODES:
         return {"error": "mode must be one of %r" % (list(control.ACCESS_MODES),)}
     current = control.access_mode()

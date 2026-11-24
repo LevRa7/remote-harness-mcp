@@ -94,17 +94,6 @@ def page(token: str, message: str = "") -> str:
         % (name, "on" if name == mode else "secondary", html.escape(mode_labels[name]))
         for name in control.ACCESS_MODES
     )
-    pending = control.pending_approvals()
-    pending_rows = "".join(
-        "<tr><td><code>%s</code></td><td>%s</td><td>%s</td><td>"
-        "<form method=post><input type=hidden name=csrf value=\"%s\">"
-        "<input type=hidden name=id value=\"%s\">"
-        "<button name=action value=approve>Allow once</button> "
-        "<button name=action value=deny class=danger>Deny</button></form></td></tr>"
-        % (html.escape(item["id"]), html.escape(item["tool"]),
-           html.escape(item.get("summary", "")), csrf(token), html.escape(item["id"]))
-        for item in pending[-10:]
-    ) or "<tr><td colspan=4 class=muted>No pending requests</td></tr>"
     isolation_text = "OFF"
     if isolation["enabled"]:
         isolation_text = "ON · %s · %s" % (isolation["workspace"], isolation["container"])
@@ -143,9 +132,6 @@ def page(token: str, message: str = "") -> str:
 <button class=danger>With network (installs)</button></form></div>
 <p class=muted>Requires Docker/Podman. Only the selected project is mounted at /workspace.</p></div>
 
-<div class=card><h2>Pending approvals</h2><table>
-<tr><th>ID</th><th>Tool</th><th>Summary</th><th></th></tr>%s</table></div>
-
 <div class=card><h2>MCP endpoint</h2>%s
 %s</div>
 
@@ -164,7 +150,6 @@ def page(token: str, message: str = "") -> str:
         html.escape(state["workspace"] or os.getcwd()),
         html.escape(isolation_text),
         csrf(token), csrf(token), csrf(token),
-        pending_rows,
         ("<p><code>%s</code></p>" % html.escape(url)) if url else "<p class=muted>No link key in agent.env.</p>",
         ("<img alt=QR src='%s' width=220 height=220>" % qr) if qr else "",
         html.escape("\n".join(menu.tail(menu.agent_log_path(), 14))),
@@ -265,14 +250,7 @@ class Handler(BaseHTTPRequestHandler):
         action = str(data.get("action") or "")
         message = ""
         try:
-            if action in ("approve", "deny"):
-                request_id = str(data.get("id") or "")
-                if action == "approve":
-                    result = control.approve(request_id)
-                else:
-                    result = {"ok": control.deny(request_id)}
-                message = "approved" if action == "approve" and result else "denied"
-            elif action == "cd":
+            if action == "cd":
                 result = settings.apply({"action": "cd", "path": data.get("path", "")}, actor="tui")
                 message = result.get("message") or result.get("error") or ""
             elif action == "sandbox":

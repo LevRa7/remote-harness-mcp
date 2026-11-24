@@ -28,10 +28,9 @@ class FakeBridge:
             "paused": False,
             "workspace": "/home/user/project",
             "online": True,
-            "pending_approvals": 0,
-            "remote_control": {"enabled": True},
+                    "remote_control": {"enabled": True},
             "sandbox": {"enabled": False, "workspace": None, "container": None},
-            "modes": ["read_only", "approval", "full"],
+            "modes": ["read_only", "full"],
         }
         self.calls = []
         self.claim_calls = []

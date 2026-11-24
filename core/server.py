@@ -42,6 +42,7 @@ returns a light-weight stand-in object exposing the very same attributes.
 from __future__ import annotations
 
 import argparse
+import base64
 import hmac
 import json
 import logging
@@ -86,6 +87,16 @@ except Exception as _vitals_import_error:  # pragma: no cover
 # Shared tool logic.  core.mcp_tools is stdlib-only, so this import always works.
 from core import landing  # noqa: E402
 from core import mcp_tools  # noqa: E402
+
+# Public file shares (core/web_share.py) are optional: a checkout from before the
+# share surface existed still runs every other tool. The standalone server is the
+# public endpoint of a Funnel node, so it must serve those shares itself - the
+# gateway relay that does it for a tunnel node is not in this path at all.
+try:  # pragma: no cover - the module ships with this checkout
+    from core import web_share as _web_share  # noqa: E402
+except Exception as _web_share_import_error:  # pragma: no cover
+    _web_share = None  # type: ignore
+    logger.debug("core.web_share unavailable (%s); public shares are disabled", _web_share_import_error)
 
 
 class _FallbackVitals(object):
@@ -663,6 +674,36 @@ def _env_flag(name: str) -> bool:
     return str(os.environ.get(name, "")).strip().lower() in ("1", "true", "yes", "on")
 
 
+#: Port the standalone server binds. Only used to name a share link when the node
+#: has no public host of its own (a local-only install).
+_STANDALONE_PORT = 8096
+
+
+def _standalone_public_url() -> str:
+    """The address this standalone node is really reached at.
+
+    A Funnel install publishes the node on its own ``<node>.<tailnet>.ts.net``
+    name, and the installer records that name in ``MESH_ALLOWED_HOSTS`` (and,
+    from this version on, in ``MESH_PUBLIC_URL``). An explicit value wins; the
+    allowlist is the next best source. The legacy gateway domain is consulted
+    only after both, because a Funnel node never dials that gateway - a link
+    built from it points at a bridge that has no tunnel to relay through, which
+    is exactly how a published share answered 404.
+    """
+    explicit = (os.environ.get("MESH_PUBLIC_URL")
+                or os.environ.get("AGY_PUBLIC_BASE_URL") or "").strip()
+    if explicit:
+        return explicit
+    # allowed_public_hosts() only returns plain dotted names it validated, so a
+    # malformed or loopback entry can never become a link.
+    for host in sorted(allowed_public_hosts()):
+        return "https://" + host
+    # Deliberately NOT domain.public_base_url(): a standalone node is not behind
+    # that gateway, and its legacy domain file (left by a tunnel-era install) is
+    # how a share link ended up on a bridge with no tunnel into this machine.
+    return "http://localhost:%d" % _STANDALONE_PORT
+
+
 def configure_tools_from_env() -> None:
     """Apply MESH_* environment settings to the shared tool module."""
     mcp_tools.configure(
@@ -671,12 +712,13 @@ def configure_tools_from_env() -> None:
         write_roots=os.environ.get("MESH_WRITE_ROOTS") or None,
         jobs_dir=os.environ.get("MESH_JOBS_DIR") or None,
         max_output_chars=os.environ.get("MESH_MAX_OUTPUT_CHARS"),
-        # Public shares. ``public_url`` is deliberately NOT passed: the public
-        # domain is resolved by core/domain.py (MESH_PUBLIC_URL, domain.env, then
-        # the one default), and pinning it here to the environment variable alone
-        # would bypass the domain file.
+        # Public shares. This process IS the public endpoint (Funnel forwards to
+        # it), so it names its own host instead of the gateway's and publishes
+        # root-shaped links: /<slug>/... has no gateway to route /<node>/<slug>/.
         web_dir=os.environ.get("MESH_WEB_DIR") or None,
         mesh_user=os.environ.get("MESH_USER") or None,
+        public_url=_standalone_public_url(),
+        web_share_direct=True,
         max_share_bytes=os.environ.get("MESH_WEB_MAX_BYTES"),
         max_shares=os.environ.get("MESH_WEB_MAX_SHARES"),
         web_listing=os.environ.get("MESH_WEB_LISTING"),
@@ -724,6 +766,11 @@ def _is_public_hostname(value: str) -> bool:
         return False
     labels = value.split(".")
     if len(labels) < 2:
+        return False
+    # A bare IPv4 literal passes the label check (digits are labels too) but is
+    # not a hostname this allowlist is for: it would become a share link on an
+    # address that no certificate and no Funnel name covers.
+    if not any(ch.isalpha() for ch in value):
         return False
     return all(_HOST_LABEL_RE.match(label) for label in labels)
 
@@ -925,6 +972,56 @@ class StandaloneMCPHandler(BaseHTTPRequestHandler):
             scheme = "http" if name in _LOOPBACK_HOSTS else "https"
         return "%s://%s" % (scheme, host)
 
+    # -- public shares ----------------------------------------------------
+    #: ``/<slug>/<rest>`` - a share published by THIS node. The slug ends in a
+    #: 64-bit secret, so the link itself is the credential: a browser cannot send
+    #: a token to a plain URL, and the gateway relay has the same property.
+    _SHARE_PATH_RE = re.compile(
+        r"^/(?P<slug>[a-z0-9][a-z0-9_-]{0,63}-[0-9a-f]{16})(?P<rest>/.*)?$")
+
+    def _share_target(self) -> Optional[Tuple[str, str]]:
+        """(slug, path) when this request addresses a share, else None."""
+        if _web_share is None:
+            return None
+        match = self._SHARE_PATH_RE.match(self._clean_path())
+        if not match:
+            return None
+        return match.group("slug"), (match.group("rest") or "/")
+
+    def _serve_share(self, slug: str, rest: str, head_only: bool) -> None:
+        result = _web_share.handle_http_request({
+            "slug": slug,
+            "path": rest,
+            "method": "HEAD" if head_only else "GET",
+            "query": urlsplit(self.path).query,
+        })
+        try:
+            status = int(result.get("status") or 502)
+        except (TypeError, ValueError):
+            status = 502
+        headers = {str(k).lower(): str(v) for k, v in (result.get("headers") or {}).items()}
+        body = b""
+        if not head_only:
+            try:
+                body = base64.b64decode(result.get("body_b64") or "")
+            except Exception:
+                status, body = 502, b""
+        self.send_response(status)
+        for key in ("content-type", "content-length", "content-disposition",
+                    "last-modified", "etag", "cache-control", "accept-ranges"):
+            if key in headers:
+                self.send_header(key, headers[key])
+        if "content-length" not in headers:
+            self.send_header("Content-Length", str(len(body)))
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.end_headers()
+        if body:
+            try:
+                self.wfile.write(body)
+            except Exception:
+                pass
+
     def _send_html(self, document: str) -> None:
         body = document.encode("utf-8")
         self._send_headers(200, "text/html; charset=utf-8")
@@ -1090,6 +1187,10 @@ class StandaloneMCPHandler(BaseHTTPRequestHandler):
         if not self._request_allowed():
             self._send_json(403, {"error": "forbidden", "message": "Host or Origin is not loopback"})
             return
+        share = self._share_target()
+        if share is not None:
+            self._serve_share(share[0], share[1], head_only=True)
+            return
         if not self._authorized():
             self._send_unauthorized()
             return
@@ -1109,6 +1210,10 @@ class StandaloneMCPHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 - http.server API
         if not self._request_allowed():
             self._send_json(403, {"error": "forbidden", "message": "Host or Origin is not loopback"})
+            return
+        share = self._share_target()
+        if share is not None:
+            self._serve_share(share[0], share[1], head_only=False)
             return
         if not self._authorized():
             self._send_unauthorized()
@@ -1339,8 +1444,23 @@ def apply_standalone_env(path: Optional[str] = None) -> Dict[str, str]:
     return values
 
 
+class _StandaloneHTTPServer(ThreadingHTTPServer):
+    """Listen socket for the standalone MCP server.
+
+    ``socketserver.TCPServer`` defaults to a backlog of 5. A Funnel node serves
+    MCP requests and public shares from this one socket, and a page that pulls
+    ten assets at once overflowed it - the browser saw connection resets while
+    the node was idle. 128 is the value nginx uses by default.
+    """
+
+    daemon_threads = True
+    request_queue_size = 128
+
+
 def run_standalone_server(host: str = "127.0.0.1", port: int = 8096, token: Optional[str] = None) -> None:
     """Start the blocking standalone MCP HTTP server."""
+    global _STANDALONE_PORT
+    _STANDALONE_PORT = int(port)
     if token is None:
         token = os.environ.get("MESH_TOKEN", "")
     token = ensure_auth_token(token)
@@ -1350,7 +1470,7 @@ def run_standalone_server(host: str = "127.0.0.1", port: int = 8096, token: Opti
     StandaloneMCPHandler.bind_host = host
     StandaloneMCPHandler.bind_port = int(port)
 
-    httpd = ThreadingHTTPServer((host, int(port)), StandaloneMCPHandler)
+    httpd = _StandaloneHTTPServer((host, int(port)), StandaloneMCPHandler)
     httpd.daemon_threads = True
     logger.info(
         "Remote Harness MCP standalone MCP server listening on http://%s:%s/sse (auth: enabled)",

@@ -177,8 +177,6 @@ GATEWAY_ONLY_TOOLS = {"system_change", "system_write"}
 #: system_change / system_write, and the device branch is refused on the node by
 #: MESH_DEVICE / MESH_DEVICE_ACTIONS / MESH_DEVICE_PIM / MESH_READ_ONLY.
 GATEWAY_UNCONFIRMED_TOOLS = {
-    # Node-session only: the gateway never advertises it at all.
-    "approve",
     "bash_exec", "run_job", "write_file", "edit_file", "job_kill",
     "share_file", "serve_dir", "unshare",
     "device_control", "device_capture", "device_messages",
@@ -199,9 +197,7 @@ def test_advertised_tools_match_the_node_exactly(tmp_path, monkeypatch):
 
     assert advertised - node == GATEWAY_ONLY_TOOLS, (
         "unexpected gateway-only tools: %s" % sorted((advertised - node) - GATEWAY_ONLY_TOOLS))
-    # `approve` is a node-session tool: a share holder must not grant the node's
-    # approvals, so the gateway deliberately omits it.
-    assert node - advertised == {"approve"}, (
+    assert node - advertised == set(), (
         "the node has tools the gateway never advertises: %s" % sorted(node - advertised))
 
 

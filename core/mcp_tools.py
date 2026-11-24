@@ -290,7 +290,8 @@ def configure(**kwargs: Any) -> None:
     Recognised keys: ``workspace``, ``read_only``, ``allow_write``,
     ``write_roots``, ``jobs_dir``, ``max_output_chars``, ``public_url``,
     the web-share keys ``web_dir``, ``mesh_user``, ``max_share_bytes``,
-    ``max_shares``, ``web_listing``, and the device-branch keys ``device``
+    ``max_shares``, ``web_listing``, ``web_share_direct``, and the
+    device-branch keys ``device``
     (``auto``/``0``/``1``), ``device_actions``, ``capture_dir``, ``device_pim``
     and ``device_quick``.
 
@@ -372,6 +373,10 @@ def configure(**kwargs: Any) -> None:
                 max_bytes=kwargs.get("max_share_bytes"),
                 max_shares=kwargs.get("max_shares"),
                 listing=kwargs.get("web_listing"),
+                # A standalone/Funnel node is its own public endpoint, so its
+                # links carry no gateway node segment (see web_share._direct_links).
+                # None keeps whatever the previous configure() set.
+                direct=kwargs.get("web_share_direct"),
             )
         except Exception:
             pass
@@ -982,36 +987,6 @@ def _tool_mesh_update(args: Dict[str, Any]) -> Dict[str, Any]:
         return updater.apply_update(force=force,
                                     restart=None if restart is None else _parse_flag(restart))
     return {"error": "unknown action %r: use status, check or apply" % action}
-
-
-def _tool_approve(args: Dict[str, Any]) -> Dict[str, Any]:
-    """Approve or inspect this node's own pending approvals from the chat.
-
-    The operator confirms in the conversation ("yes, take the screenshot"), so the
-    client needs a way to turn that into a grant - otherwise a remote MCP session
-    has no way to approve at all. Never gated itself: it is the gate.
-    """
-    action = str(args.get("action") or "list").strip().lower()
-    if action in ("list", "status"):
-        return {"pending": control.pending_approvals(), "grant": control.grant_status()}
-    if action == "grant":
-        request_id = str(args.get("approval_id") or "").strip()
-        if not request_id:
-            return {"error": "approval_id is required; call action=list to see the pending ids"}
-        payload = control.approve(request_id)
-        if payload is None:
-            return {"error": "no pending request with that id (it may have expired)"}
-        return {"approved": True, "request": payload}
-    if action == "always":
-        try:
-            seconds = int(args.get("seconds") or 0)
-        except (TypeError, ValueError):
-            seconds = 0
-        tool = str(args.get("tool") or "*")
-        return {"grant": control.approve_all(seconds, tool)}
-    if action == "revoke":
-        return {"revoked": control.revoke_grant()}
-    return {"error": "Unknown action: %s" % (action,)}
 
 
 def _tool_node_control(args: Dict[str, Any]) -> Dict[str, Any]:
@@ -3301,13 +3276,11 @@ TOOL_ANNOTATIONS: Dict[str, Dict[str, Any]] = {
     # is not read-only (it changes real behaviour) and not destructive (every
     # switch is set back by the same tool or by `rhm`).
     "node_control": _ANNOTATIONS_LOCAL_WRITE,
-    # Granting an approval changes the node's own switch state: a real local write.
-    "approve": _ANNOTATIONS_LOCAL_WRITE,
     # The persistent objective writes one note in the node's config directory and
     # starts nothing; the client may still ask, so the hint stays honest.
     "goal": _ANNOTATIONS_LOCAL_WRITE,
     # A timer may run a command later, without a client dialog at that moment:
-    # honest local write, and in approval mode creating it needs one approval.
+    # honest local write.
     "schedule": _ANNOTATIONS_LOCAL_WRITE,
     # Stopping a background job is not an install and not a delete, and
     # bash_exec can terminate the same process anyway; a prompt here would only
@@ -3576,38 +3549,11 @@ TOOLS: List[Dict[str, Any]] = [
         }),
     },
     {
-        "name": "approve",
-        "title": "Approve a pending action",
-        "description": (
-            "Confirm or inspect this node's approval requests FROM THE CHAT. When a "
-            "tool answers approval_required, the operator confirms in the conversation "
-            "and you call approve with action=grant and that approval_id; the original "
-            "call can then be retried. action=always stops asking for a tool (or for "
-            "everything with tool=*), action=revoke undoes that, action=list shows what "
-            "is waiting. This tool is never itself gated: it is the gate."
-        ),
-        "inputSchema": _schema(
-            {
-                "action": {"type": "string", "enum": ["list", "grant", "always", "revoke"],
-                           "description": "list: pending requests and the standing grant. "
-                                          "grant: approve one request. always: stop asking. "
-                                          "revoke: drop the standing grant."},
-                "approval_id": {"type": "string",
-                                "description": "grant: the id from the approval_required answer."},
-                "tool": {"type": "string",
-                         "description": "always: limit the grant to one tool (default *)."},
-                "seconds": {"type": "integer",
-                            "description": "always: how long the grant lasts (0 = until revoked)."},
-            },
-            ["action"],
-        ),
-    },
-    {
         "name": "node_control",
         "title": "Node Control (settings)",
         "description": (
-            "Read or change this node's own switches: the access mode (read_only / "
-            "approval / full), pause and resume, the working directory (the `cd` of "
+            "Read or change this node's own switches: the access mode (read_only / full), "
+            "pause and resume, the working directory (the `cd` of "
             "every other tool - follow it with list_dir), the isolated container "
             "(Docker/Podman with only the project mounted) and the remote-control "
             "lock. Use action=status first: it answers the current mode, paused, "
@@ -3621,7 +3567,7 @@ TOOLS: List[Dict[str, Any]] = [
                            "enum": ["status", "mode", "pause", "resume", "cd", "sandbox",
                                     "remote_control"],
                            "description": "What to do (status reports without changing anything)."},
-                "mode": {"type": "string", "enum": ["read_only", "approval", "full"],
+                "mode": {"type": "string", "enum": ["read_only", "full"],
                          "description": "mode: the access mode to apply."},
                 "path": {"type": "string",
                          "description": "cd: the directory that becomes the working directory."},
@@ -3634,8 +3580,8 @@ TOOLS: List[Dict[str, Any]] = [
                                            "settings changes."},
                 "network": {"type": "boolean",
                             "description": "sandbox: allow network access inside the container "
-                                           "(default false; in approval mode this asks the "
-                                           "operator first)."},
+                                           "(default false; a client that asks will do so "
+                                           "before the call)."},
             },
             ["action"],
         ),
@@ -3920,7 +3866,6 @@ _HANDLERS: Dict[str, Callable[[Dict[str, Any]], Any]] = {
     "mesh_status": _tool_mesh_status,
     "mesh_update": _tool_mesh_update,
     "node_control": _tool_node_control,
-    "approve": _tool_approve,
     "goal": _tool_goal,
     "schedule": _tool_schedule,
     "system_info": _tool_system_info,
@@ -3952,17 +3897,6 @@ _HANDLERS: Dict[str, Callable[[Dict[str, Any]], Any]] = {
 }
 
 
-def _approval_summary(name: str, args: Any) -> str:
-    """Short, human-readable request for the console menu (never the token)."""
-    if not isinstance(args, dict):
-        return str(name)
-    for key in ("command", "path", "name", "action"):
-        value = args.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()[:200]
-    return str(name)
-
-
 def _usage_status(result: Any) -> Tuple[str, Optional[str]]:
     """(status, error_code) for the local journal; never includes the error text."""
     if not isinstance(result, dict) or "error" not in result:
@@ -3970,8 +3904,6 @@ def _usage_status(result: Any) -> Tuple[str, Optional[str]]:
     error = str(result.get("error") or "")
     if error.startswith("node_paused"):
         return "denied", "node_paused"
-    if error.startswith("approval_required"):
-        return "denied", "approval_required"
     if error.startswith("remote_control_disabled"):
         return "denied", "remote_control_disabled"
     if error.startswith("MESH_READ_ONLY") or "read-only" in error.lower():
@@ -3998,74 +3930,6 @@ def _dispatch_tool(name: str, args: Any) -> Any:
     return result
 
 
-def _approval_wait_seconds() -> float:
-    """How long one call waits for the operator after being queued.
-
-    The MCP client gives a call roughly 30 s end to end, so the wait is bounded
-    well below that: the point is that an approval continues the SAME call
-    instead of turning it into "waiting, tell the user and stop".
-    """
-    raw = os.environ.get("MESH_APPROVAL_WAIT", "12")
-    try:
-        value = float(raw)
-    except (TypeError, ValueError):
-        value = 12.0
-    if value != value:                                  # NaN
-        value = 12.0
-    return max(0.0, min(20.0, value))
-
-
-def _clamp_timeout_after_wait(name: str, args: Any, waited: float) -> Any:
-    """Keep an approved call inside the client's ~30 s budget.
-
-    After an approval the command may still take its own timeout; if the badge
-    ate 8 s of a 25 s ``bash_exec``, the call would be cut by the gateway before
-    the node answers. Long work belongs in ``run_job`` anyway.
-    """
-    if name != "bash_exec" or not isinstance(args, dict) or waited <= 0:
-        return args
-    try:
-        current = int(args.get("timeout_sec") or 25)
-    except (TypeError, ValueError):
-        current = 25
-    limit = max(5, int(25 - waited))
-    if current <= limit:
-        return args
-    clamped = dict(args)
-    clamped["timeout_sec"] = limit
-    return clamped
-
-
-def _run_after_approval(name: str, args: Any, request: Dict[str, Any],
-                        summary: str) -> Any:
-    """Wait for the operator, then run the SAME call (or report it is pending)."""
-    wait = _approval_wait_seconds()
-    waited = 0.0
-    step = 0.2
-    while wait > 0 and waited < wait:
-        if control.approval_granted(name):
-            result = _dispatch_tool(name, _clamp_timeout_after_wait(name, args, waited))
-            if isinstance(result, dict) and "error" not in result:
-                result.setdefault("approved", True)
-                result.setdefault("approved_after_sec", round(waited, 1))
-            return result
-        time.sleep(step)
-        waited += step
-    if wait > 0 and control.approval_granted(name):
-        return _dispatch_tool(name, args)
-    return {
-        "error": (
-            "approval_required: %s was NOT executed; it is waiting for the operator "
-            "(request %s). Ask in the chat; once they agree, call the `approve` tool "
-            "with action=grant and approval_id=%s, then retry this exact call "
-            "(action=always stops asking, `rhm mode full` works too)."
-            % (summary or name, request.get("id", "?"), request.get("id", "?"))
-        ),
-        "pending_approval": True,
-        "approval_id": request.get("id"),
-    }
-
-
 _SCHEDULE_READ_ACTIONS = frozenset({
     "list", "status", "get", "ack", "done", "acknowledge", "cancel", "delete", "remove",
 })
@@ -4074,9 +3938,9 @@ _SCHEDULE_READ_ACTIONS = frozenset({
 def _is_ungated_read(name: Any, args: Dict[str, Any]) -> bool:
     """Reading or cancelling timers is observation; creating one is not.
 
-    ``schedule(set)`` may run a command later, so it goes through read-only and
-    approval like any other mutation; seeing what is pending or cancelling it
-    must never be blocked by the very gate it exists to describe.
+    ``schedule(set)`` may run a command later, so it is a mutation like any other
+    and read-only mode refuses it; seeing what is pending or cancelling it must
+    never be blocked by the very gate it exists to describe.
     """
     if name != "schedule" or not isinstance(args, dict):
         return False
@@ -4106,22 +3970,9 @@ def call_tool(name: str, args: Any = None) -> Any:
             }
         elif (_read_only_active() and isinstance(name, str)
                 and name not in _READ_ONLY_ALLOWED
-                and name != "approve"
                 and name not in _READ_ONLY_SELF_GUARDED
                 and not _is_ungated_read(name, control_args)):
             result = {"error": READ_ONLY_ERROR}
-        elif (control.access_mode() == "approval" and actor == "mcp"
-                and isinstance(name, str)
-                and name not in _READ_ONLY_ALLOWED
-                and name != "approve"
-                and not _is_ungated_read(name, control_args)
-                and (name != "node_control"
-                     or node_settings.requires_approval(control_args))
-                and not control.approval_granted(name)):
-            summary = (node_settings.summary(control_args) if name == "node_control"
-                       else _approval_summary(name, args))
-            request = control.request_approval(name, summary)
-            result = _run_after_approval(name, args, request, summary)
         else:
             result = _dispatch_tool(name, args)
     except Exception as exc:  # pragma: no cover - defensive

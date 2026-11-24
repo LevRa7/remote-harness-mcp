@@ -664,6 +664,27 @@ function Get-PowerShellExe {
     return 'powershell.exe'
 }
 
+function Get-ActualAutostart {
+    param([bool]$Service)
+    # The installer writes what it really registered. Printing a label because the
+    # checkbox was ticked is how "service (at boot)" appeared next to a node that
+    # had no task at all, while the Funnel answered 502.
+    $dir = if ($Service) { $ServiceConfigDir } else { $ConfigDir }
+    $statePath = Join-Path $dir 'autostart.state.json'
+    if (Test-Path -LiteralPath $statePath) {
+        try {
+            $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+            switch ([string]$state.kind) {
+                'service' { return (Get-UiText -Key 'res_service_task') }
+                'logon' { return ((Join-Path $StartupDir 'rhm-node.vbs') + ' (' + (Get-UiText -Key 'res_autostart_logon') + ')') }
+                'none' { return (Get-UiText -Key 'res_autostart_none') }
+            }
+        } catch { }
+    }
+    if ($Service) { return (Get-UiText -Key 'res_service_task') }
+    return (Join-Path $StartupDir 'rhm-node.vbs')
+}
+
 function New-ConsoleInstallerSteps {
     param([string]$Mode, [string]$Node, [string]$Domain, [string]$Token)
 
@@ -782,7 +803,11 @@ $script:Device = @{ Hostname = ''; Raw = ''; IsLaptop = $false; Os = '' }
 
 $script:Page = 0
 $script:Mode = 'funnel'
-$script:AdminService = $false
+# Autostart at system start is the default: the node is published through Funnel,
+# and a node that comes back only after a logon is the reason a connector answered
+# 502 after a reboot. The switch stays visible (and can be cleared) on the options
+# page; only the SSH variant, which installs on another machine, forces it off.
+$script:AdminService = $true
 $script:Node = ''
 $script:Domain = ''
 $script:Token = ''
@@ -931,10 +956,10 @@ function Build-ModePage {
         $radio.Add_CheckedChanged({
             if ($this.Checked) {
                 $script:Mode = [string]$this.Tag
-                # The service switch belongs to the gateway variants: carrying a
-                # stale TRUE into Funnel would make the URL fallback read the
-                # machine config for a node that runs in the user session.
-                if ($script:Mode -eq 'ssh') { $script:AdminService = $false }
+                # Only the SSH variant cannot use the machine service (it installs on
+                # another host): every local variant gets boot-time autostart unless
+                # the operator clears the switch on the options page.
+                $script:AdminService = ($script:Mode -ne 'ssh')
                 $script:OptionError = ''
             }
         })
@@ -1202,7 +1227,7 @@ function Build-ResultPage {
             # ProgramData and logs to agent.log, the per-user launcher to standalone.log.
             $funnelConfig = if ($script:AdminService) { Join-Path $ServiceConfigDir 'standalone.env' } else { Join-Path $ConfigDir 'standalone.env' }
             $funnelLog = if ($script:AdminService) { Join-Path $ServiceConfigDir 'agent.log' } else { Join-Path $ConfigDir 'standalone.log' }
-            $funnelAutostart = if ($script:AdminService) { Get-UiText -Key 'res_service_task' } else { Join-Path $StartupDir 'rhm-node.vbs' }
+            $funnelAutostart = Get-ActualAutostart -Service ([bool]$script:AdminService)
             $rows = @(
                 @((Get-UiText -Key 'res_config_file'), $funnelConfig),
                 @((Get-UiText -Key 'res_autostart_file'), $funnelAutostart),

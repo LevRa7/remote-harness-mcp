@@ -175,15 +175,26 @@ jobs:
           set -e
           tag="$TAG"
           notes="docs/releases/${tag}.md"
+          # A pre-release (0.7.0-rc1-alpha, 0.8.0-beta.2) must be flagged as one:
+          # without the flag GitHub calls it the latest release and every node on
+          # the stable update channel would install an unfinished build. The
+          # updater treats a pre-release as older than the release it precedes,
+          # and only MESH_UPDATE_CHANNEL=prerelease looks at them at all.
+          case "$tag" in
+            *-*) prerelease="--prerelease" ;;
+            *) prerelease="" ;;
+          esac
           if gh release view "$tag" >/dev/null 2>&1; then
             echo "release $tag already exists; adding assets"
             if [ -f "$notes" ]; then
-              gh release edit "$tag" --notes-file "$notes"
+              gh release edit "$tag" --notes-file "$notes" $prerelease
+            else
+              gh release edit "$tag" $prerelease
             fi
           elif [ -f "$notes" ]; then
-            gh release create "$tag" --title "Remote Harness MCP $tag" --notes-file "$notes"
+            gh release create "$tag" --title "Remote Harness MCP $tag" --notes-file "$notes" $prerelease
           else
-            gh release create "$tag" --title "Remote Harness MCP $tag" --generate-notes
+            gh release create "$tag" --title "Remote Harness MCP $tag" --generate-notes $prerelease
           fi
 
       - name: Attach the assets (node updater reads these)

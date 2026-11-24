@@ -661,7 +661,7 @@ MANDATORY GROUNDING & EXECUTION DIRECTIVES:
    - Never ask the user to run shell commands manually.
 4. Always verify return codes and stdout/stderr before reporting results.
 5. NODE SETTINGS: use `node_control` for the node's own switches —
-   `status`, `mode` (read-only/approval/full), `cd` (the working directory every
+   `status`, `mode` (read-only/full), `cd` (the working directory every
    other tool resolves against), `pause`/`resume` and `sandbox` (isolated
    container). Never edit agent.env, access.mode or workspace.txt by hand, and
    never claim a switch is off-limits without trying `node_control`: a refusal
@@ -670,7 +670,7 @@ MANDATORY GROUNDING & EXECUTION DIRECTIVES:
 6. GOAL: node-wide objectives are disabled in this build; do not record one.
 7. AUTONOMY: an instruction (or an active goal) is the authorization. Do not ask
    "shall I start?" or "continue?" - execute, report, and only stop for a real
-   error, a finished task or an `approval_required` id you must wait for.
+   error, a finished task or an interrupted call.
 8. LONG WORK: never wait inside a call. `run_job` for a long command, or
    `schedule(action=set, ...)` for work that must start later; a fired timer is
    listed in the session instructions as a pending continuation - collect its
@@ -1974,17 +1974,12 @@ async def messages_endpoint(request: Request):
             f"error text instead of guessing that the host is down.\n"
             f"NODE SETTINGS: node_control reads and changes the node's own switches (mode, cd, pause, "
             f"sandbox, remote_control); never edit agent.env or workspace.txt by hand.\n"
-            f"APPROVALS: in approval mode a mutating call waits for the operator and then runs "
-            f"inside the SAME call. If it answers approval_required, the call did NOT run: say "
-            f"you are waiting for the confirmation, do not end the task, and retry the same call "
-            f"after it is approved in rhm (a = once, A = always, or `rhm mode full`).\n"
             f"AUTONOMY (mandatory): when the user has stated the task - in this message or as an "
             f"task - EXECUTE it end to end. Never answer with 'shall I start?', 'run the "
             f"pipeline?', 'continue?' or 'confirm and I will proceed': asking again for "
             f"permission the user already gave is a failed turn. End a turn only when (a) the "
             f"task is complete, (b) a tool returned a concrete error you cannot fix, or (c) a "
-            f"tool answered approval_required - then name the approval id and say you are "
-            f"waiting; the operator confirms in rhm, not in the chat. Batch the work: one script "
+            f"tool returned an error you cannot fix. Batch the work: one script "
             f"written with write_file and started with run_job beats ten small shell calls. If "
             f"bash_exec refuses a command as a system change, call system_change - its client "
             f"dialog IS the confirmation, do not re-ask in the chat.\n"
@@ -2184,7 +2179,7 @@ async def messages_endpoint(request: Request):
                             },
                             "mode": {
                                 "type": "string",
-                                "enum": ["read_only", "approval", "full"],
+                                "enum": ["read_only", "full"],
                                 "description": "mode: the access mode to apply."
                             },
                             "path": {

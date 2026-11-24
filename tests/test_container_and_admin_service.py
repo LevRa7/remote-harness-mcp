@@ -258,8 +258,24 @@ def test_service_variant_strings_are_bilingual():
         for key in ("opt_service_group", "opt_service_label", "opt_service_hint",
                     "opt_service_unavailable", "res_service_task"):
             assert key in document[language], "%s is missing in %s" % (key, language)
-    assert "администратора" in document["ru"]["opt_service_label"]
-    assert "Funnel" in document["ru"]["opt_service_unavailable"]
+    # The switch is now about boot-time autostart, which is its default state.
+    assert "службу" in document["ru"]["opt_service_label"]
+    assert "старт" in document["ru"]["opt_service_label"]
+    assert "администратора" in document["ru"]["opt_service_hint"]
+    assert "SSH" in document["ru"]["opt_service_unavailable"]
+
+
+def test_the_wizard_defaults_to_boot_time_autostart():
+    text = _read(GUI)
+    assert "$script:AdminService = $true" in text
+    assert "$script:AdminService = ($script:Mode -ne 'ssh')" in text
+
+
+def test_the_wizard_shows_the_registered_autostart_not_the_requested_one():
+    text = _read(GUI)
+    assert "function Get-ActualAutostart" in text
+    assert "autostart.state.json" in text
+    assert "Get-ActualAutostart -Service" in text
 
 
 def test_wizard_reads_the_service_configuration_for_its_url_fallback():
