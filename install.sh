@@ -1868,7 +1868,7 @@ start_funnel() {
     if [ "$(id -u)" -ne 0 ]; then cmd=(sudo -n); fi
     cmd+=("$TAILSCALE_BIN" funnel --bg --https=443 "http://127.0.0.1:${PORT}")
     if command -v timeout >/dev/null 2>&1; then
-        timeout 25 "${cmd[@]}" 2>&1
+        timeout 8 "${cmd[@]}" 2>&1
     else
         "${cmd[@]}" 2>&1
     fi
@@ -1891,20 +1891,46 @@ if [ "$MODE" = "standalone" ]; then
     STANDALONE_START=$(date +%s)
     FUNNEL_BLOCKED=false
     # Funnel needs root: Tailscale, its daemon and the funnel config are system
-    # services. Rather than prompting in the middle of the install - a prompt that
-    # can hide behind a redirect and look like a hang at [3/3] - stop here with the
-    # exact command to run. Cached sudo credentials are enough.
-    if [ "$FUNNEL" = true ] && [ "$(id -u)" -ne 0 ] && ! sudo -n true 2>/dev/null; then
-        if [ "$LANG_CHOICE" = "ru" ]; then
-            echo -e "${RED}[!] Для Funnel нужны права администратора.${RESET}" >&2
-            echo -e "    Запустите: ${CYAN}sudo bash install.sh --mode=funnel${RESET}" >&2
-            echo -e "    (Tailscale, его демон и настройка funnel - системные службы.)" >&2
-        else
-            echo -e "${RED}[!] Funnel needs administrator rights.${RESET}" >&2
-            echo -e "    Run: ${CYAN}sudo bash install.sh --mode=funnel${RESET}" >&2
-            echo -e "    (Tailscale, its daemon and the funnel config are system services.)" >&2
+    # services. Ask for the password HERE, explicitly, instead of telling the
+    # operator to restart under sudo - and never let sudo prompt behind a
+    # redirect, which looks like a hang.
+    SUDO_READY=false
+    if [ "$FUNNEL" = true ]; then
+        if [ "$(id -u)" -eq 0 ]; then
+            SUDO_READY=true
+        elif sudo -n true 2>/dev/null; then
+            SUDO_READY=true
+        elif [ -t 0 ]; then
+            if [ "$LANG_CHOICE" = "ru" ]; then
+                echo -e "${YELLOW}[*] Funnel настраивается через системную службу Tailscale - нужен sudo.${RESET}"
+                printf "    Пароль sudo: "
+            else
+                echo -e "${YELLOW}[*] Funnel is configured through the Tailscale daemon - sudo is needed.${RESET}"
+                printf "    sudo password: "
+            fi
+            read -rs SUDO_PASS
+            echo ""
+            if printf "%s\n" "$SUDO_PASS" | sudo -S -v 2>/dev/null; then
+                SUDO_READY=true
+            else
+                if [ "$LANG_CHOICE" = "ru" ]; then
+                    echo -e "${RED}[!] Пароль sudo не подошёл.${RESET}" >&2
+                else
+                    echo -e "${RED}[!] The sudo password was not accepted.${RESET}" >&2
+                fi
+            fi
+            unset SUDO_PASS
         fi
-        exit 1
+        if [ "$SUDO_READY" != true ]; then
+            if [ "$LANG_CHOICE" = "ru" ]; then
+                echo -e "${RED}[!] Без sudo публичную ссылку не создать.${RESET}" >&2
+                echo -e "    Повторите в терминале: ${CYAN}bash install.sh --mode=funnel${RESET} и введите пароль." >&2
+            else
+                echo -e "${RED}[!] Without sudo there is no public URL.${RESET}" >&2
+                echo -e "    Re-run in a terminal: ${CYAN}bash install.sh --mode=funnel${RESET} and type the password." >&2
+            fi
+            exit 1
+        fi
     fi
     if [ "$LANG_CHOICE" = "ru" ]; then
         echo -e "\n${BOLD}${BLUE}=== Настройка локального Standalone FastMCP сервера ===${RESET}"
@@ -2166,23 +2192,36 @@ EOF
             echo -e "  ${YELLOW}Для настройки Funnel нужен sudo / sudo is needed for Funnel${RESET}"
             sudo -v || true
         fi
-        if funnel_output="$(start_funnel 2>&1)"; then
+        funnel_ok=false
+        funnel_attempt=0
+        # Funnel is enabled per tailnet by a human clicking a link. When tailscale
+        # prints that link it also keeps running, so wait for the operator and retry
+        # instead of failing the install on the first try.
+        while [ "$funnel_attempt" -lt 6 ]; do
+            funnel_attempt=$((funnel_attempt + 1))
+            if funnel_output="$(start_funnel 2>&1)"; then
+                funnel_ok=true
+                break
+            fi
+            printf "%s\n" "$funnel_output" | sed "s/^/    /" >&2
+            if printf "%s" "$funnel_output" | grep -qiE "not enabled|to enable"; then
+                if [ "$LANG_CHOICE" = "ru" ]; then
+                    echo -e "  ${YELLOW}Включите Funnel по ссылке выше и нажмите Enter (q - отмена).${RESET}"
+                else
+                    echo -e "  ${YELLOW}Enable Funnel at the link above, then press Enter (q to cancel).${RESET}"
+                fi
+                funnel_answer=""
+                if [ -t 0 ]; then read -r funnel_answer || true; else funnel_answer="q"; fi
+                case "$funnel_answer" in
+                    q|Q) break ;;
+                esac
+                continue
+            fi
+            sleep 3
+        done
+        if [ "$funnel_ok" = true ]; then
             MCP_PUBLIC_URL="https://${FUNNEL_NAME}/sse?token=${TOKEN}"
         else
-            # Print what tailscale said: "no serve config" and "funnel not enabled"
-            # are different problems, and the hint alone cannot tell them apart.
-            if [ -n "$funnel_output" ]; then
-                printf "%s\n" "$funnel_output" | sed "s/^/    /" >&2
-            fi
-            if [ -z "$funnel_output" ]; then
-                if [ "$LANG_CHOICE" = "ru" ]; then
-                    echo -e "  Запустите вручную: ${CYAN}sudo tailscale funnel --bg --https=443 http://127.0.0.1:${PORT}${RESET}" >&2
-                    echo -e "  Если Funnel не включён, эта команда напечатает ссылку для включения." >&2
-                else
-                    echo -e "  Run it by hand: ${CYAN}sudo tailscale funnel --bg --https=443 http://127.0.0.1:${PORT}${RESET}" >&2
-                    echo -e "  If Funnel is not enabled, the command prints the enable link." >&2
-                fi
-            fi
             funnel_acl_hint
         fi
     fi
@@ -2258,6 +2297,9 @@ EOF
             print_mcp_box "ССЫЛКА ЛОКАЛЬНОГО MCP-СЕРВЕРА (СКОПИРУЙТЕ):" "$MCP_LOCAL_URL" "$copy_msg"
         fi
         echo ""
+        if [ -n "$MCP_PUBLIC_URL" ]; then
+            echo -e "  ${GREEN}Откройте эту ссылку в браузере: откроется страница с инструкциями и готовыми адресами.${RESET}"
+        fi
         echo -e "  ${BOLD}Куда вставлять ссылку в Google Gemini:${RESET}"
         echo -e "  1. Откройте в браузере: ${CYAN}https://gemini.google.com/customize/connectors${RESET}"
         echo -e "  2. Нажмите ${BOLD}'Добавить коннектор'${RESET} (Add connector) и задайте имя ${BOLD}'MyDevice'${RESET}"
@@ -2278,6 +2320,9 @@ EOF
             print_mcp_box "LOCAL MCP SERVER URL (COPY THIS):" "$MCP_LOCAL_URL" "$copy_msg"
         fi
         echo ""
+        if [ -n "$MCP_PUBLIC_URL" ]; then
+            echo -e "  ${GREEN}Open this URL in a browser: it renders the page with the instructions and both endpoints.${RESET}"
+        fi
         echo -e "  ${BOLD}Where to paste this URL in Google Gemini:${RESET}"
         echo -e "  1. Open in your browser: ${CYAN}https://gemini.google.com/customize/connectors${RESET}"
         echo -e "  2. Click ${BOLD}'Add connector'${RESET} and name it ${BOLD}'MyDevice'${RESET}"

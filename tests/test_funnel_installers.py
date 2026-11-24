@@ -153,3 +153,24 @@ def test_standalone_does_not_require_a_gateway_domain():
     assert 'if [ -z "$MODE" ] && { [ "$QUICK" = true ] || [ ! -t 0 ]; }' in shell, (
         "a non-interactive run must pick a mode before the gateway checks"
     )
+
+def test_sudo_password_is_requested_explicitly_not_by_restarting_under_sudo():
+    text = _text("install.sh")
+    assert "read -rs SUDO_PASS" in text, "the password must be asked for, visibly"
+    assert "sudo -S -v" in text
+    assert "Run: ${CYAN}sudo bash install.sh" not in text, (
+        "telling the operator to restart under sudo is the behaviour this replaced"
+    )
+
+
+def test_funnel_activation_link_waits_and_retries():
+    text = _text("install.sh")
+    assert "Enable Funnel at the link above" in text
+    assert "funnel_attempt" in text, "the installer must retry after the operator enables Funnel"
+    assert 'timeout 8' in text, "a hanging funnel call must not block the install"
+
+
+def test_windows_installer_refuses_a_foreign_port_owner():
+    text = _text("install.ps1")
+    assert "is held by $portOwner" in text
+    assert "$nodeProc.HasExited" in text

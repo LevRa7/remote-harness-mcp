@@ -1214,6 +1214,17 @@ function Stop-StandaloneNode {
         }
         Start-Sleep -Milliseconds 600
     } catch { }
+    # Anything still listening is not ours (a WSL relay, another server): report it,
+    # because the new node would die on the busy port while /health answers for the
+    # old one and the installer would print a URL nobody serves.
+    try {
+        $left = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
+        foreach ($listener in @($left)) {
+            $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$($listener.OwningProcess)" -ErrorAction SilentlyContinue
+            if ($proc) { return ("{0} (PID {1})" -f $proc.Name, $proc.ProcessId) }
+        }
+    } catch { }
+    return ""
 }
 
 function Wait-StandaloneNode {
@@ -1415,9 +1426,20 @@ if ($Mode -eq "standalone") {
     } else {
         # No --token on purpose: the node reads standalone.env itself, so the secret
         # stays out of the process list and out of the scheduled task.
-        Stop-StandaloneNode -Port $Port
-        Start-Process $pyExeOnly -ArgumentList "-u -m core.server --host 127.0.0.1 --port=$Port" -WorkingDirectory $ScriptDir -WindowStyle Hidden
+        $portOwner = Stop-StandaloneNode -Port $Port
+        if ($portOwner) {
+            if ($Lang -eq "ru") {
+                Write-Host "[!] Порт $Port занят процессом $portOwner - узел не сможет его занять." -ForegroundColor Red
+                Write-Host "    Остановите этот процесс и повторите установку." -ForegroundColor Yellow
+            } else {
+                Write-Host "[!] Port $Port is held by $portOwner - the node cannot bind it." -ForegroundColor Red
+                Write-Host "    Stop that process and re-run the installer." -ForegroundColor Yellow
+            }
+            exit 1
+        }
+        $nodeProc = Start-Process $pyExeOnly -ArgumentList "-u -m core.server --host 127.0.0.1 --port=$Port" -WorkingDirectory $ScriptDir -WindowStyle Hidden -PassThru
         $nodeUp = Wait-StandaloneNode -Port $Port
+        if ($nodeProc -and $nodeProc.HasExited) { $nodeUp = $false }
         # The Startup entry is the reliable one: it needs no elevation. A scheduled
         # task is only a bonus (restart on failure) and is attempted afterwards.
         $nodeTaskOk = Register-StandaloneStartup -Python $pyExeOnly -Port $Port -WorkingDirectory $ScriptDir
