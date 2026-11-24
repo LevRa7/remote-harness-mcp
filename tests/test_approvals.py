@@ -167,3 +167,21 @@ def test_a_bash_timeout_is_shortened_by_the_approval_wait():
 def test_a_bash_timeout_is_never_shortened_below_five_seconds():
     clamped = mcp_tools._clamp_timeout_after_wait("bash_exec", {"timeout_sec": 25}, 30.0)
     assert clamped["timeout_sec"] == 5
+
+
+def test_the_chat_can_grant_an_approval_through_the_tool():
+    request = control.request_approval('bash_exec', 'echo hi')
+    listed = mcp_tools._tool_approve({'action': 'list'})
+    assert any(item['id'] == request['id'] for item in listed['pending'])
+    granted = mcp_tools._tool_approve({'action': 'grant', 'approval_id': request['id']})
+    assert granted.get('approved') is True
+    assert control.approval_granted('bash_exec') is True
+    # The request is consumed: a second grant has nothing left to approve.
+    assert 'error' in mcp_tools._tool_approve({'action': 'grant', 'approval_id': request['id']})
+
+
+def test_approve_always_and_revoke_round_trip():
+    assert mcp_tools._tool_approve({'action': 'always', 'tool': 'bash_exec'}).get('grant')
+    assert control.approval_granted('bash_exec') is True
+    assert mcp_tools._tool_approve({'action': 'revoke'}).get('revoked') is True
+    assert control.approval_granted('bash_exec') is False

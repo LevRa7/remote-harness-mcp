@@ -1798,6 +1798,30 @@ tailscaled_running() {
 # nothing useful - the installer would wait five minutes for a login that cannot
 # happen. Fall back to running tailscaled ourselves, userspace networking when the
 # kernel gives us no TUN device.
+# The npm package ships a `rhm` bin; a shell install has to place the same command
+# in the user PATH, or the menu is unreachable after install.
+install_rhm_launcher() {
+    local bindir="$HOME/.local/bin"
+    mkdir -p "$bindir" 2>/dev/null || return 0
+    printf '#!/bin/sh\nexec "%s" -m core.menu "$@"\n' "$PYTHON_BIN" > "$bindir/rhm" 2>/dev/null || return 0
+    chmod 755 "$bindir/rhm" 2>/dev/null || true
+    case ":$PATH:" in
+        *":$bindir:"*) : ;;
+        *)
+            if [ "$LANG_CHOICE" = "ru" ]; then
+                echo -e "  ${YELLOW}Добавьте в PATH: export PATH=\"$bindir:\$PATH\" (пропишите в ~/.bashrc)${RESET}"
+            else
+                echo -e "  ${YELLOW}Add to PATH: export PATH=\"$bindir:\$PATH\" (put it in ~/.bashrc)${RESET}"
+            fi
+            ;;
+    esac
+    if [ "$LANG_CHOICE" = "ru" ]; then
+        echo -e "  ${GREEN}Команда меню: rhm${RESET}"
+    else
+        echo -e "  ${GREEN}Menu command: rhm${RESET}"
+    fi
+}
+
 start_tailscaled() {
     tailscaled_running && return 0
     if command -v systemctl >/dev/null 2>&1; then
@@ -1940,6 +1964,7 @@ if [ "$MODE" = "standalone" ]; then
         echo "[1/3] Checking Python environment..."
     fi
     ensure_dependencies
+    install_rhm_launcher
     # The endpoint check at the end of this branch runs through curl.
     ensure_curl || exit 1
     mkdir -p "$CONFIG_DIR"

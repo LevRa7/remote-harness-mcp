@@ -177,6 +177,8 @@ GATEWAY_ONLY_TOOLS = {"system_change", "system_write"}
 #: system_change / system_write, and the device branch is refused on the node by
 #: MESH_DEVICE / MESH_DEVICE_ACTIONS / MESH_DEVICE_PIM / MESH_READ_ONLY.
 GATEWAY_UNCONFIRMED_TOOLS = {
+    # Node-session only: the gateway never advertises it at all.
+    "approve",
     "bash_exec", "run_job", "write_file", "edit_file", "job_kill",
     "share_file", "serve_dir", "unshare",
     "device_control", "device_capture", "device_messages",
@@ -197,7 +199,9 @@ def test_advertised_tools_match_the_node_exactly(tmp_path, monkeypatch):
 
     assert advertised - node == GATEWAY_ONLY_TOOLS, (
         "unexpected gateway-only tools: %s" % sorted((advertised - node) - GATEWAY_ONLY_TOOLS))
-    assert node - advertised == set(), (
+    # `approve` is a node-session tool: a share holder must not grant the node's
+    # approvals, so the gateway deliberately omits it.
+    assert node - advertised == {"approve"}, (
         "the node has tools the gateway never advertises: %s" % sorted(node - advertised))
 
 
@@ -232,6 +236,9 @@ def test_advertised_confirmation_hints_match_the_node(tmp_path, monkeypatch):
 
     # The gateway's own exceptions still have to be exactly what the policy says.
     for name in GATEWAY_UNCONFIRMED_TOOLS:
+        if name not in advertised:
+            # Node-session only (approve): the gateway never advertises it.
+            continue
         assert advertised[name]["readOnlyHint"] is True, name
         assert advertised[name]["destructiveHint"] is False, name
     for name in ("bash_exec", "write_file", "edit_file"):

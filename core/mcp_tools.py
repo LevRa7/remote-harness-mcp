@@ -984,6 +984,36 @@ def _tool_mesh_update(args: Dict[str, Any]) -> Dict[str, Any]:
     return {"error": "unknown action %r: use status, check or apply" % action}
 
 
+def _tool_approve(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Approve or inspect this node's own pending approvals from the chat.
+
+    The operator confirms in the conversation ("yes, take the screenshot"), so the
+    client needs a way to turn that into a grant - otherwise a remote MCP session
+    has no way to approve at all. Never gated itself: it is the gate.
+    """
+    action = str(args.get("action") or "list").strip().lower()
+    if action in ("list", "status"):
+        return {"pending": control.pending_approvals(), "grant": control.grant_status()}
+    if action == "grant":
+        request_id = str(args.get("approval_id") or "").strip()
+        if not request_id:
+            return {"error": "approval_id is required; call action=list to see the pending ids"}
+        payload = control.approve(request_id)
+        if payload is None:
+            return {"error": "no pending request with that id (it may have expired)"}
+        return {"approved": True, "request": payload}
+    if action == "always":
+        try:
+            seconds = int(args.get("seconds") or 0)
+        except (TypeError, ValueError):
+            seconds = 0
+        tool = str(args.get("tool") or "*")
+        return {"grant": control.approve_all(seconds, tool)}
+    if action == "revoke":
+        return {"revoked": control.revoke_grant()}
+    return {"error": "Unknown action: %s" % (action,)}
+
+
 def _tool_node_control(args: Dict[str, Any]) -> Dict[str, Any]:
     """Read or change this node's own switches (the remote-control surface).
 
@@ -3271,6 +3301,8 @@ TOOL_ANNOTATIONS: Dict[str, Dict[str, Any]] = {
     # is not read-only (it changes real behaviour) and not destructive (every
     # switch is set back by the same tool or by `rhm`).
     "node_control": _ANNOTATIONS_LOCAL_WRITE,
+    # Granting an approval changes the node's own switch state: a real local write.
+    "approve": _ANNOTATIONS_LOCAL_WRITE,
     # The persistent objective writes one note in the node's config directory and
     # starts nothing; the client may still ask, so the hint stays honest.
     "goal": _ANNOTATIONS_LOCAL_WRITE,
@@ -3542,6 +3574,33 @@ TOOLS: List[Dict[str, Any]] = [
             "restart": {"type": "boolean",
                         "description": "apply: restart the node afterwards (default true)."},
         }),
+    },
+    {
+        "name": "approve",
+        "title": "Approve a pending action",
+        "description": (
+            "Confirm or inspect this node's approval requests FROM THE CHAT. When a "
+            "tool answers approval_required, the operator confirms in the conversation "
+            "and you call approve with action=grant and that approval_id; the original "
+            "call can then be retried. action=always stops asking for a tool (or for "
+            "everything with tool=*), action=revoke undoes that, action=list shows what "
+            "is waiting. This tool is never itself gated: it is the gate."
+        ),
+        "inputSchema": _schema(
+            {
+                "action": {"type": "string", "enum": ["list", "grant", "always", "revoke"],
+                           "description": "list: pending requests and the standing grant. "
+                                          "grant: approve one request. always: stop asking. "
+                                          "revoke: drop the standing grant."},
+                "approval_id": {"type": "string",
+                                "description": "grant: the id from the approval_required answer."},
+                "tool": {"type": "string",
+                         "description": "always: limit the grant to one tool (default *)."},
+                "seconds": {"type": "integer",
+                            "description": "always: how long the grant lasts (0 = until revoked)."},
+            },
+            ["action"],
+        ),
     },
     {
         "name": "node_control",
@@ -3861,6 +3920,7 @@ _HANDLERS: Dict[str, Callable[[Dict[str, Any]], Any]] = {
     "mesh_status": _tool_mesh_status,
     "mesh_update": _tool_mesh_update,
     "node_control": _tool_node_control,
+    "approve": _tool_approve,
     "goal": _tool_goal,
     "schedule": _tool_schedule,
     "system_info": _tool_system_info,
@@ -3996,10 +4056,10 @@ def _run_after_approval(name: str, args: Any, request: Dict[str, Any],
     return {
         "error": (
             "approval_required: %s was NOT executed; it is waiting for the operator "
-            "(request %s). Do not end the task: say you are waiting for the "
-            "confirmation and retry this exact call once it is approved in rhm "
-            "(a = once, A = always, or `rhm mode full`)."
-            % (summary or name, request.get("id", "?"))
+            "(request %s). Ask in the chat; once they agree, call the `approve` tool "
+            "with action=grant and approval_id=%s, then retry this exact call "
+            "(action=always stops asking, `rhm mode full` works too)."
+            % (summary or name, request.get("id", "?"), request.get("id", "?"))
         ),
         "pending_approval": True,
         "approval_id": request.get("id"),
@@ -4046,12 +4106,14 @@ def call_tool(name: str, args: Any = None) -> Any:
             }
         elif (_read_only_active() and isinstance(name, str)
                 and name not in _READ_ONLY_ALLOWED
+                and name != "approve"
                 and name not in _READ_ONLY_SELF_GUARDED
                 and not _is_ungated_read(name, control_args)):
             result = {"error": READ_ONLY_ERROR}
         elif (control.access_mode() == "approval" and actor == "mcp"
                 and isinstance(name, str)
                 and name not in _READ_ONLY_ALLOWED
+                and name != "approve"
                 and not _is_ungated_read(name, control_args)
                 and (name != "node_control"
                      or node_settings.requires_approval(control_args))

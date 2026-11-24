@@ -88,6 +88,9 @@ def test_tools_surface_contains_all_tools():
         # The node's own switches (access mode, workspace, isolation, pause and
         # the remote-control lock). Sits next to self-update: both change the
         # node itself rather than the files on it.
+        # Chat-side approvals: the operator confirms in the conversation, so the
+        # client needs a way to turn that into a grant.
+        "approve",
         "node_control",
         # The persistent objective is opt-in (MESH_GOAL=1): one node-wide note
         # would leak between chats, so it is absent from tools/list by default.
