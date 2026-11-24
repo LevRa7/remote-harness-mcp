@@ -545,6 +545,8 @@ it.
 
 The first screen runs `install.ps1 -DryRun` and reports what it found — Python, `websockets`, the resolved gateway domain, the config directory, the autostart path — without changing anything. Before starting, the window shows the exact command it will run; during the run it streams the installer output; at the end it shows the MCP link with a copy button, the three-step Gemini instructions and the paths it created.
 
+**Where and what gets installed.** After the variant, the wizard asks for the folder: a switch between the ready drives with their free space, a path box and a *Browse...* button — any writable folder works, for example `D:\RemoteHarnessMCP`. The next screen carries three switches: autostart (a machine service at boot with the UAC prompt, a per-user entry at sign-in without admin rights, or no autostart at all), adding the `rhm` command to the user `PATH`, and Start menu plus Desktop shortcuts. They are the console installer's own switches: `-InstallDir`, `-Autostart`, `-AddToPath`, `-Shortcuts`.
+
 Full details, screenshots and the SSH notes: [docs/GUI_INSTALLER.md](docs/GUI_INSTALLER.md).
 
 ### What a Windows installation creates
@@ -555,6 +557,7 @@ Full details, screenshots and the SSH notes: [docs/GUI_INSTALLER.md](docs/GUI_IN
 | `%USERPROFILE%\.config\remote-harness-mcp\domain.env` | `MESH_PUBLIC_URL` — the resolved shared domain, so the node's share links, its tunnel and the gateway name the same host (not written when the built-in default is all that is configured) |
 | `…\Start Menu\Programs\Startup\rhm-agent.vbs` | autostart entry, so the node comes back after a reboot |
 | `%USERPROFILE%\.config\remote-harness-mcp\agent.log` | agent output, for when a silent autostart fails |
+| `%LOCALAPPDATA%\Programs\RemoteHarnessMCP\bin\rhm.cmd` | the `rhm` command; `rhm.env` beside it names the payload (written with or without `-AddToPath`) |
 
 ### Language
 

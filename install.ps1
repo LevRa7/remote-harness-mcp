@@ -15,7 +15,21 @@ param(
     # Publish the standalone node through Tailscale Funnel: a public HTTPS
     # hostname on the tailnet, no server, no domain, no open port.
     [switch]$Funnel,
-    # Install the MCP service with administrator rights: a machine-wide scheduled
+    # Where the node's own files live. Empty keeps the payload where the installer
+    # found it; anything else copies this tree there first and continues from the
+    # copy, so the shim, the service task and the startup entry name one directory.
+    [string]$InstallDir = "",
+    # Which autostart the run may create: 'auto' is the historical behaviour of the
+    # chosen mode (the machine service with -AdminService, a per-user logon entry
+    # otherwise), 'service' is the elevated machine task, 'logon' is the per-user
+    # Startup entry, 'none' starts the node once and registers nothing.
+    [ValidateSet('auto', 'service', 'logon', 'none')]
+    [string]$Autostart = "auto",
+    # Add the directory that holds rhm.cmd to the per-user PATH. On by default: an
+    # earlier installer did it silently, and 'rhm' only works from a PATH entry.
+    [bool]$AddToPath = $true,
+    # Start Menu and Desktop shortcuts for the console menu.
+    [switch]$Shortcuts,    # Install the MCP service with administrator rights: a machine-wide scheduled
     # task that starts at boot, runs as SYSTEM and is allowed the highest
     # privileges. The default install stays per-user and elevation-free; this is
     # the opt-in variant that gives tool calls administrator rights.
@@ -43,6 +57,15 @@ if ($Mode -eq "funnel") {
     $Funnel = $true
     $Mode = "standalone"
 }
+
+# What -Autostart may create. 'service' is the elevated machine task and implies
+# -AdminService (which also moves the configuration to ProgramData); 'logon' and
+# 'none' never ask for elevation; 'auto' keeps the historical behaviour of the
+# chosen mode. Only a standalone/Funnel install has this choice to make - the
+# tunnel agent always autostarts through the tasks it registers itself.
+$AutostartNone = ($Autostart -eq 'none')
+if ($Autostart -eq 'service') { $AdminService = $true }
+elseif ($Autostart -eq 'logon' -or $Autostart -eq 'none') { $AdminService = $false }
 
 # Ensure UTF-8 output encoding in PowerShell console
 try {
@@ -847,6 +870,74 @@ function Remove-PerUserNodeAutostart {
     return ($removed -join ", ")
 }
 
+function Copy-NodePayload {
+    param([string]$Source, [string]$Target)
+    # The payload is a self-contained folder, so 'install somewhere else' is one
+    # tree copy. Two directories must never travel: __pycache__ is byte code for
+    # the interpreter that produced it, and .git belongs to a checkout, not to an
+    # installation. Returns an empty string on success, the reason otherwise.
+    try {
+        New-Item -ItemType Directory -Force -Path $Target -ErrorAction Stop | Out-Null
+    } catch { return ("cannot create the folder: " + $_.Exception.Message) }
+    $robocopy = Join-Path $env:SystemRoot "System32\robocopy.exe"
+    if (Test-Path -LiteralPath $robocopy) {
+        & $robocopy $Source $Target /E /NFL /NDL /NJH /NJS /NP /XD __pycache__ .git | Out-Null
+        # robocopy: below 8 is success, 8 and above is a real failure.
+        if ($LASTEXITCODE -lt 8) { return "" }
+    }
+    # A second, plainer path: Copy-Item creates every missing directory itself.
+    try {
+        Copy-Item -Path (Join-Path $Source '*') -Destination $Target -Recurse -Force -ErrorAction Stop
+        return ""
+    } catch { return $_.Exception.Message }
+}
+
+function Install-RhmShortcuts {
+    param([string]$BinDir, [string]$PayloadDir, [string]$Language)
+    # Start Menu and Desktop shortcuts. An operator who installed from a wizard
+    # expects to find the console where every other program puts it; the shim in
+    # %LOCALAPPDATA%\Programs is not a place anybody browses to.
+    $launcher = Join-Path $BinDir "rhm.cmd"
+    if (-not (Test-Path -LiteralPath $launcher)) { return $false }
+    $shell = $null
+    try { $shell = New-Object -ComObject WScript.Shell } catch { return $false }
+    $cmd = Join-Path $env:SystemRoot "System32\cmd.exe"
+    $targets = @()
+    $programs = [Environment]::GetFolderPath("Programs")
+    if ($programs) {
+        $folder = Join-Path $programs "Remote Harness MCP"
+        try {
+            if (-not (Test-Path -LiteralPath $folder)) { New-Item -ItemType Directory -Force -Path $folder | Out-Null }
+            $targets += (Join-Path $folder "rhm (node menu).lnk")
+        } catch { }
+    }
+    $desktop = [Environment]::GetFolderPath("Desktop")
+    if ($desktop) { $targets += (Join-Path $desktop "Remote Harness MCP.lnk") }
+    $made = 0
+    foreach ($path in $targets) {
+        try {
+            $link = $shell.CreateShortcut($path)
+            # Through cmd.exe /k: a .cmd started from a shortcut opens a window that
+            # vanishes the moment the menu fails, and the error goes with it.
+            $link.TargetPath = $cmd
+            $link.Arguments = '/k "' + $launcher + '"'
+            $link.WorkingDirectory = $PayloadDir
+            $link.Description = "Remote Harness MCP - the node console (rhm)"
+            $link.IconLocation = "$cmd,0"
+            $link.Save()
+            $made++
+        } catch { }
+    }
+    if ($Language -eq "ru") {
+        if ($made -gt 0) { Write-Host "[OK] Ярлыки: меню Пуск и рабочий стол ($made)." -ForegroundColor Green }
+        else { Write-Host "[!] Ярлыки создать не удалось." -ForegroundColor Yellow }
+    } else {
+        if ($made -gt 0) { Write-Host "[OK] Shortcuts: Start menu and desktop ($made)." -ForegroundColor Green }
+        else { Write-Host "[!] The shortcuts could not be created." -ForegroundColor Yellow }
+    }
+    return ($made -gt 0)
+}
+
 function Install-RhmCommand {
     param([string]$Python, [string]$PayloadDir, [string]$Language)
     # The npm package ships a 'rhm' bin; a PowerShell install has to place the same
@@ -894,6 +985,7 @@ function Install-RhmCommand {
         [System.IO.File]::WriteAllLines($envFile, [string[]]$envLines, (New-Object System.Text.UTF8Encoding($false)))
         [System.IO.File]::WriteAllLines($launcher, [string[]]$lines, (New-Object System.Text.UTF8Encoding($false)))
     } catch { return $false }
+    if ($AddToPath) {
     $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
     $parts = @()
     if ($userPath) { $parts = @($userPath -split ';' | Where-Object { $_ -and $_.Trim() }) }
@@ -913,6 +1005,18 @@ function Install-RhmCommand {
             $result = [UIntPtr]::Zero
             $null = $win32::SendMessageTimeout([IntPtr]0xffff, 0x001A, [UIntPtr]::Zero, "Environment", 2, 5000, [ref]$result)
         } catch { }
+    }
+    } else {
+        if ($Language -eq "ru") {
+            Write-Host "[i] PATH не изменён: чтобы работала команда rhm, добавьте" -ForegroundColor DarkGray
+            Write-Host "    $binDir в переменную Path пользователя." -ForegroundColor DarkGray
+        } else {
+            Write-Host "[i] PATH was left alone: to use the rhm command, add" -ForegroundColor DarkGray
+            Write-Host "    $binDir to the user Path variable." -ForegroundColor DarkGray
+        }
+    }
+    if ($Shortcuts) {
+        $null = Install-RhmShortcuts -BinDir $binDir -PayloadDir $PayloadDir -Language $Language
     }
     if ($Language -eq "ru") {
         Write-Host "[OK] Команда rhm: $launcher" -ForegroundColor Green
@@ -1181,6 +1285,45 @@ if (-not $ScriptDir -or -not (Test-Path "$ScriptDir\core\agent.py")) {
         }
     }
     $ScriptDir = $BootstrapDir
+}
+
+# -InstallDir: copy this payload where the operator asked for it, then continue
+# from the copy. Everything below - the shim's rhm.env, the machine task's payload
+# directory, the startup entry's working directory, the updater - reads $ScriptDir,
+# so this one variable decides where the node really lives. The elevation child is
+# started from $ScriptPath for the same reason: $PSCommandPath still names the
+# directory the wizard unpacked into.
+$ScriptPath = if ($PSCommandPath) { $PSCommandPath } else { "" }
+# -DryRun reports and changes nothing, so it must not copy a payload into a folder
+# nobody approved yet.
+if ($InstallDir -and $ScriptDir -and -not $DryRun) {
+    $targetDir = [System.IO.Path]::GetFullPath($InstallDir)
+    $currentDir = [System.IO.Path]::GetFullPath($ScriptDir)
+    if ($targetDir.TrimEnd("\") -ne $currentDir.TrimEnd("\")) {
+        $badTarget = ""
+        if ($targetDir.TrimEnd("\").Length -le 2) { $badTarget = "drive root" }
+        elseif ($env:SystemRoot -and $targetDir.StartsWith($env:SystemRoot, [System.StringComparison]::OrdinalIgnoreCase)) { $badTarget = "system directory" }
+        if ($badTarget) {
+            if ($Lang -eq "ru") {
+                Write-Host "[!] Этот каталог использовать нельзя ($badTarget): $targetDir" -ForegroundColor Red
+                Write-Host "    Выберите папку на диске, например D:\RemoteHarnessMCP." -ForegroundColor Yellow
+            } else {
+                Write-Host "[!] That directory cannot hold the node ($badTarget): $targetDir" -ForegroundColor Red
+                Write-Host "    Pick a folder on a drive, for example D:\RemoteHarnessMCP." -ForegroundColor Yellow
+            }
+            exit 1
+        }
+        if ($Lang -eq "ru") { Write-Host "=== Установка в каталог $targetDir ===" -ForegroundColor Blue }
+        else { Write-Host "=== Installing into $targetDir ===" -ForegroundColor Blue }
+        $copyError = Copy-NodePayload -Source $currentDir -Target $targetDir
+        if ($copyError) {
+            if ($Lang -eq "ru") { Write-Host "[!] Не удалось скопировать узел в $targetDir : $copyError" -ForegroundColor Red }
+            else { Write-Host "[!] Could not copy the node to $targetDir : $copyError" -ForegroundColor Red }
+            exit 1
+        }
+        $ScriptDir = $targetDir
+        $ScriptPath = Join-Path $targetDir "install.ps1"
+    }
 }
 
 function Print-McpBox($Title, $Url, $CopiedText, $BorderColor = "Green") {
@@ -1588,7 +1731,7 @@ if ($Mode -eq "standalone") {
         $serviceOk = $false
         if (Test-ElevatedSession) {
             $serviceOk = Register-McpServiceTask -ConfigDirPath $ConfigDir -PayloadDir $ScriptDir -Language $Lang
-        } elseif (-not $PSCommandPath) {
+        } elseif (-not $ScriptPath) {
             if ($Lang -eq "ru") {
                 Write-Host "[!] Службу нельзя зарегистрировать из 'irm | iex': нужен файл install.ps1." -ForegroundColor Red
             } else {
@@ -1601,7 +1744,7 @@ if ($Mode -eq "standalone") {
             } else {
                 Write-Host "[*] The node is configured. Registering the service needs administrator rights - asking for elevation now..." -ForegroundColor Yellow
             }
-            $childArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $PSCommandPath + '"'),
+            $childArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $ScriptPath + '"'),
                 '-AdminService', '-Elevated', '-ServiceOnly', '-Lang', $Lang)
             try {
                 $child = Start-Process -FilePath 'powershell.exe' -Verb RunAs -Wait -PassThru -ArgumentList $childArgs -ErrorAction Stop
@@ -1668,6 +1811,20 @@ if ($Mode -eq "standalone") {
                 $Port = $chosenPort
             }
         }
+        if ($AutostartNone) {
+            # "No autostart" must mean exactly that: the node runs for this session
+            # and nothing is registered - and an entry an earlier install left is
+            # removed, because a checkbox that only hides a startup entry leaves the
+            # node coming back after the next logon.
+            $autostartKind = "none"
+            try {
+                $staleVbs = Join-Path ([Environment]::GetFolderPath("Startup")) "rhm-node.vbs"
+                if (Test-Path -LiteralPath $staleVbs) { Remove-Item -LiteralPath $staleVbs -Force }
+            } catch { }
+            $null = Start-Process $pyExeOnly -ArgumentList "-u -m core.server --host 127.0.0.1 --port=$Port" -WorkingDirectory $ScriptDir -WindowStyle Hidden -PassThru
+            $nodeTaskOk = $true
+            $nodeUp = Wait-StandaloneNode -Port $Port
+        } else {
         # The Startup entry is the only autostart a normal account can install:
         # creating a Scheduled Task answers "Access is denied" without elevation.
         # It is written BEFORE the node starts, and the node is started through it,
@@ -1684,6 +1841,7 @@ if ($Mode -eq "standalone") {
         if (-not $nodeTaskOk) {
             # No autostart at all: at least leave a working node for this session.
             $null = Start-Process $pyExeOnly -ArgumentList "-u -m core.server --host 127.0.0.1 --port=$Port" -WorkingDirectory $ScriptDir -WindowStyle Hidden -PassThru
+        }
         }
         $nodeUp = Wait-StandaloneNode -Port $Port
     }
@@ -2011,7 +2169,7 @@ if ($AdminService) {
         # -Gateway travels with the child: it exits at -ServiceOnly, but only
         # after the domain gate, which the child would otherwise fail on an
         # empty ProgramData configuration.
-        $childArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $PSCommandPath + '"'),
+        $childArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $ScriptPath + '"'),
             '-AdminService', '-Elevated', '-ServiceOnly', '-Lang', $Lang)
         if ($Gateway) { $childArgs += @('-Gateway', ('"' + $Gateway + '"')) }
         try {

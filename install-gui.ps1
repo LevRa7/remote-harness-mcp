@@ -710,6 +710,19 @@ function New-ConsoleInstallerSteps {
     if ($script:AdminService -and ($Mode -eq 'quick' -or $Mode -eq 'custom' -or $Mode -eq 'funnel')) {
         $argList += '-AdminService'
     }
+    if ($Mode -ne 'ssh') {
+        # Where the copy lives and what gets registered: the switches the options
+        # page asks for. -Autostart folds the service checkbox and the autostart
+        # checkbox into one value install.ps1 understands.
+        if ($script:InstallDir) { $argList += @('-InstallDir', (Quote-Arg $script:InstallDir)) }
+        $autostartChoice = 'none'
+        if ($script:AutostartEnabled) {
+            if ($script:AdminService) { $autostartChoice = 'service' } else { $autostartChoice = 'logon' }
+        }
+        $argList += @('-Autostart', $autostartChoice)
+        if ($script:AddToPath) { $argList += '-AddToPath:$true' } else { $argList += '-AddToPath:$false' }
+        if ($script:Shortcuts) { $argList += '-Shortcuts' }
+    }
     return @(New-PipelineStep -File (Get-PowerShellExe) -Arguments ($argList -join ' ') `
         -Label (Get-UiText -Key 'prog_running'))
 }
@@ -808,6 +821,16 @@ $script:Mode = 'funnel'
 # 502 after a reboot. The switch stays visible (and can be cleared) on the options
 # page; only the SSH variant, which installs on another machine, forces it off.
 $script:AdminService = $true
+# Where the node's files are copied to, plus the three switches the options page
+# asks for. $ScriptDir is where the setup executable unpacked the payload - a
+# versioned scratch directory, so it is only the starting point, not the target.
+$script:InstallDir = $ScriptDir
+$script:AutostartEnabled = $true
+$script:AddToPath = $true
+$script:Shortcuts = $true
+$script:OrigPayloadDir = $ScriptDir
+$script:PathBox = $null
+$script:FreeLabel = $null
 $script:Node = ''
 $script:Domain = ''
 $script:Token = ''
@@ -817,6 +840,40 @@ $script:SshPort = 22
 $script:Preflight = @{ Running = $false; Done = $false; Text = ''; Facts = $null; Problems = $false; Parsed = $false }
 $script:Install = @{ Running = $false; Failed = $false; Exit = 0; Output = ''; Url = ''; Notice = ''; LinkNotice = '' }
 $script:OptionError = ''
+
+# Drives offered on the location page: the fixed and removable ones that are
+# ready. A network share is deliberately absent - it is a path, and the folder
+# box is where a path is typed.
+function Get-InstallDrives {
+    $drives = @()
+    try {
+        foreach ($drive in [System.IO.DriveInfo]::GetDrives()) {
+            if (-not $drive.IsReady) { continue }
+            if ($drive.DriveType -ne [System.IO.DriveType]::Fixed -and $drive.DriveType -ne [System.IO.DriveType]::Removable) { continue }
+            $root = $drive.Name.TrimEnd('\')
+            $freeGb = [string][math]::Round($drive.AvailableFreeSpace / 1GB, 1)
+            $label = $root + '  ' + $drive.VolumeLabel
+            while ($label.Length -lt 24) { $label = $label + ' ' }
+            $label = $label + '(' + $freeGb + ' GB free)'
+            $drives += @{ Root = $root; Label = $label; Free = $drive.AvailableFreeSpace }
+        }
+    } catch { }
+    return $drives
+}
+
+# '<drive> (N.N GB)' for the label under the folder box; empty for a UNC path or
+# a drive that is not ready.
+function Get-FreeSpaceLabel {
+    param([string]$Path)
+    if (-not $Path) { return '' }
+    try {
+        $root = [System.IO.Path]::GetPathRoot([System.IO.Path]::GetFullPath($Path))
+        if (-not $root -or $root.Length -lt 2) { return '' }
+        $drive = New-Object System.IO.DriveInfo($root)
+        if (-not $drive.IsReady) { return '' }
+        return (Format-UiText -Key 'loc_free' -Values @($drive.Name.TrimEnd('\'), [math]::Round($drive.AvailableFreeSpace / 1GB, 1)))
+    } catch { return '' }
+}
 
 function New-Label {
     param([string]$Text, [int]$X, [int]$Y, [int]$W, [int]$H, [switch]$Bold, [switch]$Dim)
@@ -970,7 +1027,85 @@ function Build-ModePage {
     $script:Content.Controls.Add($group)
 }
 
-# ---- page 2: options ---------------------------------------------------------
+# ---- page 2: install location ------------------------------------------------
+
+function Build-LocationPage {
+    $group = New-GroupBox -Text (Get-UiText -Key 'loc_group') -X 16 -Y 12 -W 760 -H 220
+    $group.Controls.Add((New-Label -Text (Get-UiText -Key 'loc_intro') -X 16 -Y 24 -W 724 -H 46))
+
+    $group.Controls.Add((New-Label -Text ((Get-UiText -Key 'loc_drive_label') + ':') -X 16 -Y 78 -W 120 -H 20))
+    $driveBox = New-Object System.Windows.Forms.ComboBox
+    $driveBox.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
+    $driveBox.Location = New-Object System.Drawing.Point(16, 100)
+    $driveBox.Size = New-Object System.Drawing.Size(240, 23)
+    $drives = @(Get-InstallDrives)
+    $currentRoot = ''
+    try { $currentRoot = [System.IO.Path]::GetPathRoot([System.IO.Path]::GetFullPath($script:InstallDir)).TrimEnd('\') } catch { }
+    $selected = -1
+    for ($i = 0; $i -lt $drives.Count; $i++) {
+        [void]$driveBox.Items.Add($drives[$i].Label)
+        if ($selected -lt 0 -and $drives[$i].Root -ieq $currentRoot) { $selected = $i }
+    }
+    if ($drives.Count -gt 0) {
+        if ($selected -lt 0) { $selected = 0 }
+        $driveBox.SelectedIndex = $selected
+    }
+    # Picking a drive only rewrites the folder text below: the drive list is a
+    # shortcut, not a cage, so a path it does not offer can still be typed.
+    $driveBox.Add_SelectedIndexChanged({
+        if ($this.SelectedIndex -lt 0) { return }
+        $list = @(Get-InstallDrives)
+        if ($this.SelectedIndex -ge $list.Count) { return }
+        $leaf = 'RemoteHarnessMCP'
+        try {
+            $trimmed = "$($script:InstallDir)".Trim().TrimEnd('\')
+            if ($trimmed) {
+                $leafName = Split-Path -Leaf $trimmed
+                if ($leafName -and $leafName -notmatch '^[A-Za-z]:$') { $leaf = $leafName }
+            }
+        } catch { }
+        $script:InstallDir = ($list[$this.SelectedIndex].Root + '\' + $leaf)
+        $script:OptionError = ''
+        if ($script:PathBox) { $script:PathBox.Text = $script:InstallDir }
+    })
+    $group.Controls.Add($driveBox)
+
+    $group.Controls.Add((New-Label -Text ((Get-UiText -Key 'loc_path_label') + ':') -X 16 -Y 134 -W 120 -H 20))
+    $pathBox = New-InputBox -X 16 -Y 156 -W 620 -Text $script:InstallDir -OnChange {
+        $script:InstallDir = $this.Text.Trim()
+        $script:OptionError = ''
+        if ($script:FreeLabel) { $script:FreeLabel.Text = (Get-FreeSpaceLabel -Path $this.Text.Trim()) }
+    }
+    $script:PathBox = $pathBox
+    $group.Controls.Add($pathBox)
+
+    $browse = New-Object System.Windows.Forms.Button
+    $browse.Text = Get-UiText -Key 'loc_browse'
+    $browse.Location = New-Object System.Drawing.Point(644, 155)
+    $browse.Size = New-Object System.Drawing.Size(96, 25)
+    $browse.Add_Click({
+        $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+        $dialog.Description = Get-UiText -Key 'loc_path_label'
+        $dialog.ShowNewFolderButton = $true
+        try { if ($script:InstallDir -and (Test-Path -LiteralPath $script:InstallDir)) { $dialog.SelectedPath = $script:InstallDir } } catch { }
+        if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+            $script:InstallDir = $dialog.SelectedPath
+            $script:OptionError = ''
+            Show-Page -Index $script:Page
+        }
+        $dialog.Dispose()
+    })
+    $group.Controls.Add($browse)
+
+    $free = New-Label -Text (Get-FreeSpaceLabel -Path $script:InstallDir) -X 16 -Y 186 -W 460 -H 20 -Dim
+    $script:FreeLabel = $free
+    $group.Controls.Add($free)
+
+    $script:Content.Controls.Add($group)
+    $script:Content.Controls.Add((New-Label -Text (Get-UiText -Key 'loc_hint') -X 20 -Y 244 -W 752 -H 36 -Dim))
+}
+
+# ---- page 3: options ---------------------------------------------------------
 
 function Build-OptionsPage {
     if ($script:Mode -eq 'funnel') {
@@ -1069,15 +1204,54 @@ function Build-OptionsPage {
     }
 
     $previewTop = if ($serviceTop -ge 0) { $serviceTop + 96 } else { 322 }
-    $preview = New-GroupBox -Text (Get-UiText -Key 'opt_summary_group') -X 16 -Y $previewTop -W 760 -H 124
-    $box = New-ReadOnlyBox -X 14 -Y 22 -W 732 -H 92 -MultiLine -Monospace
+
+    # Where and how the node is installed: the same switches install.ps1 exposes,
+    # asked once before anything is written. The SSH variant installs on another
+    # host, so its location, PATH entry and shortcuts are not this machine's
+    # business and the group is not drawn at all.
+    if ($serviceTop -ge 0) {
+        $setupGroup = New-GroupBox -Text (Get-UiText -Key 'opt_setup_group') -X 16 -Y $previewTop -W 760 -H 128
+        $rows = @(
+            @{ Key = 'opt_autostart_label'; Hint = 'opt_autostart_hint'; Checked = $script:AutostartEnabled; Tag = 'autostart' },
+            @{ Key = 'opt_path_label'; Hint = 'opt_path_hint'; Checked = $script:AddToPath; Tag = 'path' },
+            @{ Key = 'opt_shortcuts_label'; Hint = 'opt_shortcuts_hint'; Checked = $script:Shortcuts; Tag = 'shortcuts' }
+        )
+        # rows start at 14 and step 30: the group's DisplayRectangle is 106 px tall
+        # (the caption is not part of it), and the self-test fails any control whose
+        # bottom runs past it - which is exactly how a hidden option was caught once.
+        $rowY = 14
+        foreach ($row in $rows) {
+            $check = New-Object System.Windows.Forms.CheckBox
+            $check.Text = Get-UiText -Key $row.Key
+            $check.Location = New-Object System.Drawing.Point(16, $rowY)
+            $check.Size = New-Object System.Drawing.Size(724, 18)
+            $check.Checked = [bool]$row.Checked
+            $check.Tag = $row.Tag
+            # Checked is assigned before the handler is attached, exactly as on the
+            # variants page: rebuilding the page must not look like a user click.
+            $check.Add_CheckedChanged({
+                $tag = [string]$this.Tag
+                if ($tag -eq 'autostart') { $script:AutostartEnabled = [bool]$this.Checked }
+                elseif ($tag -eq 'path') { $script:AddToPath = [bool]$this.Checked }
+                elseif ($tag -eq 'shortcuts') { $script:Shortcuts = [bool]$this.Checked }
+                $script:OptionError = ''
+            })
+            $setupGroup.Controls.Add($check)
+            $setupGroup.Controls.Add((New-Label -Text (Get-UiText -Key $row.Hint) -X 36 -Y ($rowY + 16) -W 700 -H 14 -Dim))
+            $rowY += 30
+        }
+        $script:Content.Controls.Add($setupGroup)
+        $previewTop = $previewTop + 136
+    }
+    $preview = New-GroupBox -Text (Get-UiText -Key 'opt_summary_group') -X 16 -Y $previewTop -W 760 -H 112
+    $box = New-ReadOnlyBox -X 14 -Y 22 -W 732 -H 80 -MultiLine -Monospace
     $box.Text = Get-CommandPreview -Mode $script:Mode -Node $script:Node -Domain $script:Domain `
         -Token $script:Token -Target $script:SshTarget -Port $script:SshPort
     $preview.Controls.Add($box)
     $script:Content.Controls.Add($preview)
 
     if ($script:OptionError) {
-        $errorLabel = New-Label -Text $script:OptionError -X 20 -Y ($previewTop + 132) -W 750 -H 22
+        $errorLabel = New-Label -Text $script:OptionError -X 20 -Y ($previewTop + 118) -W 750 -H 22
         $errorLabel.ForeColor = [System.Drawing.Color]::FromArgb(176, 0, 0)
         $script:Content.Controls.Add($errorLabel)
     }
@@ -1157,7 +1331,7 @@ function Build-ResultPage {
         } else {
             $script:Install.Notice = Get-UiText -Key 'res_copy_failed'
         }
-        Show-Page -Index 4
+        Show-Page -Index 5
     })
     $urlGroup.Controls.Add($copy)
     $copy.Location = New-Object System.Drawing.Point((746 - $copy.Width), 24)
@@ -1198,7 +1372,7 @@ function Build-ResultPage {
         } else {
             $script:Install.LinkNotice = Get-UiText -Key 'res_copy_failed'
         }
-        Show-Page -Index 4
+        Show-Page -Index 5
     })
     $stepsGroup.Controls.Add($copyLink)
     $copyLink.Location = New-Object System.Drawing.Point((746 - $copyLink.Width), 21)
@@ -1297,28 +1471,34 @@ function Show-Page {
 
     switch ($Index) {
         0 {
-            $script:StepLabel.Text = Format-UiText -Key 'step_indicator' -Values @(1, 3)
+            $script:StepLabel.Text = Format-UiText -Key 'step_indicator' -Values @(1, 4)
             Build-WelcomePage
             $script:BtnPrimary.Text = Get-UiText -Key 'btn_next'
         }
         1 {
-            $script:StepLabel.Text = Format-UiText -Key 'step_indicator' -Values @(2, 3)
+            $script:StepLabel.Text = Format-UiText -Key 'step_indicator' -Values @(2, 4)
             $script:BtnBack.Visible = $true
             Build-ModePage
             $script:BtnPrimary.Text = Get-UiText -Key 'btn_next'
         }
         2 {
-            $script:StepLabel.Text = Format-UiText -Key 'step_indicator' -Values @(3, 3)
+            $script:StepLabel.Text = Format-UiText -Key 'step_indicator' -Values @(3, 4)
+            $script:BtnBack.Visible = $true
+            Build-LocationPage
+            $script:BtnPrimary.Text = Get-UiText -Key 'btn_next'
+        }
+        3 {
+            $script:StepLabel.Text = Format-UiText -Key 'step_indicator' -Values @(4, 4)
             $script:BtnBack.Visible = $true
             Build-OptionsPage
             $script:BtnPrimary.Text = Get-UiText -Key 'btn_install'
         }
-        3 {
+        4 {
             $script:StepLabel.Text = Get-UiText -Key 'page_progress_title'
             Build-ProgressPage
             $script:BtnPrimary.Visible = $false
         }
-        4 {
+        5 {
             $script:StepLabel.Text = Get-UiText -Key 'page_result_title'
             Build-ResultPage
             $script:BtnPrimary.Text = Get-UiText -Key 'btn_open_gemini'
@@ -1336,6 +1516,40 @@ function Test-InstallOptions {
         if (-not (Test-Path -LiteralPath $ConsoleInstaller)) {
             $script:OptionError = Format-UiText -Key 'opt_err_installer_missing' -Values @($ConsoleInstaller)
             return $false
+        }
+    }
+    if ($script:Mode -ne 'ssh') {
+        # The install location: an absolute folder on a ready drive with room for
+        # the copy. Everything here is checked before a single file is written.
+        $dir = "$($script:InstallDir)".Trim()
+        if (-not $dir) { $script:OptionError = Get-UiText -Key 'loc_err_path'; return $false }
+        if ($dir -notmatch '^[A-Za-z]:\\') {
+            $script:OptionError = Format-UiText -Key 'loc_err_create' -Values @($dir, 'an absolute path such as D:\RemoteHarnessMCP is required')
+            return $false
+        }
+        if ($dir -match '^[A-Za-z]:\\?$') { $script:OptionError = Get-UiText -Key 'loc_err_root'; return $false }
+        $systemRootPath = "$($env:SystemRoot)".TrimEnd('\')
+        if ($systemRootPath -and $dir.TrimEnd('\').StartsWith($systemRootPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $script:OptionError = Get-UiText -Key 'loc_err_system'
+            return $false
+        }
+        try {
+            $installDrive = New-Object System.IO.DriveInfo([System.IO.Path]::GetPathRoot([System.IO.Path]::GetFullPath($dir)))
+            if (-not $installDrive.IsReady) {
+                $script:OptionError = Format-UiText -Key 'loc_err_drive' -Values @($installDrive.Name.TrimEnd('\'))
+                return $false
+            }
+            if ($installDrive.AvailableFreeSpace -lt 64MB) {
+                $script:OptionError = Format-UiText -Key 'loc_err_space' -Values @($installDrive.Name.TrimEnd('\'), [math]::Round($installDrive.AvailableFreeSpace / 1GB, 2))
+                return $false
+            }
+        } catch {
+            $script:OptionError = Format-UiText -Key 'loc_err_create' -Values @($dir, $_.Exception.Message)
+            return $false
+        }
+        if (-not (Test-Path -LiteralPath $dir)) {
+            try { New-Item -ItemType Directory -Force -Path $dir -ErrorAction Stop | Out-Null }
+            catch { $script:OptionError = Format-UiText -Key 'loc_err_create' -Values @($dir, $_.Exception.Message); return $false }
         }
     }
     if ($script:Mode -eq 'custom' -or $script:Mode -eq 'admin') {
@@ -1383,12 +1597,12 @@ function Test-InstallOptions {
 
 function Start-Installation {
     if (-not (Test-InstallOptions)) {
-        Show-Page -Index 2
+        Show-Page -Index 3
         return
     }
 
     $script:Install = @{ Running = $true; Failed = $false; Exit = 0; Output = ''; Url = ''; Notice = ''; LinkNotice = '' }
-    Show-Page -Index 3
+    Show-Page -Index 4
 
     if ($script:Mode -eq 'ssh') {
         $steps = New-SshSteps -Target "$($script:SshTarget)".Trim() -Port $script:SshPort `
@@ -1406,8 +1620,21 @@ function Start-Installation {
         $script:Install.Output = $output
         if (-not $failed) {
             $script:Install.Url = Get-ResultUrl -Text $output -Mode $script:Mode
+            # The setup executable unpacked this payload into a versioned scratch
+            # directory. When the node went somewhere else, that copy is dead
+            # weight - and a second copy is also what makes the next update
+            # ambiguous. Best effort: a file may still be held by a process.
+            if ($script:OrigPayloadDir -and $script:InstallDir) {
+                try {
+                    $orig = [System.IO.Path]::GetFullPath($script:OrigPayloadDir).TrimEnd('\')
+                    $target = [System.IO.Path]::GetFullPath($script:InstallDir).TrimEnd('\')
+                    if (($orig -ne $target) -and (Test-Path -LiteralPath $orig)) {
+                        Remove-Item -LiteralPath $orig -Recurse -Force -ErrorAction SilentlyContinue
+                    }
+                } catch { }
+            }
         }
-        Show-Page -Index 4
+        Show-Page -Index 5
     } -LogBox $script:Pipe.LogBox -StatusLabel $script:Pipe.StatusLabel
 }
 
@@ -1542,9 +1769,15 @@ function Initialize-Form {
     $script:BtnPrimary.Add_Click({
         switch ($script:Page) {
             0 { Show-Page -Index 1 }
-            1 { $script:OptionError = ''; Show-Page -Index 2 }
-            2 { Start-Installation }
-            4 { [void](Start-Url -Url $GeminiAppsUrl) }
+            # SSH installs on another host: there is nothing to choose about this
+            # machine's folder, PATH or shortcuts, so the location page is skipped.
+            1 {
+                $script:OptionError = ''
+                if ($script:Mode -eq 'ssh') { Show-Page -Index 3 } else { Show-Page -Index 2 }
+            }
+            2 { $script:OptionError = ''; Show-Page -Index 3 }
+            3 { Start-Installation }
+            5 { [void](Start-Url -Url $GeminiAppsUrl) }
         }
     })
     $footer.Controls.Add($script:BtnPrimary)
@@ -1562,9 +1795,13 @@ function Initialize-Form {
     $script:BtnBack.MinimumSize = New-Object System.Drawing.Size(118, 28)
     $script:BtnBack.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right
     $script:BtnBack.Add_Click({
-        if ($script:Page -gt 0 -and $script:Page -lt 3) {
+        if ($script:Page -gt 0 -and $script:Page -lt 4) {
             $script:OptionError = ''
-            Show-Page -Index ($script:Page - 1)
+            $target = $script:Page - 1
+            # SSH never saw the location page, so Back from its options goes
+            # straight to the variants instead of to a page it skipped.
+            if ($script:Page -eq 3 -and $script:Mode -eq 'ssh') { $target = 1 }
+            Show-Page -Index $target
         }
     })
     $footer.Controls.Add($script:BtnBack)
@@ -1719,6 +1956,41 @@ function Invoke-SelfTest {
     }
     $script:Mode = $savedMode
     Add-SelfTestResult 'command_previews' ($previewErrors.Count -eq 0) ($previewErrors -join ' | ')
+    # 7b. the pipeline asks install.ps1 for exactly what the pages show: the
+    #     location, the autostart shape, the PATH switch and the shortcuts.
+    $savedDir = $script:InstallDir
+    $savedAutostart = $script:AutostartEnabled
+    $savedAdmin = $script:AdminService
+    $savedPath = $script:AddToPath
+    $savedShortcuts = $script:Shortcuts
+    $switchErrors = @()
+    try {
+        $script:InstallDir = 'D:\RHMProbe'
+        $script:AutostartEnabled = $true
+        $script:AdminService = $true
+        $script:AddToPath = $true
+        $script:Shortcuts = $true
+        $funnelCommand = Get-CommandPreview -Mode 'funnel' -Node 'node-x' -Domain 'mesh.example.test' -Token 'tok'
+        if ($funnelCommand -notmatch '-InstallDir') { $switchErrors += 'InstallDir' }
+        if ($funnelCommand -notmatch '-Autostart service') { $switchErrors += 'Autostart=service' }
+        if ($funnelCommand -notmatch '-AddToPath:\$true') { $switchErrors += 'AddToPath' }
+        if ($funnelCommand -notmatch '-Shortcuts') { $switchErrors += 'Shortcuts' }
+        $script:AutostartEnabled = $false
+        $script:Shortcuts = $false
+        $script:AddToPath = $false
+        $noAutostartCommand = Get-CommandPreview -Mode 'funnel' -Node 'node-x' -Domain 'mesh.example.test' -Token 'tok'
+        if ($noAutostartCommand -notmatch '-Autostart none') { $switchErrors += 'Autostart=none' }
+        if ($noAutostartCommand -match '-Shortcuts') { $switchErrors += 'Shortcuts stayed on' }
+    } catch {
+        $switchErrors += $_.Exception.Message
+    } finally {
+        $script:InstallDir = $savedDir
+        $script:AutostartEnabled = $savedAutostart
+        $script:AdminService = $savedAdmin
+        $script:AddToPath = $savedPath
+        $script:Shortcuts = $savedShortcuts
+    }
+    Add-SelfTestResult 'install_switches' ($switchErrors.Count -eq 0) ($switchErrors -join ' | ')
 
     # 8. every page builds in every language and in every mode
     $script:Device = Get-DeviceInfo
@@ -1729,7 +2001,7 @@ function Invoke-SelfTest {
         $script:UiLang = $code
         foreach ($mode in @('quick', 'custom', 'ssh', 'funnel')) {
             $script:Mode = $mode
-            foreach ($index in @(0, 1, 2, 3, 4)) {
+            foreach ($index in @(0, 1, 2, 3, 4, 5)) {
                 try {
                     Show-Page -Index $index
                 } catch {
@@ -1822,7 +2094,7 @@ function Invoke-SelfTest {
     $savedChromeLang = $script:UiLang
     foreach ($code in @('en', 'ru')) {
         $script:UiLang = $code
-        Show-Page -Index 2
+        Show-Page -Index 3
         if ($script:BtnBack.Text -ne (Get-UiText -Key 'btn_back')) {
             $chromeErrors += "${code}: back='" + $script:BtnBack.Text + "'"
         }
@@ -1848,7 +2120,7 @@ function Invoke-SelfTest {
         Url = 'https://mesh.example.test/sse?user=probe&token=tok'; Notice = ''; LinkNotice = ''
     }
     $script:Mode = 'funnel'
-    Show-Page -Index 4
+    Show-Page -Index 5
     $linkFound = $false
     $copyButtonFound = $false
     $expectedCopy = Get-UiText -Key 'btn_copy_link'
@@ -1873,7 +2145,7 @@ function Invoke-SelfTest {
     $savedOverflowLang = $script:UiLang
     foreach ($code in @('en', 'ru')) {
         $script:UiLang = $code
-        foreach ($index in @(0, 1, 2, 4)) {
+        foreach ($index in @(0, 1, 2, 3, 5)) {
             Show-Page -Index $index
             $walk = New-Object System.Collections.Stack
             foreach ($control in $script:Content.Controls) { $walk.Push($control) }
