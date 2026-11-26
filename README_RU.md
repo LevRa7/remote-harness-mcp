@@ -1,7 +1,7 @@
-# 📱 Remote Harness MCP — управление любым ПК из Gemini Spark (App и Web)
+# 📱 Remote Harness MCP — управление любым ПК из Gemini/ChatGPT/Claude (App и Web), включая бесплатные аккаунты!
 
-> **MCP-сервер, который превращает Google Gemini из чат-бота в полноценного мобильного агента.**
-> Напишите задачу в приложении Gemini на телефоне — ваш ПК, ноутбук или сервер выполнит её, а Gemini вернётся с реальным результатом.
+> **Open-source MCP-сервер, который превращает Gemini, ChatGPT и Claude (App и Web — включая бесплатные аккаунты!) из чат-бота в полноценного удалённого агента.**
+> Напишите задачу на телефоне или в браузере — ваш ПК, ноутбук, сервер или Android-устройство выполнит её, а модель вернётся с реальным результатом.
 
 [English](README.md) | [🇷🇺 Русская версия](README_RU.md)
 
@@ -9,28 +9,28 @@
 
 ## 💡 Идея
 
-Gemini в браузере или на телефоне умеет разговаривать, но ничего не может *сделать* на вашем компьютере.
-**Remote Harness MCP** устраняет этот разрыв. Это бесплатный open-source сервер **Model Context Protocol (MCP)**, который подключается к **Gemini Spark** ([gemini.google.com/customize/connectors](https://gemini.google.com/customize/connectors) или мобильное приложение Gemini) одной ссылкой. После этого у Gemini появляются «руки»:
+AI-ассистенты в браузере или на телефоне умеют разговаривать, но ничего не могут *сделать* на вашем компьютере.
+**Remote Harness MCP** устраняет этот разрыв. Это бесплатный open-source сервер **Model Context Protocol (MCP)**, который одной ссылкой подключается к **Gemini** ([gemini.google.com/customize/connectors](https://gemini.google.com/customize/connectors) и мобильное приложение), **ChatGPT** и **Claude** (веб и мобильные приложения, **включая бесплатные аккаунты** через SSE / Streamable HTTP или встроенный **OAuth 2.1 PKCE S256**). После этого у ассистента появляются «руки»:
 
-- выполняет команды терминала, собирает и тестирует код, работает с git;
-- читает, создаёт и редактирует файлы;
-- ищет по файловой системе;
-- запускает долгие задачи в фоне и проверяет их позже;
-- следит за CPU, RAM и диском.
+- выполняет команды терминала и скрипты (`python`, `powershell`, `bash`, `cmd`), собирает и тестирует код;
+- смотрит `git_status` / `git_diff` и скачивает документацию через SSRF-защищённый `fetch_url` даже без оболочки;
+- атомарно читает, пишет, пакетно читает и редактирует файлы, плюс `read_media` (картинки/PDF/аудио/видео/OCR);
+- ищет файлы за миллисекунды через SQLite FTS5 (`fs_index`), `glob_find` и компактный `grep_search`;
+- запускает долгие задачи, таймеры/cron, публичные ссылки на файлы/папки и читает телеметрию ПК и телефона.
 
 ```text
- 📱 Приложение Gemini / 🌐 gemini.google.com (Spark)
-              │  MCP (SSE / Streamable HTTP) по HTTPS
+ 📱 Gemini / ChatGPT / Claude (App и Web — включая бесплатные аккаунты)
+              │  MCP (SSE / Streamable HTTP / OAuth 2.1) по HTTPS
               ▼
-     ☁️  Tailscale Funnel  https://<узел>.<tailnet>.ts.net   ← вход и TLS
+     ☁️  Tailscale Funnel или --quick-tunnel  ← вход и TLS
               │  127.0.0.1:<порт>
               ▼
-   💻 Ваша машина: MCP-узел выполняет задачу · ПК · ноутбук · сервер
+   💻 Ваша машина: MCP-узел выполняет задачу · ПК · ноутбук · сервер · Android
 ```
 
 С 0.7.0 отдельный шлюз-мост не нужен: узел публикуется сам, подробности — ниже.
 
-**Итог:** телефон становится пультом управления всеми вашими машинами, а Gemini — агентом, который ими управляет.
+**Итог:** телефон или браузер становится пультом управления всеми вашими машинами — напрямую через Gemini, ChatGPT или Claude.
 
 ---
 
@@ -147,9 +147,7 @@ WebSocket-туннелю. Своего адреса у узла не было �
    история: Funnel-узел их не читает и в мост не ходит.
 4. Если старый мост больше не нужен, его VPS можно выключить.
 
-> ⚠️ 0.7.0-rc1-alpha — предварительная сборка архитектурного перехода. Она уже
-> ставится и работает на этой машине, но перед массовым развёртыванием проверьте
-> её на одном узле.
+> ✅ **0.7.2 (стабильный релиз):** схемы `tools/list` сжаты вдвое (профили `MESH_TOOLSETS`), добавлены `git_status`/`git_diff`/`fetch_url` без оболочки, standalone **OAuth 2.1 (PKCE S256)** и режим `--folder`/`--no-shell`/`--quick-tunnel`, `SO_EXCLUSIVEADDRUSE` на Windows, асинхронный ротируемый лог вызовов и бесшовное обновление Windows-установщиком на месте.
 
 ---
 ## 🔥 Что можно делать
@@ -215,8 +213,8 @@ Gemini Spark решает, останавливаться ли с вопросо
 
 | Класс | Инструменты | Подтверждение |
 | :--- | :--- | :--- |
-| Только чтение | `mesh_status`, `system_info`, `system_vitals`, `get_orchestration_skill`, `list_dir`, `read_file`, `read_media`, `grep_search`, `glob_find`, `job_output`, `job_list`, `share_list`, `device_info` | не запрашивается |
-| Локальная работа — команды, сборки, запись файлов, задачи, публикации и вся ветка устройства | `bash_exec`, `run_job`, `write_file`, `edit_file`, `job_kill`, `node_control`, `goal`, `schedule`, `share_file`, `serve_dir`, `unshare`, `device_control`, `device_capture`, `device_messages`, `screen_capture` | не запрашивается |
+| Только чтение | `mesh_status`, `system_info`, `system_vitals`, `get_orchestration_skill`, `list_dir`, `read_file`, `read_media`, `batch_read`, `win_places`, `grep_search`, `glob_find`, `git_status`, `git_diff`, `fetch_url`, `job_output`, `job_list`, `share_list`, `device_info` | не запрашивается |
+| Локальная работа — команды, скрипты, сборки, запись файлов, индексация, задачи, публикации и вся ветка устройства | `bash_exec`, `run_script`, `run_job`, `write_file`, `edit_file`, `batch_edit`, `fs_index`, `job_kill`, `node_control`, `goal`, `schedule`, `share_file`, `serve_dir`, `unshare`, `device_control`, `device_capture`, `device_messages`, `screen_capture` | не запрашивается |
 | **Подтверждаемые — установка/удаление, `sudo`, системные пути** | `system_change` (установка/удаление ПО, удаление данных, `sudo`, правка системных путей через оболочку), `system_write` (запись файла в системный путь), `mesh_update` (устанавливает релиз) | **запрашивается** |
 
 Подтверждение тратится только на **системное изменение**: `system_change`, `system_write` и `mesh_update` устанавливают, удаляют, стирают или заменяют то, что нельзя отменить одним вызовом. Всё остальное идёт молча, включая ветку устройства: камера, микрофон или список SMS ничего не устанавливают и не удаляют, а отказывает такому вызову собственный переключатель узла (`MESH_DEVICE`, `MESH_DEVICE_ACTIONS`, `MESH_DEVICE_PIM`, `MESH_READ_ONLY`), который действует независимо от клиента. `unshare` — тоже обычная локальная работа: он останавливает локальный сервер и удаляет копию, которую можно опубликовать снова одним вызовом.
@@ -250,7 +248,8 @@ Gemini Spark решает, останавливаться ли с вопросо
 
 | Инструмент | Что делает |
 | :--- | :--- |
-| `bash_exec(command, timeout_sec, max_chars, cursor)` | Выполняет команду оболочки. Оболочка соответствует **хосту**, а не названию инструмента — `bash` на Linux/macOS, PowerShell или `cmd.exe` на Windows; сначала посмотрите `command_shell` из `system_info()`. Вывод постраничный: если обрезан, вызовите снова с `cursor=next_cursor`, ничего не теряется; вывод больше 2 МБ сохраняется в файл, путь в `saved_to`. `timeout_sec` — 1–120 (по умолчанию 25). Установка/удаление, `sudo` и системные пути здесь **отклоняются** — их надо выполнять через `system_change`. |
+| `bash_exec(command, timeout_sec, max_chars, cursor)` | Выполняет команду оболочки. Оболочка соответствует **хосту**, а не названию инструмента — `bash` на Linux/macOS, PowerShell или `cmd.exe` на Windows; сначала посмотрите `command_shell` из `system_info()`. Вывод постраничный: если обрезан, вызовите снова с `cursor=next_cursor`, ничего не теряется; вывод больше 2 МБ сохраняется в файл, путь в `saved_to`. `timeout_sec` — 1–120 (по умолчанию 25). Отключается флагом `--no-shell` (`MESH_ENABLE_SHELL=0`); установка/удаление, `sudo` и системные пути здесь **отклоняются** — их надо выполнять через `system_change`. |
+| `run_script(code, lang, cwd, timeout_sec, background, max_chars)` | Записывает и выполняет временный скрипт (`python`, `powershell`, `bash`, `cmd`) за один вызов без проблем с экранированием кавычек. С `background=true` передаёт долгий запуск в `run_job`. Отключается флагом `--no-shell` (`MESH_ENABLE_SHELL=0`). |
 | `system_change(command, timeout_sec, background, cwd, max_chars, cursor)` | Установка, удаление ПО и данных, привилегированные команды и правка системных путей — «подтверждаемый» двойник `bash_exec` и единственный инструмент, которому разрешены `apt`/`dnf`/`pacman`/`pip`/`npm`/`winget`/`msiexec`/`rm`/`Remove-Item`/`sudo` и работа с дисками. Объявлен деструктивным, поэтому Gemini спрашивает подтверждение. `background=true` запускает его как фоновую задачу (для долгих установок) и возвращает `job_id` для `job_output`; `cwd` действует только в этом режиме. |
 
 ### Файлы
@@ -258,18 +257,22 @@ Gemini Spark решает, останавливаться ли с вопросо
 | Инструмент | Что делает |
 | :--- | :--- |
 | `list_dir(path)` | Список файлов и каталогов (по умолчанию — рабочий каталог). |
-| `read_file(path, start_line, end_line, max_chars, cursor)` | Читает текстовый файл с номерами строк, при желании — диапазон строк. Постранично, как `bash_exec`. |
+| `read_file(path, start_line, end_line, max_chars, cursor)` | Читает текстовый файл с номерами строк, при желании — диапазон строк. Постранично, как `bash_exec`. Автоматически определяет двоичные файлы (проверка NUL-байта в первых 8 КБ) и возвращает подсказку вызвать `read_media` вместо мусора. |
+| `batch_read(ops, max_total_chars, time_budget_ms)` | Выполняет до 16 read-only вызовов (`list_dir`, `read_file`, `glob_find`, `grep_search`, `win_places`, `mesh_status`, `system_vitals`, `job_list`, `job_output`) за один MCP round-trip, у каждого свой диапазон строк. |
 | `read_media(path, offset, max_chars, max_side, max_frames, include_audio, page_start, page_end, render_pages, encoding)` | Отдаёт файл модели **в том блоке, который понимает MCP**, а не сырыми байтами и не ссылкой: картинка (PNG/JPEG/WebP/GIF) уходит блоком `image` (base64 + `mimeType`) и ужимается под лимит ответа; PDF — текстом страниц, а если текстового слоя нет, страницы рендерятся в `image`; аудио — метаданными (длительность, кодек, частота, битрейт), а с `include_audio=true` ещё и блоком `audio`; видео — метаданными и равномерно нарезанными JPEG-кадрами; текст, JSON, CSV и логи — текстом с определением кодировки (UTF-8/BOM, `cp1251`, `cp1252`, `latin-1`) и курсором для следующей порции. Бюджеты: файл до 30 МиБ, картинка до 700 КиБ и до 1280 px по большей стороне, до 4 кадров, ~2,6 МБ base64 на ответ. Тяжёлые конверсии делают `ffmpeg` (кадры, ужатие фото) и PyMuPDF/`pdftoppm` (страницы PDF): если их нет, ответ так и говорит, вместо того чтобы молча упасть. Текст с картинки дополнительно распознаётся (OCR: `winsdk`/Windows OCR, `tesseract` или свой `MESH_OCR_CMD`) и попадает в текстовый блок — это важно, потому что клиент Gemini пока не передаёт модели `image`-блоки. |
-| `write_file(path, content, create_dirs, mode)` | Атомарно создаёт или перезаписывает файл (временный файл + `os.replace`). `mode` — только для POSIX: на Windows он не применяется, и результат об этом честно сообщает. Путь внутри системы **отклоняется** — для него есть `system_write`. |
-| `edit_file(path, old_string, new_string, expected_sha256, replace_all)` | Заменяет точную подстроку. `old_string` должен встречаться ровно один раз, если не задан `replace_all`; `expected_sha256` защищает от перезаписи файла, изменившегося после чтения. Системные пути отклоняются — прочитайте файл и отправьте новое содержимое целиком в `system_write`. |
+| `write_file(path, content, create_dirs, mode)` | Атомарно создаёт или перезаписывает файл (временный файл + `os.replace`). `mode` — только для POSIX: на Windows он не применяется, и результат об этом честно сообщает. Запись в `.git/hooks/*`, `.git/config` и системные пути **отклоняется** (для системных путей есть `system_write`). |
+| `edit_file(path, old_string, new_string, expected_sha256, replace_all)` | Заменяет точную подстроку. `old_string` должен встречаться ровно один раз, если не задан `replace_all`; `expected_sha256` защищает от перезаписи файла, изменившегося после чтения. Блокирует `.git/hooks/*`, `.git/config` и системные пути. |
+| `batch_edit(ops, dry_run, stop_on_error)` | Применяет до 16 атомарных операций `edit`/`write` за один MCP round-trip с поддержкой проверки `dry_run` и защитой `.git/` и системных путей. |
 | `system_write(path, content, create_dirs, mode)` | Запись файла в системный путь (`/etc`, `/usr`, `/boot`, `/var/lib`, `C:\Windows`, `C:\Program Files`, `ProgramData`, реестр) — «подтверждаемый» двойник `write_file` и единственный способ туда писать. Gemini спрашивает подтверждение. Содержимое передаётся точно, экранировать для оболочки ничего не нужно. |
 
 ### Поиск
 
 | Инструмент | Что делает |
 | :--- | :--- |
-| `grep_search(pattern, path, glob, limit, ignore_case, fixed, context, format)` | Рекурсивно ищет по содержимому файлов, пропуская двоичные файлы и тяжёлые каталоги. `fixed` — поиск как по обычному тексту, `context` — строки вокруг совпадения, `limit` — 1–1000 (по умолчанию 200), `format="compact"` возвращает компактные строки `path:line: text`. |
-| `glob_find(pattern, path)` | Ищет файлы по маске (`*` и `**`). |
+| `grep_search(pattern, path, glob, limit, ignore_case, fixed, context, format)` | Рекурсивно ищет по содержимому файлов с быстрым байтовым префильтром для литералов, пропуская двоичные файлы и тяжёлые каталоги. `fixed` — поиск как по обычному тексту, `context` — строки вокруг совпадения, `limit` — 1–1000 (по умолчанию 200), `format="compact"` возвращает компактные относительные строки `path:line: text` (~на 55% меньше токенов). |
+| `glob_find(pattern, path, max_depth, max_results, time_budget_ms, use_index)` | Ищет файлы по маске (`*` и `**`) с ранней обрезкой тяжёлых каталогов, бюджетом времени и опциональным индексом SQLite FTS5 (`use_index="auto"|"only"|"off"`). |
+| `fs_index(action, roots, background, every_sec, label)` | Управляет локальным SQLite FTS5-индексом файлов (`status`, `refresh`, `schedule`) для мгновенных (<30 мс) запросов `glob_find` по большим дискам. |
+| `win_places(recent_limit, top_level_limit, only_existing_recent)` | Мгновенный (<100 мс) снимок контекста хоста без сканирования дисков: стандартные папки (Рабочий стол, Документы, Загрузки, OneDrive), недавно открытые файлы и каталоги верхнего уровня дисков. |
 
 ### Git и веб (без оболочки)
 

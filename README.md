@@ -1,7 +1,7 @@
-# 📱 Remote Harness MCP — control any PC from Gemini (App & Web)
+# 📱 Remote Harness MCP — control any PC from Gemini/ChatGPT/Claude (App & Web), including free accounts!
 
-> **An MCP server that turns Google Gemini from a chatbot into a full-fledged mobile agent.**
-> Type a task in the Gemini app on your phone — your PC, laptop or server executes it, and Gemini reports back with real results.
+> **An open-source MCP server that turns Gemini, ChatGPT, and Claude (App & Web — including free accounts!) from a chatbot into a full-fledged remote agent.**
+> Type a task on your phone or browser — your PC, laptop, server, or Android device executes it, and the model reports back with real results.
 
 [English](README.md) | [🇷🇺 Русская версия](README_RU.md)
 
@@ -9,28 +9,28 @@
 
 ## 💡 The idea
 
-Gemini in a browser or on a phone can talk, but it cannot *do* anything on your computer.
-**Remote Harness MCP** closes that gap. It is a free, open-source **Model Context Protocol (MCP)** server that you connect to **Gemini Spark** ([gemini.google.com/customize/connectors](https://gemini.google.com/customize/connectors) or the Gemini mobile app) with a single link. After that, Gemini gets hands:
+AI assistants in a browser or on a phone can talk, but they cannot *do* anything on your computer.
+**Remote Harness MCP** closes that gap. It is a free, open-source **Model Context Protocol (MCP)** server that connects to **Gemini** ([gemini.google.com/customize/connectors](https://gemini.google.com/customize/connectors) & mobile app), **ChatGPT**, and **Claude** (web & mobile, **including free accounts** via SSE / Streamable HTTP or standalone **OAuth 2.1 PKCE S256**) with a single link. After that, your assistant gets hands:
 
-- runs shell commands, builds and tests code, manages git;
-- reads, writes and edits files;
-- searches the file system;
-- starts long-running jobs and checks on them later;
-- watches CPU, RAM and disk.
+- runs shell commands and scripts (`python`, `powershell`, `bash`, `cmd`), builds and tests code;
+- inspects `git_status` / `git_diff` and fetches docs with SSRF-safe `fetch_url` even without a shell;
+- reads, writes, batch-reads and batch-edits files atomically, plus `read_media` (images/PDF/audio/video/OCR);
+- searches files in milliseconds with SQLite FTS5 (`fs_index`), `glob_find`, and compact `grep_search`;
+- starts long-running jobs, timers/cron, public file/folder shares, and reads host/phone telemetry.
 
 ```text
- 📱 Gemini app / 🌐 gemini.google.com (Spark)
-              │  MCP (SSE / Streamable HTTP) over HTTPS
+ 📱 Gemini / ChatGPT / Claude (App & Web — including free accounts)
+              │  MCP (SSE / Streamable HTTP / OAuth 2.1) over HTTPS
               ▼
-     ☁️  Tailscale Funnel  https://<node>.<tailnet>.ts.net   ← ingress and TLS
+     ☁️  Tailscale Funnel or --quick-tunnel  ← ingress and TLS
               │  127.0.0.1:<port>
               ▼
-   💻 Your machine: the MCP node executes the task · PC · laptop · server
+   💻 Your machine: the MCP node executes the task · PC · laptop · server · Android
 ```
 
 Since 0.7.0 no separate relay gateway is required: the node publishes itself. Details below.
 
-**Result:** your phone becomes a remote control for every machine you own — and Gemini is the agent that operates them.
+**Result:** your phone or browser becomes a remote control for every machine you own — operated directly by Gemini, ChatGPT, or Claude.
 
 ---
 
@@ -147,8 +147,7 @@ earlier install left behind.
    history: a Funnel node does not read them and never dials the bridge.
 4. If the old bridge is no longer needed, its VPS can be switched off.
 
-> ⚠️ 0.7.0-rc1-alpha is a pre-release of the architecture change. It installs and
-> runs on this machine, but try it on one node before rolling it out.
+> ✅ **0.7.2 (stable):** includes ~50% smaller `tools/list` schemas (`MESH_TOOLSETS` profiles), shell-free `git_status`/`git_diff`/`fetch_url`, standalone **OAuth 2.1 (PKCE S256)** & `--folder`/`--no-shell`/`--quick-tunnel` mode, Windows `SO_EXCLUSIVEADDRUSE`, async rotating usage logs, and clean in-place Windows installer upgrades.
 
 ---
 ## 🔥 What you can do with it
@@ -214,8 +213,8 @@ Gemini Spark decides whether to stop and ask *"confirm this action?"* from the *
 
 | Class | Tools | Confirmation |
 | :--- | :--- | :--- |
-| Read-only | `mesh_status`, `system_info`, `system_vitals`, `get_orchestration_skill`, `list_dir`, `read_file`, `read_media`, `grep_search`, `glob_find`, `job_output`, `job_list`, `share_list`, `device_info` | never asked |
-| Local work — commands, builds, file writes, jobs, shares, node settings, and the whole device branch | `bash_exec`, `run_job`, `write_file`, `edit_file`, `job_kill`, `node_control`, `goal`, `schedule`, `share_file`, `serve_dir`, `unshare`, `device_control`, `device_capture`, `device_messages`, `screen_capture` | not asked |
+| Read-only | `mesh_status`, `system_info`, `system_vitals`, `get_orchestration_skill`, `list_dir`, `read_file`, `read_media`, `batch_read`, `win_places`, `grep_search`, `glob_find`, `git_status`, `git_diff`, `fetch_url`, `job_output`, `job_list`, `share_list`, `device_info` | never asked |
+| Local work — commands, scripts, builds, file writes, indexing, jobs, shares, node settings, and the whole device branch | `bash_exec`, `run_script`, `run_job`, `write_file`, `edit_file`, `batch_edit`, `fs_index`, `job_kill`, `node_control`, `goal`, `schedule`, `share_file`, `serve_dir`, `unshare`, `device_control`, `device_capture`, `device_messages`, `screen_capture` | not asked |
 | **Confirmed — install/delete, `sudo`, system paths** | `system_change` (installs/removes software, deletes data, runs `sudo`, edits system paths by shell), `system_write` (writes file content into a system path), `mesh_update` (installs a release) | **asked first** |
 
 A prompt is spent on a **system change** only: `system_change`, `system_write` and `mesh_update` install, remove, delete or replace something you cannot undo in one call. Everything else runs silently, the device branch included — a camera, a microphone or an SMS list installs and removes nothing, and what still refuses such a call is the node's own switch (`MESH_DEVICE`, `MESH_DEVICE_ACTIONS`, `MESH_DEVICE_PIM`, `MESH_READ_ONLY`), which holds no matter what the client does. `unshare` is ordinary local work for the same reason: it stops a local server and removes a copy you can publish again in one call.
@@ -249,7 +248,8 @@ The tool surface and the confirmation policy live in [gateway.py](gateway.py) (a
 
 | Tool | What it does |
 | :--- | :--- |
-| `bash_exec(command, timeout_sec, max_chars, cursor)` | Runs a shell command. The shell matches the **host**, not the tool's name — `bash` on Linux/macOS, PowerShell or `cmd.exe` on Windows; check `command_shell` from `system_info()` first. Output is paginated: when it is cut, call again with `cursor=next_cursor`, nothing is dropped; output above 2 MB is spooled to a file returned in `saved_to`. `timeout_sec` is 1–120 (default 25). Installs/removals, `sudo` and system paths are **refused here** and have to go through `system_change`. |
+| `bash_exec(command, timeout_sec, max_chars, cursor)` | Runs a shell command. The shell matches the **host**, not the tool's name — `bash` on Linux/macOS, PowerShell or `cmd.exe` on Windows; check `command_shell` from `system_info()` first. Output is paginated: when it is cut, call again with `cursor=next_cursor`, nothing is dropped; output above 2 MB is spooled to a file returned in `saved_to`. `timeout_sec` is 1–120 (default 25). Disabled when `--no-shell` (`MESH_ENABLE_SHELL=0`) is active; installs/removals, `sudo` and system paths are **refused here** and have to go through `system_change`. |
+| `run_script(code, lang, cwd, timeout_sec, background, max_chars)` | Writes and executes a temporary `python`, `powershell`, `bash`, or `cmd` script in one call without shell-quoting issues. Set `background=true` to hand off long pipelines to `run_job`. Disabled when `--no-shell` (`MESH_ENABLE_SHELL=0`) is active. |
 | `system_change(command, timeout_sec, background, cwd, max_chars, cursor)` | Installs, removes or deletes on the host, runs privileged commands and edits system paths — the confirmed twin of `bash_exec`, and the only tool allowed to run `apt`/`dnf`/`pacman`/`pip`/`npm`/`winget`/`msiexec`/`rm`/`Remove-Item`/`sudo` or disk tools. It is advertised as destructive, so Gemini asks you first. `background=true` runs it as a job (for long installs) and returns a `job_id` for `job_output`; `cwd` applies to that mode. |
 
 ### Files
@@ -257,18 +257,22 @@ The tool surface and the confirmation policy live in [gateway.py](gateway.py) (a
 | Tool | What it does |
 | :--- | :--- |
 | `list_dir(path)` | Lists files and directories (workspace by default). |
-| `read_file(path, start_line, end_line, max_chars, cursor)` | Reads a text file with line numbers, optionally restricted to a line range. Paginated like `bash_exec`. |
+| `read_file(path, start_line, end_line, max_chars, cursor)` | Reads a text file with line numbers, optionally restricted to a line range. Paginated like `bash_exec`. Automatically detects binary files (NUL-byte check in the first 8 KB) and returns a clean hint to use `read_media` instead of dumping binary garbage. |
+| `batch_read(ops, max_total_chars, time_budget_ms)` | Runs up to 16 read-only calls (`list_dir`, `read_file`, `glob_find`, `grep_search`, `win_places`, `mesh_status`, `system_vitals`, `job_list`, `job_output`) in a single MCP round-trip, each with its own line range. |
 | `read_media(path, offset, max_chars, max_side, max_frames, include_audio, page_start, page_end, render_pages, encoding)` | Hands the file to the model **in the content block MCP has for it**, not as raw bytes and not as a link: an image (PNG/JPEG/WebP/GIF) goes as an `image` block (base64 + `mimeType`), downscaled to fit the response; a PDF as its page text, with pages rendered to `image` blocks when there is no text layer; audio as metadata (duration, codec, rate, bitrate) plus an `audio` block when `include_audio=true`; video as metadata plus evenly spaced JPEG frames; text/JSON/CSV/logs as text with the encoding detected (UTF-8/BOM, `cp1251`, `cp1252`, `latin-1`) and a cursor for the next page. Budgets: 30 MiB file, 700 KiB and 1280 px per image, 4 frames, ~2.6 MB of base64 per answer. Heavy conversions use `ffmpeg` (frames, oversized photos) and PyMuPDF/`pdftoppm` (PDF pages); when one is missing the answer says so instead of failing silently. The text of an image is also read with OCR (`winsdk`/Windows OCR, `tesseract`, or your own `MESH_OCR_CMD`) and added to the text block — which matters because Gemini's client does not pass `image` blocks to the model yet. |
-| `write_file(path, content, create_dirs, mode)` | Atomically creates or overwrites a file (temp file + `os.replace`). `mode` is POSIX-only: on Windows it is not honoured, and the result says so instead of pretending. A path inside the system is **refused** and has to go through `system_write`. |
-| `edit_file(path, old_string, new_string, expected_sha256, replace_all)` | Replaces an exact substring. `old_string` must match exactly once unless `replace_all` is set; `expected_sha256` guards against overwriting a file that changed since it was read. System paths are refused — read the file and send the whole new content to `system_write`. |
+| `write_file(path, content, create_dirs, mode)` | Atomically creates or overwrites a file (temp file + `os.replace`). `mode` is POSIX-only: on Windows it is not honoured, and the result says so instead of pretending. Writes to `.git/hooks/*`, `.git/config`, and system paths are **refused** (use `system_write` for system paths). |
+| `edit_file(path, old_string, new_string, expected_sha256, replace_all)` | Replaces an exact substring. `old_string` must match exactly once unless `replace_all` is set; `expected_sha256` guards against overwriting a file that changed since it was read. Blocks `.git/hooks/*`, `.git/config`, and system paths. |
+| `batch_edit(ops, dry_run, stop_on_error)` | Applies up to 16 atomic `edit`/`write` operations in one MCP round-trip with optional `dry_run` validation and `.git/` + system-path protection. |
 | `system_write(path, content, create_dirs, mode)` | Writes a file inside a system path (`/etc`, `/usr`, `/boot`, `/var/lib`, `C:\Windows`, `C:\Program Files`, `ProgramData`, the registry) — the confirmed twin of `write_file` and the only way to write there. Gemini asks you first. Content is exact, so there is no shell quoting to get wrong. |
 
 ### Search
 
 | Tool | What it does |
 | :--- | :--- |
-| `grep_search(pattern, path, glob, limit, ignore_case, fixed, context, format)` | Recursively searches file contents, skipping binary files and heavy directories. `fixed` treats the pattern as literal text, `context` adds surrounding lines, `limit` is 1–1000 (default 200), `format="compact"` returns compact `path:line: text` lines. |
-| `glob_find(pattern, path)` | Finds files by glob pattern (`*` and `**`). |
+| `grep_search(pattern, path, glob, limit, ignore_case, fixed, context, format)` | Recursively searches file contents with a fast bytes-level literal pre-filter, skipping binary files and heavy directories. `fixed` treats the pattern as literal text, `context` adds surrounding lines, `limit` is 1–1000 (default 200), `format="compact"` returns compact relative `path:line: text` lines (~55% fewer tokens). |
+| `glob_find(pattern, path, max_depth, max_results, time_budget_ms, use_index)` | Finds files by glob pattern (`*` and `**`) with early directory pruning, a time budget, and optional SQLite FTS5 index (`use_index="auto"|"only"|"off"`). |
+| `fs_index(action, roots, background, every_sec, label)` | Manages the local SQLite FTS5 file index (`status`, `refresh`, `schedule`) for instant (<30 ms) `glob_find` queries across large drives. |
+| `win_places(recent_limit, top_level_limit, only_existing_recent)` | Instant (<100 ms) host snapshot without scanning disks: Known Folders (Desktop, Documents, Downloads, OneDrive), recent opened files, and top-level drive directories. |
 
 ### Git & Web (shell-free)
 
