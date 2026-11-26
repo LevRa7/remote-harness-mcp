@@ -89,10 +89,18 @@ jobs:
       - name: Build the payload archive
         run: python tools/build-payload-zip.py
 
+      - name: Build the universal Linux .deb (Architecture all)
+        run: |
+          python tools/build-deb.py
+          deb=$(ls dist/remote-harness-mcp_*_all.deb)
+          dpkg-deb --info "$deb"
+
       - uses: actions/upload-artifact@v4
         with:
           name: mesh-payload
-          path: dist/mesh-payload-*
+          path: |
+            dist/mesh-payload-*
+            dist/remote-harness-mcp_*.deb*
           if-no-files-found: error
 
   windows:
@@ -207,6 +215,8 @@ jobs:
             dist/RemoteHarnessMCP-Setup-*.exe.sha256 \
             dist/mesh-payload-*.zip \
             dist/mesh-payload-*.zip.sha256 \
+            dist/remote-harness-mcp_*_all.deb \
+            dist/remote-harness-mcp_*_all.deb.sha256 \
             --clobber
 
       - name: Verify what a node will see

@@ -119,6 +119,34 @@ jobs:
           print("payload ok:", archive)
           PY
 
+  linux-deb:
+    name: Linux .deb package (all)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Build universal Architecture all .deb
+        run: python tools/build-deb.py
+
+      - name: Verify and test-install .deb
+        run: |
+          deb=$(ls dist/remote-harness-mcp_*_all.deb)
+          dpkg-deb --info "$deb"
+          dpkg-deb --contents "$deb" | head -n 30
+          sudo apt-get install -y "./$deb"
+          remote-harness-mcp --help >/dev/null
+          rhm --help >/dev/null
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-deb
+          path: dist/remote-harness-mcp_*.deb*
+          if-no-files-found: error
+
   installer:
     name: Windows setup executable
     runs-on: windows-latest
