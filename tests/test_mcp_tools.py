@@ -74,10 +74,18 @@ def test_tools_surface_contains_all_tools():
         "list_dir",
         "bash_exec",
         "read_file",
+        # The media reader sits next to read_file: same subject (a file on the
+        # host), a different block type when the file is not text.
+        "read_media",
         "write_file",
         "edit_file",
         "grep_search",
         "glob_find",
+        "win_places",
+        "batch_read",
+        "batch_edit",
+        "run_script",
+        "fs_index",
         "run_job",
         "job_output",
         "job_kill",

@@ -26,8 +26,11 @@ READ_ONLY_TOOLS: FrozenSet[str] = frozenset({
     "get_orchestration_skill",
     "list_dir",
     "read_file",
+    "read_media",
     "grep_search",
     "glob_find",
+    "win_places",
+    "batch_read",
     "job_output",
     "job_list",
     "share_list",
@@ -41,8 +44,8 @@ READ_ONLY_TOOLS: FrozenSet[str] = frozenset({
 #: Scope -> tools it grants in ``agent`` mode.
 TOOL_SCOPES: dict[str, FrozenSet[str]] = {
     "files:read": READ_ONLY_TOOLS,
-    "files:write": frozenset({"write_file", "edit_file"}),
-    "shell:exec": frozenset({"bash_exec", "run_job", "job_kill"}),
+    "files:write": frozenset({"write_file", "edit_file", "batch_edit", "fs_index"}),
+    "shell:exec": frozenset({"bash_exec", "run_script", "run_job", "job_kill"}),
     "device:control": frozenset({"device_control", "device_capture", "device_messages"}),
     "shares:manage": frozenset({"share_file", "serve_dir", "unshare", "share_list"}),
     "system:update": frozenset({"mesh_update"}),

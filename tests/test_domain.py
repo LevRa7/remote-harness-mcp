@@ -320,8 +320,6 @@ def test_no_shipped_component_hardcodes_a_deployment_domain():
         "core/domain.py",
         "install.sh",
         "install.ps1",
-        "rhm_sync.py",
-        "rhm_watcher.py",
     )
     forbidden = "smart-server" + ".online"
     offenders = [

@@ -81,7 +81,7 @@ echo "[3/5] Injecting Remote-Harness MCP node into chroot overlay..."
 CHROOT_OPT="config/includes.chroot/opt/remote-harness-mcp"
 mkdir -p "${CHROOT_OPT}"
 cp -r "${REPO_ROOT}/core" "${CHROOT_OPT}/"
-cp "${REPO_ROOT}/rhm_mcp_server.py" "${CHROOT_OPT}/"
+cp -r "${REPO_ROOT}/skills" "${CHROOT_OPT}/"
 
 echo "[4/5] Configuring systemd service & udev anti-automount rules..."
 mkdir -p config/includes.chroot/etc/systemd/system
@@ -95,7 +95,7 @@ Wants=network-online.target
 Type=simple
 Environment="MESH_SCENARIO=live_usb"
 WorkingDirectory=/opt/remote-harness-mcp
-ExecStart=/usr/bin/python3 /opt/remote-harness-mcp/rhm_mcp_server.py
+ExecStart=/usr/bin/python3 -u -m core.agent
 Restart=always
 RestartSec=3
 

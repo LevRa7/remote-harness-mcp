@@ -294,7 +294,7 @@ def test_setup_exe_runs_the_wizard_self_test(setup_exe, tmp_path):
     # cmd.exe waits for a GUI application; PowerShell returns immediately.
     run = subprocess.run(
         [environment.get("ComSpec", "cmd.exe"), "/c", str(setup_exe), "-SelfTest"],
-        capture_output=True, text=True, env=environment, timeout=900,
+        capture_output=True, text=True, encoding="utf-8", errors="replace", env=environment, timeout=900,
     )
     output = run.stdout or ""
     start = output.find("{")

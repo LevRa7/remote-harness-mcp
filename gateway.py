@@ -1859,6 +1859,12 @@ async def sse_endpoint(request: Request):
         }
     )
 
+#: Base64 characters of media one tool answer may carry (~12 MiB). The node keeps
+#: its own answer inside a smaller budget; this is the gateway's backstop, so a
+#: buggy or older node cannot push tens of megabytes at a client that times out.
+MAX_GATEWAY_MEDIA_B64 = 12 * 1024 * 1024
+
+
 async def messages_endpoint(request: Request):
     ok, err_msg, user = verify_token(request)
     if not ok:
@@ -2064,6 +2070,46 @@ async def messages_endpoint(request: Request):
                             "path": {"type": "string", "description": "File path to read"},
                             "start_line": {"type": "integer", "description": "First line (1-based)"},
                             "end_line": {"type": "integer", "description": "Last line (1-based)"}
+                        },
+                        "required": ["path"]
+                    }
+                },
+                {
+                    "name": "read_media",
+                    "description": (
+                        "Send a file to the client in the content block MCP has for it: an "
+                        "image (PNG/JPEG/WebP/GIF) as an image block, downscaled to fit the "
+                        "response; a PDF as its page text (plus page images when a page has "
+                        "no text layer); audio as metadata, plus an audio block when "
+                        "include_audio is set; video as metadata plus evenly spaced JPEG "
+                        "frames; text/JSON/CSV as text with a cursor to page. Use it - not "
+                        "read_file - for anything that is not source code. Video frames and "
+                        "oversized photos need ffmpeg on the host, scanned PDF pages need "
+                        "PyMuPDF or pdftoppm; the answer says which one is missing."
+                    ),
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string",
+                                     "description": "File to send (absolute, or relative to the workspace)"},
+                            "offset": {"type": "integer",
+                                       "description": "Character offset when the answer is text"},
+                            "max_chars": {"type": "integer",
+                                          "description": "Maximum characters of text in one answer (default 24000)"},
+                            "max_side": {"type": "integer",
+                                         "description": "Longest side of a downscaled image (320-4096, default 1280)"},
+                            "max_frames": {"type": "integer",
+                                           "description": "Video frames or PDF page images to render (1-12, default 4)"},
+                            "include_audio": {"type": "boolean",
+                                              "description": "Also send the audio bytes as an audio block (default false)"},
+                            "ocr": {"type": "boolean",
+                                    "description": "Also read the text of an image with OCR (default false; needs tesseract or MESH_OCR_CMD on the node)"},
+                            "page_start": {"type": "integer", "description": "First PDF page (1-based)"},
+                            "page_end": {"type": "integer", "description": "Last PDF page"},
+                            "render_pages": {"type": "boolean",
+                                             "description": "Render PDF pages as images; default: only pages without text"},
+                            "encoding": {"type": "string",
+                                         "description": "Force a text encoding (utf-8, cp1251, cp1252...); default: detected"},
                         },
                         "required": ["path"]
                     }
@@ -2599,7 +2645,10 @@ async def messages_endpoint(request: Request):
                             "limit": {"type": "integer", "description": "Max results"},
                             "ignore_case": {"type": "boolean", "description": "Case-insensitive"},
                             "fixed": {"type": "boolean", "description": "Literal text, not regex"},
-                            "context": {"type": "integer", "description": "Context lines"}
+                            "context": {"type": "integer", "description": "Context lines"},
+                            "max_depth": {"type": "integer", "description": "Optional max directory depth"},
+                            "time_budget_ms": {"type": "integer", "description": "Wall-clock budget in ms (50-20000)"},
+                            "include_ignored": {"type": "boolean", "description": "Include ignored/heavy dirs"}
                         },
                         "required": ["pattern"]
                     }
@@ -2607,15 +2656,135 @@ async def messages_endpoint(request: Request):
                 {
                     "name": "glob_find",
                     "description": (
-                        "Find files by glob pattern (* and **)."
+                        "Find files by glob pattern (* and **) with early directory pruning and a time budget."
                     ),
                     "inputSchema": {
                         "type": "object",
                         "properties": {
                             "pattern": {"type": "string", "description": "Glob pattern, e.g. \"**/*.py\" or \"src/*.json\""},
-                            "path": {"type": "string", "description": "Base directory to search from (default \".\")"}
+                            "path": {"type": "string", "description": "Base directory to search from (default \".\")"},
+                            "max_depth": {"type": "integer", "description": "Optional max directory depth"},
+                            "max_results": {"type": "integer", "description": "Max paths to return (1-10000)"},
+                            "time_budget_ms": {"type": "integer", "description": "Wall-clock budget in ms (50-20000)"},
+                            "include_ignored": {"type": "boolean", "description": "Include ignored/heavy dirs"},
+                            "use_index": {"type": "string", "enum": ["auto", "only", "off"], "description": "Use local SQLite FTS5 file index when available"}
                         },
                         "required": ["pattern"]
+                    }
+                },
+                {
+                    "name": "win_places",
+                    "description": (
+                        "Instant (<100 ms) user-context snapshot: real Known Folders (Desktop, "
+                        "Documents, Downloads, OneDrive, Telegram Desktop), recent opened files "
+                        "from Windows .lnk shortcuts, and fixed drives with 1st-level directories."
+                    ),
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "recent_limit": {"type": "integer", "description": "Max recent files (1-100, default 30)"},
+                            "top_level_limit": {"type": "integer", "description": "Max 1st-level folders per drive (0-100, default 30)"},
+                            "only_existing_recent": {"type": "boolean", "description": "Skip missing recent targets (default true)"}
+                        }
+                    }
+                },
+                {
+                    "name": "batch_read",
+                    "description": (
+                        "Run up to 16 read-only inspection calls (list_dir, read_file, glob_find, "
+                        "grep_search, win_places, mesh_status, system_vitals, job_list, job_output) in a single MCP call."
+                    ),
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "ops": {
+                                "type": "array",
+                                "description": "List of {id?, tool, args?} read-only operations (max 16).",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "id": {"type": "string"},
+                                        "tool": {"type": "string"},
+                                        "args": {"type": "object"}
+                                    },
+                                    "required": ["tool"]
+                                }
+                            },
+                            "time_budget_ms": {"type": "integer", "description": "Total wall-clock budget in ms (100-20000)"},
+                            "max_total_chars": {"type": "integer", "description": "Total output cap in chars (1000-200000)"}
+                        },
+                        "required": ["ops"]
+                    }
+                },
+                {
+                    "name": "batch_edit",
+                    "description": (
+                        "Apply up to 16 edit/write file operations in one MCP round-trip "
+                        "(supports dry_run validation and stop_on_error)."
+                    ),
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "ops": {
+                                "type": "array",
+                                "description": "List of {id?, op: 'edit'|'write', path, ...} operations (max 16).",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "id": {"type": "string"},
+                                        "op": {"type": "string", "enum": ["edit", "write"]},
+                                        "path": {"type": "string"},
+                                        "content": {"type": "string"},
+                                        "old_string": {"type": "string"},
+                                        "new_string": {"type": "string"},
+                                        "expected_sha256": {"type": "string"},
+                                        "replace_all": {"type": "boolean"},
+                                        "create_dirs": {"type": "boolean"}
+                                    },
+                                    "required": ["op", "path"]
+                                }
+                            },
+                            "stop_on_error": {"type": "boolean", "description": "Stop on first failed op (default true)"},
+                            "dry_run": {"type": "boolean", "description": "Validate without modifying files (default false)"}
+                        },
+                        "required": ["ops"]
+                    }
+                },
+                {
+                    "name": "run_script",
+                    "description": (
+                        "Write and execute a temporary script (python, powershell, bash, cmd) in one call. "
+                        "Set background=true to hand off long pipelines to run_job."
+                    ),
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "code": {"type": "string", "description": "Full script source code"},
+                            "lang": {"type": "string", "enum": ["python", "powershell", "bash", "cmd"], "description": "Script language (default python)"},
+                            "cwd": {"type": "string", "description": "Working directory (default workspace)"},
+                            "timeout_sec": {"type": "integer", "description": "Foreground timeout in seconds (1-120, default 25)"},
+                            "background": {"type": "boolean", "description": "Run via run_job and return job_id (default false)"},
+                            "max_chars": {"type": "integer", "description": "Max stdout/stderr chars"}
+                        },
+                        "required": ["code"]
+                    }
+                },
+                {
+                    "name": "fs_index",
+                    "description": (
+                        "Manage the local SQLite FTS5 file index for instant glob_find queries: "
+                        "action='status', 'refresh' (background=true by default), or 'schedule'."
+                    ),
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "action": {"type": "string", "enum": ["status", "refresh", "schedule"]},
+                            "roots": {"type": "array", "items": {"type": "string"}},
+                            "background": {"type": "boolean"},
+                            "time_budget_ms": {"type": "integer"},
+                            "every_sec": {"type": "integer"},
+                            "label": {"type": "string"}
+                        }
                     }
                 },
                 {
@@ -2675,6 +2844,10 @@ async def messages_endpoint(request: Request):
         name = params.get("name")
         args = _strip_reserved_arguments(params.get("arguments", {}))
         is_error = False
+        # Set only by a tool whose answer is a content array (read_media): those
+        # blocks must reach the client byte for byte, so they are forwarded instead
+        # of being described in one text block.
+        content_blocks = None
         if name == "get_orchestration_skill":
             content_text = get_skill(user, request.headers.get("host", PUBLIC_HOST))
         elif name == "mesh_status":
@@ -2834,6 +3007,41 @@ async def messages_endpoint(request: Request):
             else:
                 res = await call_remote_tool(user, name, args)
                 content_text, is_error = format_command_result(res, name)
+        elif name == "read_media":
+            res = await call_remote_tool(user, name, args)
+            err = remote_tool_error(res)
+            if err:
+                is_error = True
+                content_text = f"[Error] {err}"
+            else:
+                raw_blocks = res.get("content") if isinstance(res.get("content"), list) else []
+                forwarded = [block for block in raw_blocks
+                             if isinstance(block, dict)
+                             and block.get("type") in ("text", "image", "audio")
+                             and (block.get("type") != "text"
+                                  or isinstance(block.get("text"), str))
+                             and (block.get("type") == "text"
+                                  or isinstance(block.get("data"), str))]
+                if not forwarded:
+                    # A node from before this tool answers with a plain dict; say so
+                    # instead of showing the client an empty answer it cannot explain.
+                    is_error = True
+                    content_text = ("[Error] the node returned no content blocks for read_media: "
+                                    "it may run an older build. Update the node (mesh_update).")
+                else:
+                    base64_chars = sum(len(block.get("data") or "") for block in forwarded)
+                    if base64_chars > MAX_GATEWAY_MEDIA_B64:
+                        text_blocks = [block for block in forwarded if block.get("type") == "text"]
+                        dropped = len(forwarded) - len(text_blocks)
+                        text_blocks.append({
+                            "type": "text",
+                            "text": ("... [The gateway dropped %d media block(s): the answer carried "
+                                     "%d base64 characters, above its %d limit. Re-send with a smaller "
+                                     "max_side or fewer max_frames.] ..."
+                                     % (dropped, base64_chars, MAX_GATEWAY_MEDIA_B64)),
+                        })
+                        forwarded = text_blocks
+                    content_blocks = forwarded
         elif name in ("write_file", "edit_file"):
             if is_system_path(args.get("path")):
                 # The unconfirmed file tools never touch the system: that is what
@@ -2900,6 +3108,17 @@ async def messages_endpoint(request: Request):
                 content_text = "\n".join(str(f) for f in files) if files else "No files found."
                 if res.get("truncated"):
                     content_text += f"\n\n(truncated: showing first {len(files)} paths)"
+                if res.get("partial"):
+                    hint = res.get("next_hint") or "time_budget_ms reached"
+                    content_text += f"\n\n(partial: {hint})"
+        elif name in ("win_places", "batch_read", "batch_edit", "run_script", "fs_index"):
+            res = await call_remote_tool(user, name, args)
+            err = remote_tool_error(res)
+            if err:
+                is_error = True
+                content_text = f"[Error] {err}"
+            else:
+                content_text = json.dumps(res, ensure_ascii=False)
         elif name == "run_job":
             kind = classify_command(args.get("command"))
             if kind:
@@ -3072,20 +3291,26 @@ async def messages_endpoint(request: Request):
         # break byte-exact continuation. Keep the head and say how to get the
         # rest, so the model can ask for the next page instead of losing data.
         MAX_GATEWAY_TEXT = 45000
-        if len(content_text) > MAX_GATEWAY_TEXT:
-            kept = content_text[:MAX_GATEWAY_TEXT]
-            omitted = len(content_text) - MAX_GATEWAY_TEXT
-            content_text = (
-                f"{kept}\n\n... [Output truncated by the gateway: {omitted} more characters. "
-                f"Do not re-run the command; the node can page the rest: call the same tool again "
-                f"with cursor=<next_cursor> and a larger max_chars, or read the saved file if the "
-                f"result reported one.] ..."
-            )
+        if content_blocks is not None:
+            # read_media built the array itself and already kept it inside the
+            # node-side budgets; the text guard would only cut a description that is
+            # not there, so the blocks go through as they are.
+            resp["result"] = {"content": content_blocks, "isError": is_error}
+        else:
+            if len(content_text) > MAX_GATEWAY_TEXT:
+                kept = content_text[:MAX_GATEWAY_TEXT]
+                omitted = len(content_text) - MAX_GATEWAY_TEXT
+                content_text = (
+                    f"{kept}\n\n... [Output truncated by the gateway: {omitted} more characters. "
+                    f"Do not re-run the command; the node can page the rest: call the same tool again "
+                    f"with cursor=<next_cursor> and a larger max_chars, or read the saved file if the "
+                    f"result reported one.] ..."
+                )
 
-        resp["result"] = {
-            "content": [{"type": "text", "text": content_text}],
-            "isError": is_error
-        }
+            resp["result"] = {
+                "content": [{"type": "text", "text": content_text}],
+                "isError": is_error
+            }
     elif method == "prompts/list":
         resp["result"] = {
             "prompts": [{"name": "rhm-orchestrator", "description": f"Orchestrator role for {user}"}]
@@ -3860,8 +4085,31 @@ TOOL_ANNOTATIONS = {
     "get_orchestration_skill": _ANNOT_READ_ONLY,
     "list_dir": _ANNOT_READ_ONLY,
     "read_file": _ANNOT_READ_ONLY,
+    # read_media only observes: it re-encodes in memory and returns blocks, and
+    # writes nothing on the host. Both sides advertise it read-only.
+    "read_media": _ANNOT_READ_ONLY,
     "grep_search": _ANNOT_READ_ONLY,
     "glob_find": _ANNOT_READ_ONLY,
+    "win_places": _ANNOT_READ_ONLY,
+    "batch_read": _ANNOT_READ_ONLY,
+    "batch_edit": {
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": False,
+    },
+    "run_script": {
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": False,
+    },
+    "fs_index": {
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": False,
+    },
     "job_output": _ANNOT_READ_ONLY,
     "job_list": _ANNOT_READ_ONLY,
     "share_list": _ANNOT_READ_ONLY,

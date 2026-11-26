@@ -49,6 +49,10 @@ SHARE_TOOLS = ("share_file", "serve_dir", "share_list", "unshare")
 #: and swallowing the device tools into them would make that name a lie.
 DEVICE_TOOLS = ("device_info", "device_control", "device_capture", "device_messages")
 
+#: The media reader landed next to ``read_file`` - the tool it complements - so the
+#: legacy block carries it in that slot and no group had to be renumbered.
+MEDIA_TOOLS = ("read_media",)
+
 #: The node's own switches (``node_control``) and the persistent objective
 #: (``goal``) landed next to self-update for the same reason the device branch
 #: did: after the legacy surface and before the device block, so no block that
@@ -70,6 +74,11 @@ PRE_EXISTING_TOOLS = (
     "edit_file",
     "grep_search",
     "glob_find",
+    "win_places",
+    "batch_read",
+    "batch_edit",
+    "run_script",
+    "fs_index",
     "run_job",
     "job_output",
     "job_kill",
@@ -84,7 +93,8 @@ DESKTOP_TOOLS = ("screen_capture",)
 
 #: The legacy block as it is advertised now: the pre-existing order with the
 #: desktop tool inserted at the position it was added to.
-LEGACY_ORDER = PRE_EXISTING_TOOLS[:3] + DESKTOP_TOOLS + PRE_EXISTING_TOOLS[3:]
+LEGACY_ORDER = (PRE_EXISTING_TOOLS[:3] + DESKTOP_TOOLS
+                + PRE_EXISTING_TOOLS[3:7] + MEDIA_TOOLS + PRE_EXISTING_TOOLS[7:])
 
 
 def _opener():
@@ -154,9 +164,9 @@ def test_the_share_tools_are_the_last_four_and_do_not_disturb_the_rest():
     assert names[settings_at:device_at] == list(SETTINGS_TOOLS)
     assert names[device_at:shares_at] == list(DEVICE_TOOLS)
     assert tuple(names[shares_at:]) == SHARE_TOOLS
-    assert len(names) == 27, (
-        "the node must advertise 16 legacy tools, screen_capture, node_control, "
-        "schedule, 4 device tools and 4 share tools")
+    assert len(names) == 33, (
+        "the node must advertise 16 legacy tools, screen_capture, read_media, win_places, "
+        "batch_read, batch_edit, run_script, fs_index, node_control, schedule, 4 device tools and 4 share tools")
 
 
 def test_every_share_tool_has_a_handler_and_a_schema():

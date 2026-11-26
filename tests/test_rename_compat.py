@@ -217,25 +217,6 @@ def test_gateway_reads_the_pre_rename_registry_when_it_is_the_only_one():
     assert "REGISTRY_PATH = LEGACY_REGISTRY_PATH" in text
 
 
-def test_webhook_server_keeps_the_pre_rename_env_route_and_header():
-    text = _read("rhm_webhook_server.py")
-    assert 'os.environ.get("AGY_WEBHOOK_PORT"' in text
-    assert 'os.environ.get("RHM_WEBHOOK_PORT")' in text
-    assert 'os.environ.get("AGY_WEBHOOK_HOST"' in text
-    assert 'os.environ.get("RHM_WEBHOOK_HOST")' in text
-    assert '"/api/agy"' in text, "the pre-rename route must still be served"
-    assert 'X-Agy-Token' in text
-    assert "ANTIGRAVITY_CLI_BIN" in text
-
-
-def test_apps_script_relay_reads_both_property_spellings():
-    text = _read("google_apps_script_relay.js")
-    assert "props.getProperty('RHM_SECRET_TOKEN')" in text
-    assert "props.getProperty('AGY_SECRET_TOKEN')" in text
-    assert "props.getProperty('RHM_ENDPOINT_BASE')" in text
-    assert "props.getProperty('AGY_ENDPOINT_BASE')" in text
-
-
 # ---------------------------------------------------------------------------
 # Identity: the published names are the new ones
 # ---------------------------------------------------------------------------

@@ -1224,6 +1224,11 @@ if (-not $ScriptDir -or -not (Test-Path "$ScriptDir\core\agent.py")) {
         "core/schemas.py",
         "core/server.py",
         "core/landing.py",
+        # read_media: the file-to-content-block pipeline (MCP image/audio blocks).
+        "core/media.py",
+        "core/doc_read.py",
+        "core/fs_search.py",
+        "core/fs_index.py",
         "core/settings.py",
         "core/subagents.py",
         "core/termux.py",
@@ -1239,9 +1244,13 @@ if (-not $ScriptDir -or -not (Test-Path "$ScriptDir\core\agent.py")) {
         "core/platforms/common.py",
         "core/platforms/encoding.py",
         "core/platforms/png.py",
+        # Decoding and shrinking a PNG for read_media; the encoder above stays the
+        # only PNG writer, but reading one back needs this sibling.
+        "core/platforms/raster.py",
         "core/platforms/shell.py",
         "core/platforms/windows/__init__.py",
         "core/platforms/windows/clipboard.py",
+        "core/platforms/windows/places.py",
         "core/platforms/windows/process.py",
         "core/platforms/windows/screen.py",
         "core/platforms/windows/telemetry.py",

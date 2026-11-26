@@ -1079,9 +1079,10 @@ if [ ! -f "$SCRIPT_DIR/core/agent.py" ]; then
              core/policies.py core/policy.py core/rekey.py \
              core/redact.py core/rescue.py core/sandbox.py core/schedule.py core/schemas.py core/server.py core/settings.py core/subagents.py core/termux.py core/landing.py \
              core/triggers.py core/updater.py core/usage.py core/version.py core/vitals.py core/web_share.py core/web_settings.py \
+             core/media.py core/doc_read.py core/fs_search.py core/fs_index.py \
              core/platforms/__init__.py core/platforms/base.py core/platforms/common.py \
-             core/platforms/encoding.py core/platforms/png.py core/platforms/shell.py \
-             core/platforms/windows/__init__.py core/platforms/windows/clipboard.py \
+             core/platforms/encoding.py core/platforms/png.py core/platforms/raster.py core/platforms/shell.py \
+             core/platforms/windows/__init__.py core/platforms/windows/clipboard.py core/platforms/windows/places.py \
              core/platforms/windows/process.py core/platforms/windows/screen.py \
              core/platforms/windows/telemetry.py core/platforms/windows/winapi.py \
              core/platforms/linux/__init__.py core/platforms/linux/process.py \
