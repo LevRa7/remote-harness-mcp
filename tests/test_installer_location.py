@@ -89,13 +89,44 @@ def test_the_installer_accepts_location_and_setup_switches():
     text = _text(INSTALL_PS1)
     assert "[string]$InstallDir" in text
     assert "[ValidateSet('auto', 'service', 'logon', 'none')]" in text
-    assert "[bool]$AddToPath = $true" in text
+    assert "[object]$AddToPath = $true" in text
     assert "[switch]$Shortcuts" in text
     assert "function Copy-NodePayload {" in text
+    assert "function Get-ExistingInstallDir {" in text
+    assert "function Stop-ExistingNodeInstances {" in text
+    assert "Stop-ExistingNodeInstances -Language $Lang" in text
     assert "$copyError = Copy-NodePayload -Source $currentDir -Target $targetDir" in text
     # A dry run reports and changes nothing, so it must not copy a payload into a
     # folder the operator has not approved yet.
     assert "if ($InstallDir -and $ScriptDir -and -not $DryRun) {" in text
+
+
+@needs_windows
+@pytest.mark.parametrize("flag", ["-AddToPath:$true", "-AddToPath:$false"])
+def test_powershell_51_file_invocation_accepts_addtopath_flag(flag):
+    """Windows PowerShell 5.1 -File passes '-AddToPath:$true' as literal '$true'."""
+    result = subprocess.run(
+        [
+            _powershell(), "-NoProfile", "-ExecutionPolicy", "Bypass",
+            "-File", INSTALL_PS1,
+            "-Lang", "en", "-DryRun", "-Mode", "standalone", "-Funnel",
+            "-InstallDir", r"D:\RemoteHarnessMCP", "-Autostart", "logon",
+            flag, "-Shortcuts",
+        ],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert result.returncode == 0, (result.stdout or "") + (result.stderr or "")
+    assert "ParameterArgumentTransformationError" not in (result.stderr or "")
+
+
+def test_gui_default_dir_never_uses_version_scratch_leaf():
+    gui = _text(GUI_SCRIPT)
+    assert "function Get-ExistingInstallDir {" in gui
+    assert "function Get-DefaultInstallDir {" in gui
+    assert r"^\d+\.\d+\.\d+" in gui
+    strings = _strings()
+    assert "loc_existing_hint" in strings["en"]
+    assert "loc_existing_hint" in strings["ru"]
 
 
 def test_autostart_none_registers_no_entry_and_removes_an_old_one():

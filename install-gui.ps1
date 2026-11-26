@@ -136,7 +136,10 @@ function Read-TextFileTolerant {
     } catch {
         $codePage = 0
         try { $codePage = [Console]::OutputEncoding.CodePage } catch { }
-        if ($codePage -le 0) { $codePage = 866 }
+        if ($codePage -le 0 -or $codePage -eq 65001) {
+            try { $codePage = [System.Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage } catch { $codePage = 866 }
+        }
+        if ($codePage -le 0 -or $codePage -eq 65001) { $codePage = 866 }
         try { $text = [System.Text.Encoding]::GetEncoding($codePage).GetString($bytes) }
         catch { $text = [System.Text.Encoding]::Default.GetString($bytes) }
     }
@@ -825,10 +828,76 @@ $script:Mode = 'funnel'
 # opt-in switch, never the default; only the SSH variant, which installs on
 # another machine, forces it off anyway.
 $script:AdminService = $false
+function Get-ExistingInstallDir {
+    $candidates = New-Object System.Collections.ArrayList
+    if ($env:LOCALAPPDATA) {
+        $rhmEnv = Join-Path $env:LOCALAPPDATA 'Programs\RemoteHarnessMCP\bin\rhm.env'
+        if (Test-Path -LiteralPath $rhmEnv) {
+            try {
+                foreach ($ln in (Get-Content -LiteralPath $rhmEnv -ErrorAction SilentlyContinue)) {
+                    if ($ln -match '^\s*RHM_PAYLOAD\s*=\s*(.+?)\s*$') {
+                        [void]$candidates.Add($Matches[1].Trim().Trim('"'))
+                    }
+                }
+            } catch { }
+        }
+    }
+    try {
+        $task = Get-ScheduledTask -TaskName 'RemoteHarnessMCPService' -ErrorAction SilentlyContinue
+        if ($task -and $task.Actions) {
+            foreach ($act in $task.Actions) {
+                if ($act.WorkingDirectory) { [void]$candidates.Add($act.WorkingDirectory.Trim().Trim('"')) }
+                if ($act.Arguments -match '([A-Za-z]:\\[^"\r\n]+?)\\ops\\windows\\') {
+                    [void]$candidates.Add($Matches[1].Trim())
+                }
+            }
+        }
+    } catch { }
+    $startupDir = [Environment]::GetFolderPath('Startup')
+    foreach ($vbsName in @('rhm-node.vbs', 'rhm-agent.vbs')) {
+        $vbs = Join-Path $startupDir $vbsName
+        if (Test-Path -LiteralPath $vbs) {
+            try {
+                $txt = Get-Content -LiteralPath $vbs -Raw -ErrorAction SilentlyContinue
+                if ($txt -match 'CurrentDirectory\s*=\s*"([^"]+)"') {
+                    [void]$candidates.Add($Matches[1].Trim())
+                }
+            } catch { }
+        }
+    }
+    foreach ($raw in $candidates) {
+        if (-not $raw) { continue }
+        $norm = $raw.Trim().TrimEnd('\')
+        if ($norm -match '\\RemoteHarnessMCP\\setup\\' -or $norm -match '\\AppData\\Local\\Temp\\') { continue }
+        if ((Test-Path -LiteralPath (Join-Path $norm 'core\server.py')) -or (Test-Path -LiteralPath (Join-Path $norm 'core\menu.py'))) {
+            return $norm
+        }
+    }
+    return ''
+}
+
+function Get-DefaultInstallDir {
+    param([string]$FallbackDir)
+    $existing = Get-ExistingInstallDir
+    if ($existing) { return $existing }
+    $norm = "$FallbackDir".Trim().TrimEnd('\')
+    $leaf = ''
+    try { if ($norm) { $leaf = Split-Path -Leaf $norm } } catch { }
+    if (($norm -match '\\RemoteHarnessMCP\\setup\\') -or ($leaf -match '^\d+\.\d+\.\d+')) {
+        if ($env:LOCALAPPDATA) {
+            return (Join-Path $env:LOCALAPPDATA 'Programs\RemoteHarnessMCP')
+        }
+    }
+    if ($norm) { return $norm }
+    if ($env:LOCALAPPDATA) { return (Join-Path $env:LOCALAPPDATA 'Programs\RemoteHarnessMCP') }
+    return 'C:\RemoteHarnessMCP'
+}
+
 # Where the node's files are copied to, plus the three switches the options page
-# asks for. $ScriptDir is where the setup executable unpacked the payload - a
-# versioned scratch directory, so it is only the starting point, not the target.
-$script:InstallDir = $ScriptDir
+# asks for. If an earlier install already exists on this host, keep it in place;
+# otherwise never default into the versioned setup scratch directory.
+$script:ExistingInstallDir = Get-ExistingInstallDir
+$script:InstallDir = Get-DefaultInstallDir -FallbackDir $ScriptDir
 $script:AutostartEnabled = $true
 $script:AddToPath = $true
 $script:Shortcuts = $true
@@ -1068,13 +1137,16 @@ function Build-LocationPage {
             $trimmed = "$($script:InstallDir)".Trim().TrimEnd('\')
             if ($trimmed) {
                 $leafName = Split-Path -Leaf $trimmed
-                if ($leafName -and $leafName -notmatch '^[A-Za-z]:$') { $leaf = $leafName }
+                if ($leafName -and ($leafName -notmatch '^[A-Za-z]:$') -and ($leafName -notmatch '^\d+\.\d+\.\d+') -and ($leafName -ine 'setup')) {
+                    $leaf = $leafName
+                }
             }
         } catch { }
         $script:InstallDir = ($list[$this.SelectedIndex].Root + '\' + $leaf)
         $script:OptionError = ''
         if ($script:PathBox) { $script:PathBox.Text = $script:InstallDir }
     })
+    if ($script:ExistingInstallDir) { $driveBox.Enabled = $false }
     $group.Controls.Add($driveBox)
 
     $group.Controls.Add((New-Label -Text ((Get-UiText -Key 'loc_path_label') + ':') -X 16 -Y 134 -W 120 -H 20))
@@ -1083,6 +1155,7 @@ function Build-LocationPage {
         $script:OptionError = ''
         if ($script:FreeLabel) { $script:FreeLabel.Text = (Get-FreeSpaceLabel -Path $this.Text.Trim()) }
     }
+    if ($script:ExistingInstallDir) { $pathBox.ReadOnly = $true }
     $script:PathBox = $pathBox
     $group.Controls.Add($pathBox)
 
@@ -1090,6 +1163,7 @@ function Build-LocationPage {
     $browse.Text = Get-UiText -Key 'loc_browse'
     $browse.Location = New-Object System.Drawing.Point(644, 155)
     $browse.Size = New-Object System.Drawing.Size(96, 25)
+    if ($script:ExistingInstallDir) { $browse.Enabled = $false }
     $browse.Add_Click({
         $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
         $dialog.Description = Get-UiText -Key 'loc_path_label'
@@ -1109,7 +1183,12 @@ function Build-LocationPage {
     $group.Controls.Add($free)
 
     $script:Content.Controls.Add($group)
-    $script:Content.Controls.Add((New-Label -Text (Get-UiText -Key 'loc_hint') -X 20 -Y 244 -W 752 -H 36 -Dim))
+    $hintText = if ($script:ExistingInstallDir) {
+        Format-UiText -Key 'loc_existing_hint' -Values @($script:ExistingInstallDir)
+    } else {
+        Get-UiText -Key 'loc_hint'
+    }
+    $script:Content.Controls.Add((New-Label -Text $hintText -X 20 -Y 244 -W 752 -H 36 -Dim))
 }
 
 # ---- page 3: options ---------------------------------------------------------

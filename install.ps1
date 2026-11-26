@@ -27,7 +27,9 @@ param(
     [string]$Autostart = "auto",
     # Add the directory that holds rhm.cmd to the per-user PATH. On by default: an
     # earlier installer did it silently, and 'rhm' only works from a PATH entry.
-    [bool]$AddToPath = $true,
+    # Typed as [object] (not [bool]) because Windows PowerShell 5.1 -File passes
+    # '-AddToPath:$true' as the literal string "$true", which fails [bool] binding.
+    [object]$AddToPath = $true,
     # Start Menu and Desktop shortcuts for the console menu.
     [switch]$Shortcuts,    # Install the MCP service with administrator rights: a machine-wide scheduled
     # task that starts at boot, runs as SYSTEM and is allowed the highest
@@ -66,6 +68,15 @@ if ($Mode -eq "funnel") {
 $AutostartNone = ($Autostart -eq 'none')
 if ($Autostart -eq 'service') { $AdminService = $true }
 elseif ($Autostart -eq 'logon' -or $Autostart -eq 'none') { $AdminService = $false }
+
+# Normalise -AddToPath to a real [bool] regardless of how powershell.exe -File
+# delivered it ("$true", "$false", "true", "false", "1", "0", or native [bool]).
+if ($AddToPath -is [bool]) {
+    $AddToPath = [bool]$AddToPath
+} else {
+    $atpText = ("$AddToPath").Trim().ToLowerInvariant()
+    $AddToPath = ($atpText -notin @('false', '$false', '0', 'no', 'off'))
+}
 
 # Ensure UTF-8 output encoding in PowerShell console
 try {
@@ -1302,7 +1313,113 @@ if (-not $ScriptDir -or -not (Test-Path "$ScriptDir\core\agent.py")) {
 # so this one variable decides where the node really lives. The elevation child is
 # started from $ScriptPath for the same reason: $PSCommandPath still names the
 # directory the wizard unpacked into.
+function Get-ExistingInstallDir {
+    # Locate a previously installed payload directory so re-running the installer
+    # upgrades in place rather than creating a second copy on another path.
+    $candidates = New-Object System.Collections.ArrayList
+    if ($env:LOCALAPPDATA) {
+        $rhmEnv = Join-Path $env:LOCALAPPDATA "Programs\RemoteHarnessMCP\bin\rhm.env"
+        if (Test-Path -LiteralPath $rhmEnv) {
+            try {
+                foreach ($ln in (Get-Content -LiteralPath $rhmEnv -ErrorAction SilentlyContinue)) {
+                    if ($ln -match '^\s*RHM_PAYLOAD\s*=\s*(.+?)\s*$') {
+                        [void]$candidates.Add($Matches[1].Trim().Trim('"'))
+                    }
+                }
+            } catch {}
+        }
+    }
+    try {
+        $task = Get-ScheduledTask -TaskName "RemoteHarnessMCPService" -ErrorAction SilentlyContinue
+        if ($task -and $task.Actions) {
+            foreach ($act in $task.Actions) {
+                if ($act.WorkingDirectory) { [void]$candidates.Add($act.WorkingDirectory.Trim().Trim('"')) }
+                if ($act.Arguments -match '([A-Za-z]:\\[^"\r\n]+?)\\ops\\windows\\') {
+                    [void]$candidates.Add($Matches[1].Trim())
+                }
+            }
+        }
+    } catch {}
+    $startupDir = [Environment]::GetFolderPath('Startup')
+    foreach ($vbsName in @("rhm-node.vbs", "rhm-agent.vbs")) {
+        $vbs = Join-Path $startupDir $vbsName
+        if (Test-Path -LiteralPath $vbs) {
+            try {
+                $txt = Get-Content -LiteralPath $vbs -Raw -ErrorAction SilentlyContinue
+                if ($txt -match 'CurrentDirectory\s*=\s*"([^"]+)"') {
+                    [void]$candidates.Add($Matches[1].Trim())
+                }
+            } catch {}
+        }
+    }
+    foreach ($raw in $candidates) {
+        if (-not $raw) { continue }
+        $norm = $raw.Trim().TrimEnd('\')
+        if ($norm -match '\\RemoteHarnessMCP\\setup\\' -or $norm -match '\\AppData\\Local\\Temp\\') { continue }
+        if ((Test-Path -LiteralPath (Join-Path $norm "core\server.py")) -or (Test-Path -LiteralPath (Join-Path $norm "core\menu.py"))) {
+            return $norm
+        }
+    }
+    return ""
+}
+
+function Stop-ExistingNodeInstances {
+    param([string]$Language = "en")
+    # Stop any running Remote Harness MCP service, watchdogs, tray or Python node
+    # before overwriting files and starting the updated version (avoids file locks
+    # and SO_EXCLUSIVEADDRUSE port conflicts on Windows).
+    $stoppedAny = $false
+    foreach ($tName in @("RemoteHarnessMCPService", "RemoteHarnessMCPNode", "RemoteHarnessMCPAgent")) {
+        try {
+            $t = Get-ScheduledTask -TaskName $tName -ErrorAction SilentlyContinue
+            if ($t -and $t.State -eq 'Running') {
+                Stop-ScheduledTask -TaskName $tName -ErrorAction SilentlyContinue
+                $stoppedAny = $true
+            }
+        } catch {}
+    }
+    $myPid = $PID
+    try {
+        $procs = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+            $_.ProcessId -ne $myPid -and $_.CommandLine
+        }
+        foreach ($proc in $procs) {
+            $name = ([string]$proc.Name).ToLowerInvariant()
+            $cmd = [string]$proc.CommandLine
+            $isTarget = $false
+            if (($name -eq 'python.exe' -or $name -eq 'pythonw.exe') -and ($cmd -match 'core\.(server|agent)' -or $cmd -match 'rhm_mcp_server')) {
+                $isTarget = $true
+            } elseif (($name -eq 'powershell.exe' -or $name -eq 'pwsh.exe' -or $name -eq 'wscript.exe') -and ($cmd -match '(agent-watchdog|funnel-watchdog|rhm-tray|rhm-service)\.ps1' -or $cmd -match 'rhm-(node|agent)\.vbs')) {
+                $isTarget = $true
+            }
+            if ($isTarget) {
+                try {
+                    Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue
+                    $stoppedAny = $true
+                } catch {}
+            }
+        }
+    } catch {}
+    if ($stoppedAny) {
+        if ($Language -eq "ru") { Write-Host "[*] Остановлен ранее запущенный экземпляр узла на время обновления..." -ForegroundColor Yellow }
+        else { Write-Host "[*] Stopped running node instance for upgrade..." -ForegroundColor Yellow }
+        Start-Sleep -Seconds 2
+    }
+}
+
 $ScriptPath = if ($PSCommandPath) { $PSCommandPath } else { "" }
+# If an earlier installation already exists on this host, upgrade strictly into
+# that directory whenever -InstallDir was omitted or pointed at a scratch setup dir.
+if (-not $DryRun) {
+    $ExistingInstallDir = Get-ExistingInstallDir
+    if ($ExistingInstallDir) {
+        $isScratchTarget = (-not $InstallDir) -or ($InstallDir -match '\\RemoteHarnessMCP\\setup\\')
+        if ($isScratchTarget) {
+            $InstallDir = $ExistingInstallDir
+        }
+    }
+    Stop-ExistingNodeInstances -Language $Lang
+}
 # -DryRun reports and changes nothing, so it must not copy a payload into a folder
 # nobody approved yet.
 if ($InstallDir -and $ScriptDir -and -not $DryRun) {
