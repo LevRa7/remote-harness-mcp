@@ -85,6 +85,7 @@ import zipfile
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from core import paths
+from core import tls
 from core import version as version_module
 
 logger = logging.getLogger("rhm-updater")
@@ -372,7 +373,15 @@ def config_from_env(env: Optional[Dict[str, str]] = None,
 # ---------------------------------------------------------------------------
 
 def _ssl_context() -> ssl.SSLContext:
-    return ssl.create_default_context()
+    """The CA bundle the node trusts, shared with ``fetch_url``.
+
+    A Windows box receives its roots from the platform store, which on a
+    restored or never-updated image can predate the current public CAs - the
+    download then fails with ``unable to get local issuer certificate`` and no
+    release can install. :mod:`core.tls` prefers an operator bundle, then
+    certifi, and only then the platform store.
+    """
+    return tls.context()
 
 
 def http_get(url: str, *, headers: Optional[Dict[str, str]] = None,

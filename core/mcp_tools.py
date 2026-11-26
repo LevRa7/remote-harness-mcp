@@ -38,6 +38,7 @@ import re
 import shutil
 import signal as _signal
 import socket
+import ssl
 import subprocess
 import tempfile
 import threading
@@ -58,6 +59,7 @@ from core import domain
 from core import fs_search
 from core import goal
 from core import paths
+from core import tls
 from core import platforms
 from core import sandbox
 from core import schedule as schedule_module
@@ -650,14 +652,25 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return default
 
 
+#: ANSI escape sequences (colours, cursor moves) and the C0/C1 controls that are
+#: not whitespace. Both are compiled once: the character-by-character version this
+#: replaced cost ~80 ms on a 650 KB file - about the whole read_file call - while
+#: a pre-compiled scan over the same text is under a millisecond.
+_ANSI_ESCAPE_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]")
+
+
 def _sanitize_output(text: str) -> str:
     """Strip ANSI escapes and non-printable control characters."""
     if not text:
         return ""
-    text = re.sub(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])", "", text)
-    return "".join(
-        ch for ch in text if ch in ("\n", "\r", "\t") or (ord(ch) >= 32 and ord(ch) != 127)
-    )
+    if "\x1b" in text:
+        text = _ANSI_ESCAPE_RE.sub("", text)
+    # Clean text - the common case for source files and command output - leaves
+    # here without a second allocation.
+    if _CONTROL_CHARS_RE.search(text) is None:
+        return text
+    return _CONTROL_CHARS_RE.sub("", text)
 
 
 # ---------------------------------------------------------------------------
@@ -4132,70 +4145,161 @@ def _strip_html_to_text(html_text: str) -> str:
     return parser.get_text()
 
 
+#: Explicit CA bundle for fetch_url. An operator behind a TLS-inspecting proxy
+#: points this at the proxy PEM; it is tried before every built-in store.
+FETCH_URL_CA_ENV = tls.CA_BUNDLE_ENV
+#: Opt-in escape hatch for a host whose trust store cannot verify anything.
+#: Never the default: the SSRF guard decides where a request goes, while this
+#: switch decides whom it believes, and trusting everyone on every node would
+#: turn a reviewed guard into a formality.
+FETCH_URL_INSECURE_ENV = "MESH_TLS_INSECURE"
+
+_ssl_context_lock = threading.Lock()
+_ssl_store_cache: Optional[Tuple[str, "ssl.SSLContext"]] = None
+
+
+def _fetch_url_ssl_stores() -> List[Tuple[str, "ssl.SSLContext"]]:
+    """TLS trust stores to try, the one that worked last time first.
+
+    The choice itself - operator bundle, then certifi, then the platform store -
+    lives in :mod:`core.tls`, so the updater and every other HTTPS client make
+    the same decision. This wrapper adds what only this tool has: the store that
+    verified last time is tried first, and ``MESH_TLS_INSECURE`` may append an
+    unverified context as an explicit last resort.
+    """
+    global _ssl_store_cache
+    stores: List[Tuple[str, "ssl.SSLContext"]] = []
+    with _ssl_context_lock:
+        cached = _ssl_store_cache
+    if cached is not None:
+        stores.append(cached)
+
+    for label, context in tls.stores():
+        if any(context is existing for _, existing in stores):
+            continue
+        stores.append((label, context))
+
+    if _parse_bool(os.environ.get(FETCH_URL_INSECURE_ENV)):
+        try:
+            stores.append(("insecure", ssl._create_unverified_context()))
+        except Exception:
+            pass
+    return stores
+
+
+def _remember_fetch_url_store(label: str, context: "ssl.SSLContext") -> None:
+    """Keep the store that verified, so later fetches do not retry dead ones."""
+    global _ssl_store_cache
+    with _ssl_context_lock:
+        _ssl_store_cache = (label, context)
+
+
+def _fetch_url_attempt(
+    url: str,
+    context: "ssl.SSLContext",
+    max_bytes: int,
+    timeout_sec: int,
+) -> Tuple[str, int, str, bytes, bool, int]:
+    """One fetch, redirects included, over one TLS context.
+
+    Every hop is re-validated by :func:`_validate_fetch_url` before it is opened,
+    so a redirect cannot walk the request into a private address.
+    """
+    opener = urllib.request.build_opener(
+        _NoRedirectHandler(),
+        urllib.request.HTTPSHandler(context=context),
+    )
+    headers = {"User-Agent": "remote-harness-mcp/fetch_url"}
+    current_url = url
+    redirects = 0
+    status = 0
+    content_type = ""
+    raw = b""
+    truncated = False
+
+    while True:
+        req = urllib.request.Request(current_url, headers=headers, method="GET")
+        try:
+            resp = opener.open(req, timeout=timeout_sec)
+        except urllib.error.HTTPError as exc:
+            if exc.code in (301, 302, 303, 307, 308):
+                location = exc.headers.get("Location") if exc.headers else None
+                exc.close()
+                if not location:
+                    raise ValueError("redirect (%d) without Location header" % exc.code)
+                redirects += 1
+                if redirects > FETCH_URL_MAX_REDIRECTS:
+                    raise ValueError("too many redirects (max %d)" % FETCH_URL_MAX_REDIRECTS)
+                current_url = _validate_fetch_url(urllib.parse.urljoin(current_url, location))
+                continue
+            status = exc.code
+            content_type = (exc.headers.get("Content-Type") or "") if exc.headers else ""
+            try:
+                raw = exc.read(max_bytes + 1)
+            except Exception:
+                raw = b""
+            finally:
+                exc.close()
+            break
+        else:
+            with resp:
+                status = int(getattr(resp, "status", 200) or 200)
+                content_type = resp.headers.get("Content-Type") or ""
+                if status in (301, 302, 303, 307, 308):
+                    location = resp.headers.get("Location")
+                    if not location:
+                        raise ValueError("redirect (%d) without Location header" % status)
+                    redirects += 1
+                    if redirects > FETCH_URL_MAX_REDIRECTS:
+                        raise ValueError("too many redirects (max %d)" % FETCH_URL_MAX_REDIRECTS)
+                    current_url = _validate_fetch_url(urllib.parse.urljoin(current_url, location))
+                    continue
+                raw = resp.read(max_bytes + 1)
+            break
+
+    if len(raw) > max_bytes:
+        raw = raw[:max_bytes]
+        truncated = True
+    return current_url, status, content_type, raw, truncated, redirects
+
+
 def _tool_fetch_url(args: Dict[str, Any]) -> Dict[str, Any]:
     try:
         url = args.get("url")
-        current_url = _validate_fetch_url(url)
+        start_url = _validate_fetch_url(url)
         max_bytes = _clamp_int(args.get("max_bytes"), 1, FETCH_URL_MAX_BYTES, FETCH_URL_MAX_BYTES)
         timeout_sec = _clamp_int(
             args.get("timeout_sec"), 1, FETCH_URL_MAX_TIMEOUT, FETCH_URL_DEFAULT_TIMEOUT
         )
         strip_html = True if args.get("strip_html") is None else _parse_bool(args.get("strip_html"))
 
-        opener = urllib.request.build_opener(_NoRedirectHandler())
-        headers = {"User-Agent": "remote-harness-mcp/fetch_url"}
-
-        redirects = 0
-        status = 0
-        content_type = ""
-        raw = b""
-        truncated = False
-
-        while True:
-            req = urllib.request.Request(current_url, headers=headers, method="GET")
+        stores = _fetch_url_ssl_stores()
+        attempt: Optional[Tuple[str, int, str, bytes, bool, int]] = None
+        tls_error: Optional[BaseException] = None
+        for store_label, context in stores:
             try:
-                resp = opener.open(req, timeout=timeout_sec)
-            except urllib.error.HTTPError as exc:
-                if exc.code in (301, 302, 303, 307, 308):
-                    location = exc.headers.get("Location") if exc.headers else None
-                    exc.close()
-                    if not location:
-                        return {"error": "redirect (%d) without Location header" % exc.code}
-                    redirects += 1
-                    if redirects > FETCH_URL_MAX_REDIRECTS:
-                        return {"error": "too many redirects (max %d)" % FETCH_URL_MAX_REDIRECTS}
-                    next_url = urllib.parse.urljoin(current_url, location)
-                    current_url = _validate_fetch_url(next_url)
+                attempt = _fetch_url_attempt(start_url, context, max_bytes, timeout_sec)
+            except (urllib.error.URLError, ssl.SSLError) as exc:
+                reason = getattr(exc, "reason", exc)
+                if isinstance(reason, ssl.SSLError):
+                    tls_error = reason
                     continue
-                status = exc.code
-                content_type = (exc.headers.get("Content-Type") or "") if exc.headers else ""
-                try:
-                    raw = exc.read(max_bytes + 1)
-                except Exception:
-                    raw = b""
-                finally:
-                    exc.close()
-                break
-            else:
-                with resp:
-                    status = int(getattr(resp, "status", 200) or 200)
-                    content_type = resp.headers.get("Content-Type") or ""
-                    if status in (301, 302, 303, 307, 308):
-                        location = resp.headers.get("Location")
-                        if not location:
-                            return {"error": "redirect (%d) without Location header" % status}
-                        redirects += 1
-                        if redirects > FETCH_URL_MAX_REDIRECTS:
-                            return {"error": "too many redirects (max %d)" % FETCH_URL_MAX_REDIRECTS}
-                        next_url = urllib.parse.urljoin(current_url, location)
-                        current_url = _validate_fetch_url(next_url)
-                        continue
-                    raw = resp.read(max_bytes + 1)
-                break
+                raise
+            _remember_fetch_url_store(store_label, context)
+            break
 
-        if len(raw) > max_bytes:
-            raw = raw[:max_bytes]
-            truncated = True
+        if attempt is None:
+            host = urllib.parse.urlsplit(start_url).hostname
+            tried = ", ".join(label for label, _ in stores) or "none"
+            return {
+                "error": (
+                    "fetch_url failed: TLS certificate verification failed for %s (%s); "
+                    "trust stores tried: %s. Point %s at a CA bundle (PEM) or install certifi."
+                ) % (host, tls_error, tried, FETCH_URL_CA_ENV),
+                "tls_error": str(tls_error or ""),
+            }
+
+        current_url, status, content_type, raw, truncated, redirects = attempt
 
         charset = "utf-8"
         m = re.search(r"charset=([A-Za-z0-9._-]+)", content_type, re.IGNORECASE)
@@ -4223,7 +4327,6 @@ def _tool_fetch_url(args: Dict[str, Any]) -> Dict[str, Any]:
         return {"error": str(exc)}
     except Exception as exc:
         return {"error": "fetch_url failed: %s" % exc}
-
 
 # ---------------------------------------------------------------------------
 # Tool definitions (MCP schemas)
