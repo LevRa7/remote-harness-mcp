@@ -2327,6 +2327,7 @@ def collect(sections: Optional[Iterable[str]] = None,
         return results
     pool = ThreadPoolExecutor(max_workers=min(6, len(names)),
                               thread_name_prefix="device-collect")
+    timed_out = False
     try:
         futures = {name: pool.submit(_collect_one, name, kwargs) for name in names}
         for name, future in futures.items():
@@ -2334,10 +2335,11 @@ def collect(sections: Optional[Iterable[str]] = None,
             try:
                 results[name] = future.result(timeout=max(0.05, remaining))
             except Exception:
+                timed_out = True
                 results[name] = _unavailable(
                     "timed out after %.1fs" % deadline, source=name)
     finally:
-        pool.shutdown(wait=False)
+        pool.shutdown(wait=not timed_out)
     return results
 
 

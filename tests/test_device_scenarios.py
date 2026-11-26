@@ -875,8 +875,16 @@ def test_a_collector_that_returns_a_non_block_is_a_block(monkeypatch):
 # (g) quick=True never touches a slow source
 # ---------------------------------------------------------------------------
 
+def _drain_device_collect_threads(timeout: float = 2.0) -> None:
+    import threading
+    for thread in list(threading.enumerate()):
+        if thread.is_alive() and thread.name.startswith("device-collect"):
+            thread.join(timeout=timeout)
+
+
 @pytest.mark.parametrize("case", device.SCENARIOS)
 def test_quick_never_touches_a_slow_section(case, fake_platform):
+    _drain_device_collect_threads()
     recorder = fake_platform(case)
     slow = _slow_commands(case)
     assert slow, "no slow-section command is declared for %s" % case
