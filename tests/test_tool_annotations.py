@@ -55,8 +55,12 @@ READ_ONLY = {
     "get_orchestration_skill",
     "list_dir",
     "read_file",
+    # read_media reads a file and re-encodes it in memory; nothing on the host changes.
+    "read_media",
     "grep_search",
     "glob_find",
+    "win_places",
+    "batch_read",
     "job_output",
     "job_list",
     "share_list",

@@ -40,6 +40,7 @@ import tempfile
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -48,6 +49,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 #: costs nothing and cannot fail for a missing third-party package.
 from core import control
 from core import domain
+from core import fs_search
 from core import goal
 from core import paths
 from core import platforms
@@ -95,6 +97,12 @@ try:  # pragma: no cover - core/web_share.py is optional
     from core import web_share as _web_share  # type: ignore
 except Exception:  # pragma: no cover
     _web_share = None  # type: ignore
+# Optional for the same reason: a checkout that predates read_media must still serve
+# every other tool instead of failing to import at all.
+try:  # pragma: no cover - the file ships with the node
+    from core import media as _media  # type: ignore
+except Exception:  # pragma: no cover
+    _media = None  # type: ignore
 
 
 # ---------------------------------------------------------------------------
@@ -486,8 +494,15 @@ _READ_ONLY_ALLOWED = frozenset({
     "get_orchestration_skill",
     "list_dir",
     "read_file",
+    # A media file is only observed: read_media writes nothing, it re-encodes in
+    # memory and hands the caller a block. Reading must stay possible in read-only
+    # mode, which is exactly when an operator wants to look at a screenshot.
+    "read_media",
     "grep_search",
     "glob_find",
+    "win_places",
+    "batch_read",
+    "win_places",
     "job_output",
     "job_list",
     "share_list",
@@ -1483,6 +1498,44 @@ def _screen_capture_path(args: Dict[str, Any]) -> str:
     return paths.cache_path("captures", "screen-%s.png" % stamp)
 
 
+def _no_screen_answer(backend: Any) -> Dict[str, Any]:
+    """Why a host that *has* a framebuffer still returned no image.
+
+    The generic wording ("no screen a node process may read") is true but not
+    actionable, and the most common Windows case deserves its own sentence: a node
+    installed as a service runs in **session 0**, the non-interactive session that
+    has no desktop at all. An operator who reads only "available: false" has no
+    way to know that the fix is a different install shape, not a missing package.
+
+    SESSIONNAME is "Services" in session 0 and "Console"/"RDP-Tcp#N" in a real
+    desktop session, so the check needs no Win32 call and no extra import.
+    """
+    reason = ("this platform has no screen a node process may read: a server has "
+              "no framebuffer and Android gives an app no access to the display")
+    fix = ("run the node in an interactive desktop session (Windows: the user's "
+           "own session, not a service)")
+    answer: Dict[str, Any] = {
+        "available": False,
+        "scenario": backend.scenario,
+        "reason": reason,
+        "fix": fix,
+    }
+    if os.name == "nt":
+        session_name = (os.environ.get("SESSIONNAME") or "").strip()
+        answer["session"] = session_name or "unknown"
+        if session_name.lower() == "services":
+            answer["reason"] = (
+                "the node runs as a Windows service in session 0 "
+                "(SESSIONNAME=Services): that session has no desktop, so there is no "
+                "framebuffer to capture and no screenshot can exist")
+            answer["fix"] = (
+                "run the node in the signed-in user's session instead of the machine "
+                "service: reinstall without -AdminService "
+                "(install.ps1 -Mode funnel -Autostart logon), and remove the service "
+                "task with: schtasks /Delete /TN RemoteHarnessMCPService /F")
+    return answer
+
+
 def _tool_screen_capture(args: Dict[str, Any]) -> Dict[str, Any]:
     """Capture the desktop and save it as a PNG the operator can open or share.
 
@@ -1498,14 +1551,7 @@ def _tool_screen_capture(args: Dict[str, Any]) -> Dict[str, Any]:
     except Exception as exc:  # pragma: no cover - defensive
         return {"available": False, "scenario": backend.scenario, "reason": str(exc)}
     if not data:
-        return {
-            "available": False,
-            "scenario": backend.scenario,
-            "reason": ("this platform has no screen a node process may read: a server has "
-                       "no framebuffer and Android gives an app no access to the display"),
-            "fix": ("run the node in an interactive desktop session (Windows: the user's "
-                    "own session, not a service)"),
-        }
+        return _no_screen_answer(backend)
 
     target = _screen_capture_path(args)
     guard = _write_guard(target)
@@ -2242,6 +2288,59 @@ def _tool_read_file(args: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Tool 5b: read_media
+# ---------------------------------------------------------------------------
+
+#: The block types an MCP client is expected to render. A media result carries
+#: these; anything else would be a protocol invention the client cannot show.
+MEDIA_BLOCK_TYPES = ("text", "image", "audio")
+
+
+def _tool_read_media(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Hand one file over in the block type the protocol has for it.
+
+    ``read_file`` answers with numbered text, which is right for source code and
+    wrong for everything a user actually drops on a node: a screenshot, a photo, a
+    PDF, a voice note, a clip. The protocol has an ``image`` block (base64 plus
+    ``mimeType``) and an ``audio`` block for exactly those, and a tool that returns
+    raw bytes or a bare path leaves the model with nothing it can look at.
+
+    The routing - and the budgets that keep the answer inside what a client
+    accepts - live in ``core/media.py``. This wrapper only resolves the path with
+    the same rules as every other file tool (workspace, isolated container) and
+    forwards the caller's budget options, so both transports stay thin.
+    """
+    if _media is None:  # pragma: no cover - the file ships with the node
+        return {"error": "read_media is unavailable: core/media.py is missing from this checkout"}
+    try:
+        path = args.get("path")
+        if not isinstance(path, str) or not path.strip():
+            return {"error": "path is required"}
+        target = _resolve(path)
+        options: Dict[str, Any] = {
+            "offset": max(0, _safe_int(args.get("offset"), 0)),
+            "max_chars": _clamp_int(args.get("max_chars"), 500, 200000,
+                                    _media.DEFAULT_MAX_CHARS),
+            "max_side": _clamp_int(args.get("max_side"), 320, 4096,
+                                   _media.DEFAULT_MAX_SIDE),
+            "max_frames": _clamp_int(args.get("max_frames"), 1, 12,
+                                     _media.DEFAULT_MAX_FRAMES),
+            "include_audio": _parse_flag(args.get("include_audio"), False),
+            "ocr": _parse_flag(args.get("ocr"), False),
+            "encoding": str(args.get("encoding") or "").strip(),
+        }
+        if args.get("page_start") is not None:
+            options["page_start"] = max(1, _safe_int(args.get("page_start"), 1))
+        if args.get("page_end") is not None:
+            options["page_end"] = max(1, _safe_int(args.get("page_end"), 1))
+        if args.get("render_pages") is not None:
+            options["render_pages"] = _parse_flag(args.get("render_pages"), False)
+        return _media.read_media(target, **options)
+    except Exception as exc:
+        return {"error": "read_media failed: %s" % exc}
+
+
+# ---------------------------------------------------------------------------
 # Tool 6: write_file
 # ---------------------------------------------------------------------------
 
@@ -2393,6 +2492,16 @@ def _iter_files(base: str):
             yield os.path.join(root, name)
 
 
+def _parse_optional_depth(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        depth = int(value)
+    except (TypeError, ValueError):
+        return None
+    return max(0, min(64, depth))
+
+
 def _tool_grep_search(args: Dict[str, Any]) -> Dict[str, Any]:
     try:
         pattern = args.get("pattern")
@@ -2413,57 +2522,27 @@ def _tool_grep_search(args: Dict[str, Any]) -> Dict[str, Any]:
         if glob_filter is not None and not isinstance(glob_filter, str):
             return {"error": "glob must be a string"}
 
-        flags = re.IGNORECASE if ignore_case else 0
-        if fixed:
-            needle = pattern.lower() if ignore_case else pattern
-        else:
-            try:
-                regex = re.compile(pattern, flags)
-            except re.error as exc:
-                return {"error": "invalid regular expression: %s" % exc}
+        max_depth = _parse_optional_depth(args.get("max_depth"))
+        time_budget_ms = _clamp_int(
+            args.get("time_budget_ms"),
+            fs_search.MIN_TIME_BUDGET_MS,
+            fs_search.MAX_TIME_BUDGET_MS,
+            fs_search.DEFAULT_TIME_BUDGET_MS,
+        )
+        include_ignored = _parse_bool(args.get("include_ignored"))
 
-        matches: List[Dict[str, Any]] = []
-        truncated = False
-        for file_path in _iter_files(base):
-            if glob_filter and not fnmatch.fnmatch(os.path.basename(file_path), glob_filter):
-                continue
-            if _is_probably_binary(file_path):
-                continue
-            try:
-                with open(file_path, "r", encoding="utf-8", errors="replace") as handle:
-                    lines = handle.read().splitlines()
-            except Exception:
-                continue
-
-            hit_lines = []
-            for idx, line in enumerate(lines):
-                found = (needle in (line.lower() if ignore_case else line)) if fixed else bool(regex.search(line))
-                if found:
-                    hit_lines.append(idx)
-            if not hit_lines:
-                continue
-
-            emitted = set()
-            for idx in hit_lines:
-                first = max(0, idx - context)
-                last = min(len(lines) - 1, idx + context)
-                for lineno in range(first, last + 1):
-                    if lineno in emitted:
-                        continue
-                    if len(matches) >= limit:
-                        truncated = True
-                        break
-                    emitted.add(lineno)
-                    matches.append(
-                        {"path": os.path.realpath(file_path), "line": lineno + 1, "text": lines[lineno]}
-                    )
-                if truncated:
-                    break
-            if truncated:
-                break
-
-        return {"matches": matches, "count": len(matches), "truncated": truncated,
-                "note": "[VERIFIED BY TOOL] matches come from the real filesystem"}
+        return fs_search.grep_search(
+            base,
+            pattern,
+            glob_filter=glob_filter,
+            limit=limit,
+            ignore_case=ignore_case,
+            fixed=fixed,
+            context=context,
+            max_depth=max_depth,
+            time_budget_ms=time_budget_ms,
+            include_ignored=include_ignored,
+        )
     except Exception as exc:
         return {"error": "grep_search failed: %s" % exc}
 
@@ -2486,33 +2565,239 @@ def _tool_glob_find(args: Dict[str, Any]) -> Dict[str, Any]:
         if not os.path.exists(base):
             return {"error": "Path not found: %s" % base}
 
-        found: List[str] = []
-        if "/" in pattern or "**" in pattern:
-            # Patterns containing a path separator must be matched against the
-            # path relative to `base` (sub/*.py, */b.py, sub/b.py, **/b.py);
-            # matching a bare basename against them always returned nothing.
-            try:
-                found = _glob.glob(os.path.join(_glob.escape(base), pattern), recursive=True)
-            except Exception as exc:
-                return {"error": "glob_find failed: %s" % exc}
-            found = [p for p in found if os.path.isfile(p) and not _skip_path(p)]
-        else:
-            for root, dirs, files in os.walk(base):
-                dirs[:] = [d for d in dirs if d not in _SKIP_DIRS]
-                for name in files:
-                    if fnmatch.fnmatch(name, pattern):
-                        found.append(os.path.join(root, name))
+        max_depth = _parse_optional_depth(args.get("max_depth"))
+        max_results = _clamp_int(args.get("max_results"), 1, GLOB_MAX_RESULTS, GLOB_MAX_RESULTS)
+        time_budget_ms = _clamp_int(
+            args.get("time_budget_ms"),
+            fs_search.MIN_TIME_BUDGET_MS,
+            fs_search.MAX_TIME_BUDGET_MS,
+            fs_search.DEFAULT_TIME_BUDGET_MS,
+        )
+        include_ignored = _parse_bool(args.get("include_ignored"))
+        use_index = str(args.get("use_index") or "auto").strip().lower()
+        if use_index not in ("auto", "only", "off"):
+            use_index = "auto"
 
-        # Deduplicate: glob.glob itself returns duplicates for patterns such as
-        # "**/**/*.py", which would otherwise be reported several times.
-        files = sorted({os.path.realpath(p) for p in found})
-        truncated = len(files) > GLOB_MAX_RESULTS
-        if truncated:
-            files = files[:GLOB_MAX_RESULTS]
-        return {"files": files, "count": len(files), "truncated": truncated,
-                "note": "[VERIFIED BY TOOL] paths come from the real filesystem"}
+        if use_index in ("auto", "only") and not include_ignored:
+            try:
+                from core import fs_index as _fs_index
+                idx_res = _fs_index.default_index().query(
+                    base,
+                    pattern,
+                    max_depth=max_depth,
+                    max_results=max_results,
+                )
+                if idx_res is not None:
+                    return idx_res
+                if use_index == "only":
+                    return {
+                        "files": [],
+                        "count": 0,
+                        "truncated": False,
+                        "partial": False,
+                        "backend": "sqlite_fts5",
+                        "indexed": False,
+                        "note": "Path is not yet covered by the local file index; retry with use_index='auto' or 'off'.",
+                    }
+            except Exception:
+                if use_index == "only":
+                    return {"error": "local file index query failed"}
+
+        return fs_search.glob_find(
+            base,
+            pattern,
+            max_depth=max_depth,
+            max_results=max_results,
+            time_budget_ms=time_budget_ms,
+            include_ignored=include_ignored,
+        )
     except Exception as exc:
         return {"error": "glob_find failed: %s" % exc}
+
+
+# ---------------------------------------------------------------------------
+# Tool 9a: win_places (instant user-context snapshot: Known Folders, Recent, drives)
+# ---------------------------------------------------------------------------
+
+def _tool_win_places(args: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        from core.platforms.windows import places as _win_places
+        recent_limit = _clamp_int(args.get("recent_limit"), 1, 100, 30)
+        top_level_limit = _clamp_int(args.get("top_level_limit"), 0, 100, 30)
+        only_existing = _parse_bool(args.get("only_existing_recent")) if "only_existing_recent" in args else True
+        return _win_places.collect_places(
+            recent_limit=recent_limit,
+            top_level_limit=top_level_limit,
+            only_existing_recent=only_existing,
+        )
+    except Exception as exc:
+        return {"error": "win_places failed: %s" % exc}
+
+
+# ---------------------------------------------------------------------------
+# Tool 9b: batch_read (read-only multiplexer to cut tool-call rounds)
+# ---------------------------------------------------------------------------
+
+_BATCH_READ_ALLOWED = frozenset({
+    "mesh_status",
+    "system_vitals",
+    "list_dir",
+    "read_file",
+    "grep_search",
+    "glob_find",
+    "win_places",
+    "job_list",
+    "job_output",
+})
+_BATCH_READ_MAX_OPS = 16
+_BATCH_READ_DEFAULT_BUDGET_MS = 18000
+_BATCH_READ_MAX_BUDGET_MS = 20000
+_BATCH_READ_DEFAULT_MAX_CHARS = 40000
+_BATCH_READ_MAX_CHARS = 200000
+
+
+def _tool_batch_read(args: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        ops = args.get("ops")
+        if not isinstance(ops, list) or not ops:
+            return {"error": "ops must be a non-empty list of read-only operations"}
+        if len(ops) > _BATCH_READ_MAX_OPS:
+            return {"error": "ops exceeds maximum of %d items" % _BATCH_READ_MAX_OPS}
+
+        budget_ms = _clamp_int(
+            args.get("time_budget_ms"),
+            100,
+            _BATCH_READ_MAX_BUDGET_MS,
+            _BATCH_READ_DEFAULT_BUDGET_MS,
+        )
+        max_total_chars = _clamp_int(
+            args.get("max_total_chars"),
+            1000,
+            _BATCH_READ_MAX_CHARS,
+            _BATCH_READ_DEFAULT_MAX_CHARS,
+        )
+
+        t0 = time.monotonic()
+        deadline = t0 + (budget_ms / 1000.0)
+
+        # Validate every op up front so callers get immediate per-op errors for disallowed tools.
+        parsed_ops: List[Tuple[int, str, Optional[str], Optional[Dict[str, Any]], Optional[str]]] = []
+        for idx, raw in enumerate(ops):
+            if not isinstance(raw, dict):
+                parsed_ops.append((idx, str(idx), None, None, "op must be an object"))
+                continue
+            op_id = str(raw.get("id") if raw.get("id") is not None else idx)
+            tool_name = raw.get("tool")
+            op_args = raw.get("args")
+            if not isinstance(tool_name, str) or not tool_name:
+                parsed_ops.append((idx, op_id, None, None, "tool name is required"))
+                continue
+            if tool_name == "batch_read" or tool_name not in _BATCH_READ_ALLOWED:
+                parsed_ops.append((
+                    idx, op_id, tool_name, None,
+                    "tool '%s' is not allowed inside batch_read" % tool_name,
+                ))
+                continue
+            if op_args is None:
+                op_args = {}
+            elif not isinstance(op_args, dict):
+                parsed_ops.append((idx, op_id, tool_name, None, "args must be an object"))
+                continue
+            else:
+                op_args = dict(op_args)
+
+            # Never let one job_output stall the batch; cap search budgets to batch budget.
+            if tool_name == "job_output":
+                op_args["wait_ms"] = 0
+            elif tool_name in ("glob_find", "grep_search"):
+                rem_ms = max(50, int((deadline - time.monotonic()) * 1000))
+                req_ms = _clamp_int(op_args.get("time_budget_ms"), 50, budget_ms, min(8000, budget_ms))
+                op_args["time_budget_ms"] = min(req_ms, rem_ms)
+
+            parsed_ops.append((idx, op_id, tool_name, op_args, None))
+
+        slots: List[Optional[Dict[str, Any]]] = [None] * len(parsed_ops)
+        runnable: List[Tuple[int, str, str, Dict[str, Any]]] = []
+        for idx, op_id, tool_name, op_args, err in parsed_ops:
+            if err is not None:
+                slots[idx] = {"id": op_id, "tool": tool_name or "", "ok": False, "error": err}
+            else:
+                runnable.append((idx, op_id, tool_name, op_args))  # type: ignore[arg-type]
+
+        def _exec_one(tool_name: str, op_args: Dict[str, Any]) -> Any:
+            if time.monotonic() >= deadline:
+                return {"error": "time_budget_ms exceeded before start"}
+            handler = _HANDLERS.get(tool_name)
+            if handler is None:
+                return {"error": "Unknown tool: %s" % tool_name}
+            return handler(op_args)
+
+        if runnable:
+            workers = min(4, len(runnable))
+            pool = ThreadPoolExecutor(max_workers=workers)
+            try:
+                future_map = {
+                    pool.submit(_exec_one, tool_name, op_args): (idx, op_id, tool_name)
+                    for idx, op_id, tool_name, op_args in runnable
+                }
+                remaining = max(0.01, deadline - time.monotonic())
+                try:
+                    for fut in as_completed(future_map, timeout=remaining):
+                        idx, op_id, tool_name = future_map[fut]
+                        try:
+                            res = fut.result()
+                            if isinstance(res, dict) and "error" in res:
+                                slots[idx] = {"id": op_id, "tool": tool_name, "ok": False, "error": res["error"]}
+                            else:
+                                slots[idx] = {"id": op_id, "tool": tool_name, "ok": True, "data": res}
+                        except Exception as exc:
+                            slots[idx] = {"id": op_id, "tool": tool_name, "ok": False, "error": str(exc)}
+                except TimeoutError:
+                    pass
+                for fut, (idx, op_id, tool_name) in future_map.items():
+                    if slots[idx] is None:
+                        fut.cancel()
+                        slots[idx] = {
+                            "id": op_id,
+                            "tool": tool_name,
+                            "ok": False,
+                            "error": "time_budget_ms exceeded",
+                        }
+            finally:
+                pool.shutdown(wait=False)
+
+        # Enforce max_total_chars budget cleanly across ordered results.
+        results: List[Dict[str, Any]] = []
+        used_chars = 0
+        truncated = False
+        completed = 0
+        for item in slots:
+            entry = item or {"id": "?", "tool": "", "ok": False, "error": "internal batch error"}
+            serialized_len = len(json.dumps(entry, ensure_ascii=False, default=str))
+            if used_chars + serialized_len > max_total_chars and results:
+                truncated = True
+                results.append({
+                    "id": entry.get("id"),
+                    "tool": entry.get("tool"),
+                    "ok": False,
+                    "error": "max_total_chars budget exceeded (%d chars)" % max_total_chars,
+                })
+                continue
+            used_chars += serialized_len
+            if entry.get("ok"):
+                completed += 1
+            results.append(entry)
+
+        elapsed_ms = int((time.monotonic() - t0) * 1000)
+        return {
+            "results": results,
+            "completed": completed,
+            "total": len(results),
+            "truncated": truncated,
+            "elapsed_ms": elapsed_ms,
+        }
+    except Exception as exc:
+        return {"error": "batch_read failed: %s" % exc}
 
 
 # ---------------------------------------------------------------------------
@@ -3264,8 +3549,13 @@ TOOL_ANNOTATIONS: Dict[str, Dict[str, Any]] = {
     "get_orchestration_skill": _ANNOTATIONS_READ_ONLY,
     "list_dir": _ANNOTATIONS_READ_ONLY,
     "read_file": _ANNOTATIONS_READ_ONLY,
+    # Same reasoning as read_file: the file is read, nothing on the host changes.
+    "read_media": _ANNOTATIONS_READ_ONLY,
     "grep_search": _ANNOTATIONS_READ_ONLY,
     "glob_find": _ANNOTATIONS_READ_ONLY,
+    "win_places": _ANNOTATIONS_READ_ONLY,
+    "batch_read": _ANNOTATIONS_READ_ONLY,
+    "win_places": _ANNOTATIONS_READ_ONLY,
     "job_output": _ANNOTATIONS_READ_ONLY,
     "job_list": _ANNOTATIONS_READ_ONLY,
     "share_list": _ANNOTATIONS_READ_ONLY,
@@ -3412,6 +3702,47 @@ TOOLS: List[Dict[str, Any]] = [
         ),
     },
     {
+        "name": "read_media",
+        "title": "Read Media",
+        "description": (
+            "Send a file to the client in the content block MCP has for it, instead of as "
+            "text: an image (PNG/JPEG/WebP/GIF) becomes an image block, downscaled to stay "
+            "inside the response budget; a PDF becomes its page text, plus page images when "
+            "a page has no text layer; audio becomes metadata, plus the audio block itself "
+            "when include_audio is set; video becomes metadata plus evenly spaced JPEG "
+            "frames; text, JSON, CSV and logs become text with a cursor to page through. "
+            "Use this - not read_file - for anything that is not source code, and share_file "
+            "only when the person, not the model, has to open the file. Video frames and "
+            "oversized photos need ffmpeg; scanned PDF pages need PyMuPDF or pdftoppm; the "
+            "answer names the one that is missing instead of failing."
+        ),
+        "inputSchema": _schema(
+            {
+                "path": {"type": "string",
+                         "description": "File to send (absolute, or relative to the workspace)."},
+                "offset": {"type": "integer",
+                           "description": "Character offset when the answer is text."},
+                "max_chars": {"type": "integer",
+                              "description": "Maximum characters of text in one answer (default 24000)."},
+                "max_side": {"type": "integer",
+                             "description": "Longest side of a downscaled image (320-4096, default 1280)."},
+                "max_frames": {"type": "integer",
+                               "description": "Video frames or PDF page images to render (1-12, default 4)."},
+                "include_audio": {"type": "boolean",
+                                  "description": "Also send the audio bytes as an audio block (default false)."},
+                "ocr": {"type": "boolean",
+                        "description": "Also read the text of an image with OCR (default false; needs tesseract or MESH_OCR_CMD on the node)."},
+                "page_start": {"type": "integer", "description": "First PDF page (1-based)."},
+                "page_end": {"type": "integer", "description": "Last PDF page."},
+                "render_pages": {"type": "boolean",
+                                 "description": "Render PDF pages as images; default: only pages without text."},
+                "encoding": {"type": "string",
+                             "description": "Force a text encoding (utf-8, cp1251, cp1252...); default: detected."},
+            },
+            ["path"],
+        ),
+    },
+    {
         "name": "write_file",
         "title": "Write File",
         "description": (
@@ -3451,7 +3782,7 @@ TOOLS: List[Dict[str, Any]] = [
     {
         "name": "grep_search",
         "title": "Grep Search",
-        "description": "Recursively search file contents; skips binary files and heavy directories.",
+        "description": "Recursively search file contents; skips binary files and heavy directories with a time budget.",
         "inputSchema": _schema(
             {
                 "pattern": {"type": "string", "description": "Regular expression (or literal text with fixed)."},
@@ -3461,6 +3792,9 @@ TOOLS: List[Dict[str, Any]] = [
                 "ignore_case": {"type": "boolean", "description": "Case-insensitive search."},
                 "fixed": {"type": "boolean", "description": "Treat pattern as literal text."},
                 "context": {"type": "integer", "description": "Context lines around each match."},
+                "max_depth": {"type": "integer", "description": "Optional maximum directory depth (0 = root only)."},
+                "time_budget_ms": {"type": "integer", "description": "Wall-clock budget in ms (50-20000, default 12000)."},
+                "include_ignored": {"type": "boolean", "description": "Descend into heavy/ignored dirs (.git, node_modules, .cache, etc.)."},
             },
             ["pattern"],
         ),
@@ -3468,13 +3802,58 @@ TOOLS: List[Dict[str, Any]] = [
     {
         "name": "glob_find",
         "title": "Glob Find",
-        "description": "Find files by glob pattern (* and **).",
+        "description": "Find files by glob pattern (* and **) with early directory pruning and a time budget.",
         "inputSchema": _schema(
             {
                 "pattern": {"type": "string", "description": "Glob pattern, e.g. **/*.py."},
                 "path": {"type": "string", "description": "Root directory (default workspace)."},
+                "max_depth": {"type": "integer", "description": "Optional maximum directory depth (0 = root only)."},
+                "max_results": {"type": "integer", "description": "Maximum paths to return (1-10000)."},
+                "time_budget_ms": {"type": "integer", "description": "Wall-clock budget in ms (50-20000, default 12000)."},
+                "include_ignored": {"type": "boolean", "description": "Descend into heavy/ignored dirs (.git, node_modules, .cache, etc.)."},
+                "use_index": {"type": "string", "enum": ["auto", "only", "off"], "description": "Use local SQLite FTS5 file index when available (default 'auto')."},
             },
             ["pattern"],
+        ),
+    },
+    {
+        "name": "win_places",
+        "title": "Windows Places & Recent Files",
+        "description": (
+            "Instant (<100 ms) user-context snapshot without scanning disks: real Known Folders "
+            "(Desktop, Documents, Downloads, OneDrive, Telegram Desktop), recent opened files "
+            "resolved from Windows .lnk shortcuts, and fixed drives with 1st-level directories. "
+            "On Linux/macOS returns standard home folders and mount roots."
+        ),
+        "inputSchema": _schema({
+            "recent_limit": {"type": "integer", "description": "Max recent files to return (1-100, default 30)."},
+            "top_level_limit": {"type": "integer", "description": "Max 1st-level folders per drive (0-100, default 30)."},
+            "only_existing_recent": {"type": "boolean", "description": "Skip recent shortcuts whose target no longer exists (default true)."},
+        }),
+    },
+    {
+        "name": "batch_read",
+        "title": "Batch Read",
+        "description": "Execute up to 16 read-only inspection calls (list_dir, read_file, glob_find, grep_search, win_places, mesh_status, system_vitals, job_list, job_output) in one MCP round-trip.",
+        "inputSchema": _schema(
+            {
+                "ops": {
+                    "type": "array",
+                    "description": "List of {id?, tool, args?} objects (max 16, read-only tools only).",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string", "description": "Optional caller-defined identifier."},
+                            "tool": {"type": "string", "description": "Read-only tool name."},
+                            "args": {"type": "object", "description": "Arguments for the tool."},
+                        },
+                        "required": ["tool"],
+                    },
+                },
+                "time_budget_ms": {"type": "integer", "description": "Total wall-clock budget in ms (100-20000, default 18000)."},
+                "max_total_chars": {"type": "integer", "description": "Total serialized output cap in chars (1000-200000, default 40000)."},
+            },
+            ["ops"],
         ),
     },
     {
@@ -3879,10 +4258,13 @@ _HANDLERS: Dict[str, Callable[[Dict[str, Any]], Any]] = {
     "list_dir": _tool_list_dir,
     "bash_exec": _tool_bash_exec,
     "read_file": _tool_read_file,
+    "read_media": _tool_read_media,
     "write_file": _tool_write_file,
     "edit_file": _tool_edit_file,
     "grep_search": _tool_grep_search,
     "glob_find": _tool_glob_find,
+    "win_places": _tool_win_places,
+    "batch_read": _tool_batch_read,
     "run_job": _tool_run_job,
     "job_output": _tool_job_output,
     "job_kill": _tool_job_kill,

@@ -55,6 +55,10 @@ kernel32 = _load("kernel32")
 user32 = _load("user32")
 gdi32 = _load("gdi32")
 psapi = _load("psapi")
+shell32 = _load("shell32")
+ole32 = _load("ole32")
+shell32 = _load("shell32")
+ole32 = _load("ole32")
 
 
 # ---------------------------------------------------------------------------
@@ -146,6 +150,22 @@ class BITMAPINFO(ctypes.Structure):
         ("bmiHeader", BITMAPINFOHEADER),
         ("bmiColors", RGBQUAD * 1),
     ]
+
+
+class GUID(ctypes.Structure):
+    _fields_ = [
+        ("Data1", wintypes.DWORD),
+        ("Data2", wintypes.WORD),
+        ("Data3", wintypes.WORD),
+        ("Data4", ctypes.c_ubyte * 8),
+    ]
+
+    @classmethod
+    def from_uuid(cls, text: str) -> "GUID":
+        import uuid
+        u = uuid.UUID(text)
+        data4 = (ctypes.c_ubyte * 8)(*u.bytes[8:16])
+        return cls(u.time_low, u.time_mid, u.time_hi_version, data4)
 
 
 # ---------------------------------------------------------------------------
@@ -244,6 +264,11 @@ if IS_WINDOWS:  # pragma: no branch - declarations are cheap, keep them declarat
     DeleteObject = _prototype(gdi32, "DeleteObject", wintypes.BOOL, [wintypes.HGDIOBJ])
     DeleteDC = _prototype(gdi32, "DeleteDC", wintypes.BOOL, [wintypes.HDC])
     GetDeviceCaps = _prototype(gdi32, "GetDeviceCaps", ctypes.c_int, [wintypes.HDC, ctypes.c_int])
+
+    SHGetKnownFolderPath = _prototype(
+        shell32, "SHGetKnownFolderPath", ctypes.c_long,
+        [ctypes.POINTER(GUID), wintypes.DWORD, wintypes.HANDLE, ctypes.POINTER(wintypes.LPWSTR)])
+    CoTaskMemFree = _prototype(ole32, "CoTaskMemFree", None, [ctypes.c_void_p])
 
 
 def last_error() -> int:
