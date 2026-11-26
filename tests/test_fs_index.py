@@ -78,3 +78,28 @@ def test_glob_find_uses_index_when_covered(tmp_path, monkeypatch):
     miss = mcp_tools.call_tool("glob_find", {"path": str(other), "pattern": "*.txt", "use_index": "only"})
     assert miss["count"] == 0
     assert miss["indexed"] is False
+
+
+def test_fs_index_mcp_tool_status_and_refresh(tmp_path, monkeypatch):
+    root = tmp_path / "proj"
+    root.mkdir()
+    (root / "app.py").write_text("x = 1\n", encoding="utf-8")
+
+    idx = fs_index.FileIndex(db_path=str(tmp_path / "tool_idx.db"))
+    monkeypatch.setattr(fs_index, "default_index", lambda: idx)
+
+    mcp_tools.configure(workspace=str(root), read_only=False)
+    fg = mcp_tools.call_tool("fs_index", {"action": "refresh", "roots": [str(root)], "background": False})
+    assert fg["ok"] is True
+    assert fg["results"][0]["file_count"] == 1
+
+    # status must keep working in read_only mode, while refresh is refused
+    mcp_tools.configure(workspace=str(root), read_only=True)
+    try:
+        st = mcp_tools.call_tool("fs_index", {"action": "status"})
+        assert st["exists"] is True
+        assert st["total_files"] == 1
+        refused = mcp_tools.call_tool("fs_index", {"action": "refresh"})
+        assert "error" in refused
+    finally:
+        mcp_tools.configure(read_only=False)

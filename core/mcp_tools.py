@@ -527,6 +527,9 @@ _READ_ONLY_ALLOWED = frozenset({
 _READ_ONLY_SELF_GUARDED = frozenset({
     "write_file",
     "edit_file",
+    "batch_edit",
+    "run_script",
+    "fs_index",
     "share_file",
     "serve_dir",
     "unshare",
@@ -2599,6 +2602,8 @@ def _tool_glob_find(args: Dict[str, Any]) -> Dict[str, Any]:
                         "indexed": False,
                         "note": "Path is not yet covered by the local file index; retry with use_index='auto' or 'off'.",
                     }
+                if use_index == "auto" and os.path.isdir(base) and not _read_only_active():
+                    _fs_index.default_index().start_background_refresh([base])
             except Exception:
                 if use_index == "only":
                     return {"error": "local file index query failed"}
@@ -2798,6 +2803,303 @@ def _tool_batch_read(args: Dict[str, Any]) -> Dict[str, Any]:
         }
     except Exception as exc:
         return {"error": "batch_read failed: %s" % exc}
+
+
+# ---------------------------------------------------------------------------
+# Tool 9c: batch_edit (multi-file write/edit in one MCP round-trip)
+# ---------------------------------------------------------------------------
+
+_BATCH_EDIT_MAX_OPS = 16
+
+
+def _dry_run_edit_op(op_type: str, item: Dict[str, Any]) -> Dict[str, Any]:
+    path_arg = item.get("path")
+    if not isinstance(path_arg, str) or not path_arg.strip():
+        return {"ok": False, "error": "path is required"}
+    target = _resolve(path_arg)
+    guard = _write_guard(target)
+    if guard:
+        return {"ok": False, "error": guard}
+    if op_type == "write":
+        if not isinstance(item.get("content"), str):
+            return {"ok": False, "error": "content must be a string"}
+        return {"ok": True, "data": {"dry_run": True, "op": "write", "path": target, "bytes": len(item["content"].encode("utf-8"))}}
+    if op_type == "edit":
+        old_string = item.get("old_string")
+        new_string = item.get("new_string")
+        if not isinstance(old_string, str) or not old_string:
+            return {"ok": False, "error": "old_string must be a non-empty string"}
+        if not isinstance(new_string, str):
+            return {"ok": False, "error": "new_string must be a string"}
+        if not os.path.isfile(target):
+            return {"ok": False, "error": "File not found: %s" % target}
+        with open(target, "rb") as handle:
+            raw = handle.read()
+        expected = item.get("expected_sha256")
+        if expected:
+            actual = hashlib.sha256(raw).hexdigest()
+            if actual != expected:
+                return {"ok": False, "error": "sha256 mismatch: expected %s, got %s" % (expected, actual)}
+        text = raw.decode("utf-8", errors="replace")
+        occurrences = text.count(old_string)
+        replace_all = _parse_bool(item.get("replace_all"))
+        if occurrences == 0:
+            return {"ok": False, "error": "old_string not found"}
+        if occurrences > 1 and not replace_all:
+            return {"ok": False, "error": "old_string is not unique (%d matches)" % occurrences}
+        return {"ok": True, "data": {"dry_run": True, "op": "edit", "path": target, "matches": occurrences}}
+    return {"ok": False, "error": "unsupported op '%s' (expected 'edit' or 'write')" % op_type}
+
+
+def _tool_batch_edit(args: Dict[str, Any]) -> Dict[str, Any]:
+    if _read_only_active():
+        return {"error": READ_ONLY_ERROR}
+    try:
+        t0 = time.monotonic()
+        ops = args.get("ops")
+        if not isinstance(ops, list) or not ops:
+            return {"error": "ops must be a non-empty list of edit/write operations"}
+        if len(ops) > _BATCH_EDIT_MAX_OPS:
+            return {"error": "ops exceeds maximum of %d items" % _BATCH_EDIT_MAX_OPS}
+
+        stop_on_error = True if args.get("stop_on_error") is None else _parse_bool(args.get("stop_on_error"))
+        dry_run = _parse_bool(args.get("dry_run"))
+
+        results: List[Dict[str, Any]] = []
+        completed = 0
+        failed = 0
+        stopped_early = False
+
+        for idx, item in enumerate(ops):
+            op_id = str(item.get("id") or idx) if isinstance(item, dict) else str(idx)
+            if not isinstance(item, dict):
+                results.append({"id": op_id, "ok": False, "error": "operation must be an object"})
+                failed += 1
+                if stop_on_error:
+                    stopped_early = idx + 1 < len(ops)
+                    break
+                continue
+            op_type = str(item.get("op") or "").strip().lower()
+            if op_type not in ("edit", "write"):
+                results.append({"id": op_id, "ok": False, "error": "op must be 'edit' or 'write'"})
+                failed += 1
+                if stop_on_error:
+                    stopped_early = idx + 1 < len(ops)
+                    break
+                continue
+
+            if dry_run:
+                res = _dry_run_edit_op(op_type, item)
+                entry = {"id": op_id, **res}
+                results.append(entry)
+                if res["ok"]:
+                    completed += 1
+                else:
+                    failed += 1
+                    if stop_on_error:
+                        stopped_early = idx + 1 < len(ops)
+                        break
+            else:
+                out = _tool_edit_file(item) if op_type == "edit" else _tool_write_file(item)
+                if isinstance(out, dict) and "error" in out:
+                    results.append({"id": op_id, "ok": False, "error": out["error"]})
+                    failed += 1
+                    if stop_on_error:
+                        stopped_early = idx + 1 < len(ops)
+                        break
+                else:
+                    results.append({"id": op_id, "ok": True, "data": out})
+                    completed += 1
+
+        return {
+            "results": results,
+            "completed": completed,
+            "failed": failed,
+            "total": len(ops),
+            "dry_run": dry_run,
+            "stopped_early": stopped_early,
+            "elapsed_ms": int((time.monotonic() - t0) * 1000),
+        }
+    except Exception as exc:
+        return {"error": "batch_edit failed: %s" % exc}
+
+
+# ---------------------------------------------------------------------------
+# Tool 9d: run_script (single-call multi-step script runner, fg or background)
+# ---------------------------------------------------------------------------
+
+_SCRIPT_EXT = {
+    "python": ".py",
+    "powershell": ".ps1",
+    "bash": ".sh",
+    "cmd": ".cmd",
+}
+
+
+def _script_argv(lang: str, script_path: str) -> List[str]:
+    import sys
+    if lang == "python":
+        return [sys.executable, "-u", script_path]
+    if lang == "powershell":
+        return ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script_path]
+    if lang == "cmd":
+        return ["cmd.exe", "/c", script_path]
+    return ["bash", script_path]
+
+
+def _tool_run_script(args: Dict[str, Any]) -> Dict[str, Any]:
+    if _read_only_active():
+        return {"error": READ_ONLY_ERROR}
+    try:
+        code = args.get("code")
+        if not isinstance(code, str) or not code.strip():
+            return {"error": "code must be a non-empty string"}
+        lang = str(args.get("lang") or "python").strip().lower()
+        if lang not in _SCRIPT_EXT:
+            return {"error": "lang must be one of: python, powershell, bash, cmd"}
+
+        target_cwd = _resolve(args.get("cwd") or ".")
+        if not os.path.isdir(target_cwd):
+            return {"error": "cwd not found: %s" % target_cwd}
+
+        background = _parse_bool(args.get("background"))
+        timeout_sec = _clamp_int(args.get("timeout_sec"), 1, MAX_TIMEOUT_SEC, 25)
+        max_chars = _max_chars(args.get("max_chars"))
+
+        scripts_dir = paths.cache_path("scripts")
+        os.makedirs(scripts_dir, exist_ok=True)
+        script_path = os.path.join(scripts_dir, "rhm_script_%s%s" % (uuid.uuid4().hex[:12], _SCRIPT_EXT[lang]))
+        with open(script_path, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(code)
+
+        if background:
+            import sys
+            ps_prefix = "& " if command_shell()[0] == "powershell" else ""
+            if lang == "python":
+                cmd = '%s"%s" -u "%s"' % (ps_prefix, sys.executable, script_path)
+            elif lang == "powershell":
+                cmd = 'powershell -NoProfile -ExecutionPolicy Bypass -File "%s"' % script_path
+            elif lang == "cmd":
+                cmd = 'cmd.exe /c "%s"' % script_path
+            else:
+                cmd = 'bash "%s"' % script_path
+            job_res = _tool_run_job({"command": cmd, "cwd": target_cwd})
+            if isinstance(job_res, dict) and "error" not in job_res:
+                job_res["script_path"] = script_path
+                job_res["lang"] = lang
+                job_res["background"] = True
+            return job_res
+
+        t0 = time.monotonic()
+        argv = _script_argv(lang, script_path)
+        popen_kwargs: Dict[str, Any] = {
+            "cwd": target_cwd,
+            "env": _child_env(),
+            "stdin": subprocess.DEVNULL,
+            "capture_output": True,
+            "timeout": timeout_sec,
+        }
+        if _IS_WINDOWS:
+            popen_kwargs["creationflags"] = _POPEN_FLAGS
+        try:
+            proc = subprocess.run(argv, **popen_kwargs)
+            stdout_text = _decode_output(proc.stdout)
+            stderr_text = _decode_output(proc.stderr)
+            truncated = False
+            if len(stdout_text) > max_chars:
+                stdout_text = stdout_text[:max_chars]
+                truncated = True
+            if len(stderr_text) > max_chars:
+                stderr_text = stderr_text[:max_chars]
+                truncated = True
+            return {
+                "stdout": stdout_text,
+                "stderr": stderr_text,
+                "exit_code": int(proc.returncode),
+                "duration": round(time.monotonic() - t0, 3),
+                "lang": lang,
+                "truncated": truncated,
+            }
+        except subprocess.TimeoutExpired as exc:
+            return {
+                "error": "run_script timed out after %ds (use background=true for long scripts)" % timeout_sec,
+                "stdout": _decode_output(exc.stdout or b"")[:max_chars],
+                "stderr": _decode_output(exc.stderr or b"")[:max_chars],
+                "exit_code": 124,
+                "duration": round(time.monotonic() - t0, 3),
+                "lang": lang,
+            }
+        finally:
+            try:
+                os.remove(script_path)
+            except OSError:
+                pass
+    except Exception as exc:
+        return {"error": "run_script failed: %s" % exc}
+
+
+# ---------------------------------------------------------------------------
+# Tool 9e: fs_index (background SQLite FTS5 file index control & scheduling)
+# ---------------------------------------------------------------------------
+
+def _tool_fs_index(args: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        from core import fs_index as _fs_index
+        action = str(args.get("action") or "status").strip().lower()
+        idx = _fs_index.default_index()
+        if action == "status":
+            return idx.status()
+        if _read_only_active():
+            return {"error": READ_ONLY_ERROR}
+
+        raw_roots = args.get("roots")
+        if isinstance(raw_roots, list) and raw_roots:
+            roots = [_resolve(str(r)) for r in raw_roots if str(r).strip()]
+        else:
+            roots = [_WORKSPACE]
+
+        if action == "refresh":
+            background = True if args.get("background") is None else _parse_bool(args.get("background"))
+            if background:
+                started = idx.start_background_refresh(roots)
+                return {
+                    "ok": True,
+                    "action": "refresh",
+                    "background": True,
+                    "started": started,
+                    "roots": roots,
+                    "note": "Background index refresh started" if started else "Background index refresh is already running",
+                }
+            budget_ms = _clamp_int(
+                args.get("time_budget_ms"),
+                fs_search.MIN_TIME_BUDGET_MS,
+                fs_search.MAX_TIME_BUDGET_MS,
+                fs_search.DEFAULT_TIME_BUDGET_MS,
+            )
+            per_root = max(50, budget_ms // max(1, len(roots)))
+            results = [idx.refresh_root(r, time_budget_ms=per_root) for r in roots]
+            return {"ok": all(r.get("ok") for r in results), "action": "refresh", "background": False, "results": results}
+
+        if action == "schedule":
+            import sys
+            every_sec = _clamp_int(args.get("every_sec"), 60, 86400, 1800)
+            label = str(args.get("label") or "fs-index-refresh").strip()
+            roots_literal = json.dumps(roots)
+            cmd = '"%s" -c "import json; from core.fs_index import default_index; idx = default_index(); [idx.refresh_root(r) for r in %s]"' % (
+                sys.executable,
+                roots_literal.replace('"', '\"'),
+            )
+            return _tool_schedule({
+                "action": "set",
+                "label": label,
+                "every_sec": every_sec,
+                "command": cmd,
+                "note": "Periodic SQLite FTS5 file index refresh for %s" % ", ".join(roots),
+            })
+
+        return {"error": "action must be one of: status, refresh, schedule"}
+    except Exception as exc:
+        return {"error": "fs_index failed: %s" % exc}
 
 
 # ---------------------------------------------------------------------------
@@ -3555,7 +3857,6 @@ TOOL_ANNOTATIONS: Dict[str, Dict[str, Any]] = {
     "glob_find": _ANNOTATIONS_READ_ONLY,
     "win_places": _ANNOTATIONS_READ_ONLY,
     "batch_read": _ANNOTATIONS_READ_ONLY,
-    "win_places": _ANNOTATIONS_READ_ONLY,
     "job_output": _ANNOTATIONS_READ_ONLY,
     "job_list": _ANNOTATIONS_READ_ONLY,
     "share_list": _ANNOTATIONS_READ_ONLY,
@@ -3578,6 +3879,9 @@ TOOL_ANNOTATIONS: Dict[str, Dict[str, Any]] = {
     "job_kill": _ANNOTATIONS_LOCAL_WRITE,
     "write_file": _ANNOTATIONS_LOCAL_WRITE,
     "edit_file": _ANNOTATIONS_LOCAL_WRITE,
+    "batch_edit": _ANNOTATIONS_LOCAL_WRITE,
+    "run_script": _ANNOTATIONS_LOCAL_WRITE,
+    "fs_index": _ANNOTATIONS_LOCAL_WRITE,
     # A screenshot writes one PNG (in the node's cache unless a path is given) and
     # changes nothing else on the host: ordinary local work, never destructive.
     "screen_capture": _ANNOTATIONS_LOCAL_WRITE,
@@ -3854,6 +4158,81 @@ TOOLS: List[Dict[str, Any]] = [
                 "max_total_chars": {"type": "integer", "description": "Total serialized output cap in chars (1000-200000, default 40000)."},
             },
             ["ops"],
+        ),
+    },
+    {
+        "name": "batch_edit",
+        "title": "Batch Edit / Write",
+        "description": (
+            "Apply up to 16 edit/write file operations in one MCP round-trip (supports "
+            "dry_run validation and stop_on_error). Cuts tool-call rounds for multi-file changes."
+        ),
+        "inputSchema": _schema(
+            {
+                "ops": {
+                    "type": "array",
+                    "description": "List of {id?, op: 'edit'|'write', path, ...} objects (max 16).",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string"},
+                            "op": {"type": "string", "enum": ["edit", "write"]},
+                            "path": {"type": "string"},
+                            "content": {"type": "string"},
+                            "old_string": {"type": "string"},
+                            "new_string": {"type": "string"},
+                            "expected_sha256": {"type": "string"},
+                            "replace_all": {"type": "boolean"},
+                            "create_dirs": {"type": "boolean"},
+                        },
+                        "required": ["op", "path"],
+                    },
+                },
+                "stop_on_error": {"type": "boolean", "description": "Stop on first failed op (default true)."},
+                "dry_run": {"type": "boolean", "description": "Validate all ops without modifying files (default false)."},
+            },
+            ["ops"],
+        ),
+    },
+    {
+        "name": "run_script",
+        "title": "Run Multi-Step Script",
+        "description": (
+            "Write and execute a temporary script (python, powershell, bash, cmd) in one call "
+            "without shell-quoting issues. Set background=true to hand off long pipelines to run_job."
+        ),
+        "inputSchema": _schema(
+            {
+                "code": {"type": "string", "description": "Full script source code."},
+                "lang": {"type": "string", "enum": ["python", "powershell", "bash", "cmd"],
+                         "description": "Script language (default python)."},
+                "cwd": {"type": "string", "description": "Working directory (default workspace)."},
+                "timeout_sec": {"type": "integer", "description": "Foreground timeout in seconds (1-120, default 25)."},
+                "background": {"type": "boolean", "description": "Run via run_job and return job_id immediately (default false)."},
+                "max_chars": {"type": "integer", "description": "Max stdout/stderr chars to return."},
+            },
+            ["code"],
+        ),
+    },
+    {
+        "name": "fs_index",
+        "title": "Local File Index",
+        "description": (
+            "Manage the local SQLite FTS5 file index for instant (<30 ms) glob_find queries: "
+            "action='status' (read-only), 'refresh' (background=true by default), or 'schedule' "
+            "(periodic background refresh via schedule)."
+        ),
+        "inputSchema": _schema(
+            {
+                "action": {"type": "string", "enum": ["status", "refresh", "schedule"],
+                           "description": "Action to perform (default status)."},
+                "roots": {"type": "array", "items": {"type": "string"},
+                          "description": "Directories to index (default current workspace)."},
+                "background": {"type": "boolean", "description": "refresh: run in background thread (default true)."},
+                "time_budget_ms": {"type": "integer", "description": "refresh (foreground): wall-clock budget in ms."},
+                "every_sec": {"type": "integer", "description": "schedule: repeat interval in seconds (60-86400, default 1800)."},
+                "label": {"type": "string", "description": "schedule: timer label (default fs-index-refresh)."},
+            }
         ),
     },
     {
@@ -4265,6 +4644,9 @@ _HANDLERS: Dict[str, Callable[[Dict[str, Any]], Any]] = {
     "glob_find": _tool_glob_find,
     "win_places": _tool_win_places,
     "batch_read": _tool_batch_read,
+    "batch_edit": _tool_batch_edit,
+    "run_script": _tool_run_script,
+    "fs_index": _tool_fs_index,
     "run_job": _tool_run_job,
     "job_output": _tool_job_output,
     "job_kill": _tool_job_kill,

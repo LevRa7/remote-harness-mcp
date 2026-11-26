@@ -366,6 +366,47 @@ class FileIndex:
             "note": "[VERIFIED BY TOOL] paths come from the local SQLite file index",
         }
 
+    def status(self) -> Dict[str, Any]:
+        """Return current index state without modifying the database."""
+        exists = os.path.isfile(self.db_path)
+        roots_out: List[Dict[str, Any]] = []
+        total_files = 0
+        if exists:
+            with self._lock:
+                try:
+                    conn = self._connect()
+                    try:
+                        self._ensure_schema(conn)
+                        rows = conn.execute(
+                            "SELECT root, indexed_at, file_count, complete FROM index_roots ORDER BY indexed_at DESC"
+                        ).fetchall()
+                        for r_root, r_at, r_cnt, r_comp in rows:
+                            total_files += int(r_cnt)
+                            roots_out.append({
+                                "root": r_root,
+                                "indexed_at": float(r_at),
+                                "age_sec": round(max(0.0, time.time() - float(r_at)), 1),
+                                "file_count": int(r_cnt),
+                                "complete": bool(r_comp),
+                            })
+                    finally:
+                        conn.close()
+                except Exception as exc:
+                    return {
+                        "db_path": self.db_path,
+                        "exists": exists,
+                        "bg_running": self._bg_running,
+                        "error": str(exc),
+                    }
+        return {
+            "db_path": self.db_path,
+            "exists": exists,
+            "has_fts5": self._has_fts5,
+            "bg_running": self._bg_running,
+            "total_files": total_files,
+            "roots": roots_out,
+        }
+
     def start_background_refresh(self, roots: Sequence[str]) -> bool:
         """Trigger a non-blocking daemon refresh of ``roots`` if none is active."""
         with self._bg_lock:
