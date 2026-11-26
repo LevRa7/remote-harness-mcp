@@ -278,7 +278,7 @@ These read-only tools work even when `--no-shell` (`MESH_ENABLE_SHELL=0`) is act
 | :--- | :--- |
 | `git_status(path, short, untracked, max_chars)` | Read-only `git status` executed directly (`shell=False`) with `-c core.fsmonitor=false -c core.hooksPath=`. |
 | `git_diff(path, staged, stat, ref, file, max_chars)` | Read-only `git diff` without a shell (`--staged`, `--stat`, optional `ref` and `file` filter). |
-| `fetch_url(url, strip_html, max_bytes, timeout_sec)` | Fetches an `https://` URL with SSRF protection (blocks loopback/private/link-local IPs), a 5-redirect cap, 300 KB limit, and optional HTML-to-text stripping. |
+| `fetch_url(url, strip_html, max_bytes, timeout_sec)` | Fetches an `https://` URL with SSRF protection (blocks loopback/private/link-local IPs), a 5-redirect cap, 300 KB limit, and optional HTML-to-text stripping. TLS trust order: operator bundle (`MESH_CA_BUNDLE`), then `certifi`, then the system store — see [docs/TLS_TRUST.md](docs/TLS_TRUST.md). |
 
 ### Long-running work
 
@@ -557,10 +557,10 @@ The release also ships a single compiled installer, for machines where you would
 not clone or download anything else — `RemoteHarnessMCP-Setup-<version>.exe`:
 
 ```powershell
-.\RemoteHarnessMCP-Setup-0.7.1.exe            # open the visual installer
-.\RemoteHarnessMCP-Setup-0.7.1.exe -Lang ru   # start in Russian
-.\RemoteHarnessMCP-Setup-0.7.1.exe -SelfTest  # headless self-check, prints JSON
-.\RemoteHarnessMCP-Setup-0.7.1.exe --version  # print the version
+.\RemoteHarnessMCP-Setup-0.7.2.exe            # open the visual installer
+.\RemoteHarnessMCP-Setup-0.7.2.exe -Lang ru   # start in Russian
+.\RemoteHarnessMCP-Setup-0.7.2.exe -SelfTest  # headless self-check, prints JSON
+.\RemoteHarnessMCP-Setup-0.7.2.exe --version  # print the version
 ```
 
 It carries the wizard, `install.ps1`, `core/` and `install.sh` inside itself, unpacks them

@@ -279,7 +279,7 @@ Gemini Spark решает, останавливаться ли с вопросо
 | :--- | :--- |
 | `git_status(path, short, untracked, max_chars)` | Read-only `git status` напрямую без оболочки (`shell=False`) с `-c core.fsmonitor=false -c core.hooksPath=`. |
 | `git_diff(path, staged, stat, ref, file, max_chars)` | Read-only `git diff` без оболочки (`--staged`, `--stat`, опциональные `ref` и фильтр `file`). |
-| `fetch_url(url, strip_html, max_bytes, timeout_sec)` | Загружает `https://` URL с защитой от SSRF (блокировка loopback/приватных/link-local IP), лимитом 5 редиректов, 300 КБ и опциональной очисткой HTML в текст. |
+| `fetch_url(url, strip_html, max_bytes, timeout_sec)` | Загружает `https://` URL с защитой от SSRF (блокировка loopback/приватных/link-local IP), лимитом 5 редиректов, 300 КБ и опциональной очисткой HTML в текст. Доверие TLS: бандл оператора (`MESH_CA_BUNDLE`), затем `certifi`, затем системное хранилище — см. [docs/TLS_TRUST.md](docs/TLS_TRUST.md). |
 
 ### Долгие задачи
 
@@ -603,10 +603,10 @@ https://<имя-вашего-узла>.<ваш-tailnet>.ts.net/sse?token=<ваш
 где не хочется ничего клонировать:
 
 ```powershell
-.\RemoteHarnessMCP-Setup-0.7.1.exe            # открыть визуальный установщик
-.\RemoteHarnessMCP-Setup-0.7.1.exe -Lang ru   # начать на русском
-.\RemoteHarnessMCP-Setup-0.7.1.exe -SelfTest  # самопроверка без окна, печатает JSON
-.\RemoteHarnessMCP-Setup-0.7.1.exe --version  # показать версию
+.\RemoteHarnessMCP-Setup-0.7.2.exe            # открыть визуальный установщик
+.\RemoteHarnessMCP-Setup-0.7.2.exe -Lang ru   # начать на русском
+.\RemoteHarnessMCP-Setup-0.7.2.exe -SelfTest  # самопроверка без окна, печатает JSON
+.\RemoteHarnessMCP-Setup-0.7.2.exe --version  # показать версию
 ```
 
 Внутри него лежат мастер, `install.ps1`, `core/` и `install.sh`; он распаковывает их в
