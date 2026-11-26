@@ -2,8 +2,9 @@
 
 The default Windows install is deliberately per-user: a Startup entry and two
 per-user scheduled tasks, no elevation, no UAC prompt. That is the right default
-for a desktop, and it is the wrong shape for a machine that has to expose
-administrator-level tools to Gemini.
+for a desktop - the node then lives in the signed-in user's session, where the
+desktop tools exist - and it is the wrong shape for a machine that has to expose
+administrator-level tools to Gemini with nobody signed in.
 
 `install.ps1 -AdminService` (and the "MCP service with administrator rights"
 switch of the visual installer) installs the same node as a **machine service**:
@@ -18,6 +19,14 @@ switch of the visual installer) installs the same node as a **machine service**:
 | Works without a logged-on user | no | **yes** |
 | Watchdog / updater tasks | yes (per-user) | no — the task restarts itself |
 | Tray icon | yes | no (there is no user session to show it in) |
+| `screen_capture`, clipboard | yes | **no** - session 0 has no desktop |
+
+The last row is the one that surprises people: a Windows service runs in
+**session 0**, the non-interactive session, and GDI cannot read a desktop that no
+one is attached to. `screen_capture` answers `available: false` with
+`"reason": "the node runs as a Windows service in session 0 (SESSIONNAME=Services)..."`
+and a `fix` that names this document. If a person sits at the machine, the
+per-user install is the right one.
 
 ## Installing
 
@@ -41,6 +50,10 @@ the same command through one pipeline step (`install.ps1 ... -AdminService`), so
 registration, the URL contract and the error reporting stay in one place.
 
 Already-elevated shells register the task in-process, without a second process or a prompt.
+
+Both paths are opt-in: the console needs `-AdminService` and the wizard's checkbox
+starts cleared, because the service trades the desktop tools for boot-time
+autostart.
 
 ## Funnel variant
 

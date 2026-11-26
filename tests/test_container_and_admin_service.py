@@ -258,17 +258,36 @@ def test_service_variant_strings_are_bilingual():
         for key in ("opt_service_group", "opt_service_label", "opt_service_hint",
                     "opt_service_unavailable", "res_service_task"):
             assert key in document[language], "%s is missing in %s" % (key, language)
-    # The switch is now about boot-time autostart, which is its default state.
+    # The switch is about boot-time autostart; it is never the default, because a
+    # SYSTEM task has no desktop and costs the screen tools.
     assert "службу" in document["ru"]["opt_service_label"]
     assert "старт" in document["ru"]["opt_service_label"]
     assert "администратора" in document["ru"]["opt_service_hint"]
     assert "SSH" in document["ru"]["opt_service_unavailable"]
+    assert "screen capture" in document["en"]["opt_service_hint"]
+    assert "скриншоты" in document["ru"]["opt_service_hint"].lower()
 
 
-def test_the_wizard_defaults_to_boot_time_autostart():
+def test_the_wizard_defaults_to_the_user_session():
+    # Screen capture, the clipboard and the tray icon need the signed-in user's
+    # desktop. A SYSTEM task lives in session 0 and has none, so the machine
+    # service is an explicit opt-in - never the state the wizard opens in.
     text = _read(GUI)
-    assert "$script:AdminService = $true" in text
-    assert "$script:AdminService = ($script:Mode -ne 'ssh')" in text
+    assert "$script:AdminService = $false" in text
+    assert "$script:AdminService = ($script:Mode -ne 'ssh')" not in text, (
+        "choosing a variant must not arm the machine service behind the operator's back"
+    )
+
+
+def test_the_installer_says_what_the_machine_service_costs():
+    # The swap is deliberate: boot-time autostart is worth it on a headless box,
+    # and it silently removes three tools on a desktop. The installer has to say
+    # so at install time, not leave it to a model reading "available: false".
+    text = _read(INSTALL_PS1)
+    assert "function Show-ServiceDesktopNote" in text
+    assert text.count("Show-ServiceDesktopNote") >= 3, "both service branches must print it"
+    assert "session 0" in text
+    assert "нет рабочего стола" in text, "the Russian note must name the missing desktop"
 
 
 def test_the_wizard_shows_the_registered_autostart_not_the_requested_one():

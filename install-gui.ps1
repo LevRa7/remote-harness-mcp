@@ -818,11 +818,13 @@ $script:Device = @{ Hostname = ''; Raw = ''; IsLaptop = $false; Os = '' }
 
 $script:Page = 0
 $script:Mode = 'funnel'
-# Autostart at system start is the default: the node is published through Funnel,
-# and a node that comes back only after a logon is the reason a connector answered
-# 502 after a reboot. The switch stays visible (and can be cleared) on the options
-# page; only the SSH variant, which installs on another machine, forces it off.
-$script:AdminService = $true
+# The default is a per-user node that starts at logon. The machine service comes
+# back before anyone signs in, but it runs as SYSTEM in session 0 - a session with
+# no desktop - so screen_capture, clipboard and the tray icon answer "not
+# available" there. A desktop node exists to be looked at, so the service is the
+# opt-in switch, never the default; only the SSH variant, which installs on
+# another machine, forces it off anyway.
+$script:AdminService = $false
 # Where the node's files are copied to, plus the three switches the options page
 # asks for. $ScriptDir is where the setup executable unpacked the payload - a
 # versioned scratch directory, so it is only the starting point, not the target.
@@ -1019,10 +1021,9 @@ function Build-ModePage {
         $radio.Add_CheckedChanged({
             if ($this.Checked) {
                 $script:Mode = [string]$this.Tag
-                # Only the SSH variant cannot use the machine service (it installs on
-                # another host): every local variant gets boot-time autostart unless
-                # the operator clears the switch on the options page.
-                $script:AdminService = ($script:Mode -ne 'ssh')
+                # Switching the variant must not arm the machine service either:
+                # the switch is an explicit choice, and it costs the desktop tools.
+                $script:AdminService = $false
                 $script:OptionError = ''
             }
         })

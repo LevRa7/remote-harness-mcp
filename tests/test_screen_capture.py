@@ -107,6 +107,40 @@ def test_read_only_mode_refuses_to_write_a_file(monkeypatch, tmp_path):
         mcp_tools.configure(read_only=False)
 
 
+def _headless_windows_backend(monkeypatch):
+    class NoDesktop(object):
+        scenario = "windows"
+
+        def screenshot_png(self):
+            return None
+
+    monkeypatch.setattr(mcp_tools.platforms, "backend", lambda scenario=None: NoDesktop())
+
+
+@pytest.mark.skipif(not IS_WINDOWS, reason="SESSIONNAME is a Windows session variable")
+def test_a_service_session_names_the_real_cause(monkeypatch):
+    """Session 0 has no desktop at all, so the answer must say that, not "no screen"."""
+    _headless_windows_backend(monkeypatch)
+    monkeypatch.setenv("SESSIONNAME", "Services")
+    result = mcp_tools.call_tool("screen_capture", {})
+    assert result["available"] is False
+    assert result["session"] == "Services"
+    assert "session 0" in result["reason"]
+    assert "no desktop" in result["reason"]
+    # The fix has to be the actual install shape, not "try again".
+    assert "-AdminService" in result["fix"]
+    assert "RemoteHarnessMCPService" in result["fix"]
+
+
+@pytest.mark.skipif(not IS_WINDOWS, reason="SESSIONNAME is a Windows session variable")
+def test_an_interactive_session_keeps_the_generic_wording(monkeypatch):
+    """A console session that cannot capture is a different problem from session 0."""
+    _headless_windows_backend(monkeypatch)
+    monkeypatch.setenv("SESSIONNAME", "Console")
+    result = mcp_tools.call_tool("screen_capture", {})
+    assert result["available"] is False
+    assert result["session"] == "Console"
+    assert "session 0" not in result["reason"]
 @pytest.mark.skipif(not IS_WINDOWS, reason="needs a real Windows desktop")
 def test_real_capture_on_windows(tmp_path):
     target = tmp_path / "real.png"
