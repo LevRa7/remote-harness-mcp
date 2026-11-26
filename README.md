@@ -557,10 +557,10 @@ The release also ships a single compiled installer, for machines where you would
 not clone or download anything else — `RemoteHarnessMCP-Setup-<version>.exe`:
 
 ```powershell
-.\RemoteHarnessMCP-Setup-0.7.0-rc1-alpha.exe            # open the visual installer
-.\RemoteHarnessMCP-Setup-0.7.0-rc1-alpha.exe -Lang ru   # start in Russian
-.\RemoteHarnessMCP-Setup-0.7.0-rc1-alpha.exe -SelfTest  # headless self-check, prints JSON
-.\RemoteHarnessMCP-Setup-0.7.0-rc1-alpha.exe --version  # print the version
+.\RemoteHarnessMCP-Setup-0.7.1.exe            # open the visual installer
+.\RemoteHarnessMCP-Setup-0.7.1.exe -Lang ru   # start in Russian
+.\RemoteHarnessMCP-Setup-0.7.1.exe -SelfTest  # headless self-check, prints JSON
+.\RemoteHarnessMCP-Setup-0.7.1.exe --version  # print the version
 ```
 
 It carries the wizard, `install.ps1`, `core/` and `install.sh` inside itself, unpacks them

@@ -603,10 +603,10 @@ https://<имя-вашего-узла>.<ваш-tailnet>.ts.net/sse?token=<ваш
 где не хочется ничего клонировать:
 
 ```powershell
-.\RemoteHarnessMCP-Setup-0.7.0-rc1-alpha.exe            # открыть визуальный установщик
-.\RemoteHarnessMCP-Setup-0.7.0-rc1-alpha.exe -Lang ru   # начать на русском
-.\RemoteHarnessMCP-Setup-0.7.0-rc1-alpha.exe -SelfTest  # самопроверка без окна, печатает JSON
-.\RemoteHarnessMCP-Setup-0.7.0-rc1-alpha.exe --version  # показать версию
+.\RemoteHarnessMCP-Setup-0.7.1.exe            # открыть визуальный установщик
+.\RemoteHarnessMCP-Setup-0.7.1.exe -Lang ru   # начать на русском
+.\RemoteHarnessMCP-Setup-0.7.1.exe -SelfTest  # самопроверка без окна, печатает JSON
+.\RemoteHarnessMCP-Setup-0.7.1.exe --version  # показать версию
 ```
 
 Внутри него лежат мастер, `install.ps1`, `core/` и `install.sh`; он распаковывает их в
