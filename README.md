@@ -34,6 +34,23 @@ Since 0.7.0 no separate relay gateway is required: the node publishes itself. De
 
 ---
 
+## 🛡️ Threat Model
+
+Remote Harness MCP is designed to give an AI client controlled access to your own machine while minimizing unintended exposure.
+
+**Protected by default:**
+- **Loopback-only bind (`127.0.0.1`)** — the standalone server never listens on `0.0.0.0` by default; public ingress goes only through TLS (Tailscale Funnel or `--quick-tunnel` via `cloudflared`).
+- **Mandatory authentication** — every MCP request requires a secret token (`MESH_TOKEN` / `lk_…`) or **OAuth 2.1 with PKCE S256** (`/.well-known/oauth-authorization-server`, `/oauth/register`, `/oauth/authorize`, `/oauth/token`); unauthenticated requests receive HTTP `401`.
+- **Protected git metadata** — `write_file`, `edit_file`, and `batch_edit` block writes to `.git/hooks/*` and `.git/config`; `git_status` and `git_diff` run without a shell (`shell=False`) and with `-c core.fsmonitor=false -c core.hooksPath=`.
+- **SSRF protection in `fetch_url`** — HTTPS only, every resolved IP is checked via `ipaddress` (blocking loopback, private/RFC1918, link-local, and metadata ranges), max 5 redirects, 300 KB response cap.
+- **Scoped & isolated modes** — `--folder <dir>` pins workspace and write roots to one directory; `--no-shell` (`MESH_ENABLE_SHELL=0`) disables `bash_exec`, `run_script`, and `run_job`; `read_only` (`MESH_READ_ONLY=1`) blocks all mutations; Docker/Podman sandbox (`node_control(action="sandbox")`) isolates shell execution to `/workspace` with networking off by default and `--cap-drop ALL`.
+
+**Residual risks when shell is enabled:**
+- With shell execution enabled (`full` mode without `--no-shell` or Docker sandbox), anyone who holds the MCP URL/token — or a prompt-injected model session — can run arbitrary commands with the privileges of the OS user running the node.
+- Treat the MCP link and token like a password. For untrusted prompts or single-project access, combine `--folder`, `--no-shell`, `read_only`, or Docker sandbox isolation (see also [docs/SANDBOX_SECURITY.md](docs/SANDBOX_SECURITY.md)).
+
+---
+
 ## 🏗️ Architecture in 0.7.0 — the whole stack runs on your machine
 
 **Up to and including 0.6.x** every node needed a bridge: a separate VPS with a
@@ -189,7 +206,7 @@ Every answer was produced by `system_vitals`, `device_info`, `device_capture` an
 
 ## 🛠️ What Gemini can do on your machine (MCP tools)
 
-**28 tools.** Every one of them runs on your machine under your own user account — the gateway only carries the calls.
+**36 tools on the node (`ALL_TOOLS`), 38 through the gateway.** Every one of them runs on your machine under your own user account — the gateway only carries the calls. The two extra ones in bridge mode are the confirmed twins `system_change` (install/remove) and `system_write` (write into a system path); a standalone node does not have them. To save LLM context tokens, `tools/list` supports toolset profiles via `MESH_TOOLSETS` (`all`, `core`, `git`, `web`, `device`, `admin`) and a platform auto-profile (non-Android desktop nodes hide phone-only `device_capture` and `device_messages` by default, advertising 34 tools unless `MESH_DEVICE=1` or `MESH_TOOLSETS=all`).
 
 ### Which calls ask for your confirmation
 
@@ -197,7 +214,7 @@ Gemini Spark decides whether to stop and ask *"confirm this action?"* from the *
 
 | Class | Tools | Confirmation |
 | :--- | :--- | :--- |
-| Read-only | `mesh_status`, `system_info`, `system_vitals`, `get_orchestration_skill`, `list_dir`, `read_file`, `grep_search`, `glob_find`, `job_output`, `job_list`, `share_list`, `device_info` | never asked |
+| Read-only | `mesh_status`, `system_info`, `system_vitals`, `get_orchestration_skill`, `list_dir`, `read_file`, `read_media`, `grep_search`, `glob_find`, `job_output`, `job_list`, `share_list`, `device_info` | never asked |
 | Local work — commands, builds, file writes, jobs, shares, node settings, and the whole device branch | `bash_exec`, `run_job`, `write_file`, `edit_file`, `job_kill`, `node_control`, `goal`, `schedule`, `share_file`, `serve_dir`, `unshare`, `device_control`, `device_capture`, `device_messages`, `screen_capture` | not asked |
 | **Confirmed — install/delete, `sudo`, system paths** | `system_change` (installs/removes software, deletes data, runs `sudo`, edits system paths by shell), `system_write` (writes file content into a system path), `mesh_update` (installs a release) | **asked first** |
 
@@ -241,6 +258,7 @@ The tool surface and the confirmation policy live in [gateway.py](gateway.py) (a
 | :--- | :--- |
 | `list_dir(path)` | Lists files and directories (workspace by default). |
 | `read_file(path, start_line, end_line, max_chars, cursor)` | Reads a text file with line numbers, optionally restricted to a line range. Paginated like `bash_exec`. |
+| `read_media(path, offset, max_chars, max_side, max_frames, include_audio, page_start, page_end, render_pages, encoding)` | Hands the file to the model **in the content block MCP has for it**, not as raw bytes and not as a link: an image (PNG/JPEG/WebP/GIF) goes as an `image` block (base64 + `mimeType`), downscaled to fit the response; a PDF as its page text, with pages rendered to `image` blocks when there is no text layer; audio as metadata (duration, codec, rate, bitrate) plus an `audio` block when `include_audio=true`; video as metadata plus evenly spaced JPEG frames; text/JSON/CSV/logs as text with the encoding detected (UTF-8/BOM, `cp1251`, `cp1252`, `latin-1`) and a cursor for the next page. Budgets: 30 MiB file, 700 KiB and 1280 px per image, 4 frames, ~2.6 MB of base64 per answer. Heavy conversions use `ffmpeg` (frames, oversized photos) and PyMuPDF/`pdftoppm` (PDF pages); when one is missing the answer says so instead of failing silently. The text of an image is also read with OCR (`winsdk`/Windows OCR, `tesseract`, or your own `MESH_OCR_CMD`) and added to the text block — which matters because Gemini's client does not pass `image` blocks to the model yet. |
 | `write_file(path, content, create_dirs, mode)` | Atomically creates or overwrites a file (temp file + `os.replace`). `mode` is POSIX-only: on Windows it is not honoured, and the result says so instead of pretending. A path inside the system is **refused** and has to go through `system_write`. |
 | `edit_file(path, old_string, new_string, expected_sha256, replace_all)` | Replaces an exact substring. `old_string` must match exactly once unless `replace_all` is set; `expected_sha256` guards against overwriting a file that changed since it was read. System paths are refused — read the file and send the whole new content to `system_write`. |
 | `system_write(path, content, create_dirs, mode)` | Writes a file inside a system path (`/etc`, `/usr`, `/boot`, `/var/lib`, `C:\Windows`, `C:\Program Files`, `ProgramData`, the registry) — the confirmed twin of `write_file` and the only way to write there. Gemini asks you first. Content is exact, so there is no shell quoting to get wrong. |
@@ -249,8 +267,18 @@ The tool surface and the confirmation policy live in [gateway.py](gateway.py) (a
 
 | Tool | What it does |
 | :--- | :--- |
-| `grep_search(pattern, path, glob, limit, ignore_case, fixed, context)` | Recursively searches file contents, skipping binary files and heavy directories. `fixed` treats the pattern as literal text, `context` adds surrounding lines, `limit` is 1–1000 (default 200). |
+| `grep_search(pattern, path, glob, limit, ignore_case, fixed, context, format)` | Recursively searches file contents, skipping binary files and heavy directories. `fixed` treats the pattern as literal text, `context` adds surrounding lines, `limit` is 1–1000 (default 200), `format="compact"` returns compact `path:line: text` lines. |
 | `glob_find(pattern, path)` | Finds files by glob pattern (`*` and `**`). |
+
+### Git & Web (shell-free)
+
+These read-only tools work even when `--no-shell` (`MESH_ENABLE_SHELL=0`) is active:
+
+| Tool | What it does |
+| :--- | :--- |
+| `git_status(path, short, untracked, max_chars)` | Read-only `git status` executed directly (`shell=False`) with `-c core.fsmonitor=false -c core.hooksPath=`. |
+| `git_diff(path, staged, stat, ref, file, max_chars)` | Read-only `git diff` without a shell (`--staged`, `--stat`, optional `ref` and `file` filter). |
+| `fetch_url(url, strip_html, max_bytes, timeout_sec)` | Fetches an `https://` URL with SSRF protection (blocks loopback/private/link-local IPs), a 5-redirect cap, 300 KB limit, and optional HTML-to-text stripping. |
 
 ### Long-running work
 
@@ -433,6 +461,15 @@ cd remote-harness-mcp
 ./install.sh --mode=tunnel          # the previous shared-gateway scheme
 ```
 
+**⚡ One-folder standalone mode (no installer required)**
+```bash
+python3 -m core.server --folder ./my-project --no-shell --quick-tunnel
+```
+- `--folder <dir>` scopes workspace and write roots to a single directory.
+- `--no-shell` (`MESH_ENABLE_SHELL=0`) disables `bash_exec`, `run_script`, and `run_job`, keeping file, search, `git_status`, `git_diff`, and `fetch_url` tools available.
+- `--quick-tunnel` publishes the loopback server over an ephemeral `trycloudflare.com` HTTPS URL when `cloudflared` is installed.
+- Standalone mode also supports **OAuth 2.1 (PKCE S256)** (`/.well-known/oauth-authorization-server`, `/oauth/register`, `/oauth/authorize`, `/oauth/token`) and `MESH_TOOLSETS` filtering (`core,git,web`).
+
 At the end the installer prints your personal MCP link and copies it to the clipboard:
 ```text
 https://<your-node-name>.<your-tailnet>.ts.net/sse?token=<your_secret_token>
@@ -590,7 +627,7 @@ No public IP, no port forwarding and no gateway: the node stays on loopback and 
 
 The installer resolves `<node>.<tailnet>.ts.net` from `tailscale status --json`, writes `MESH_ALLOWED_HOSTS` and `MESH_PUBLIC_URL` next to `MESH_TOKEN` in `standalone.env`, runs `tailscale funnel --bg --https=443` and prints `https://<node>.<tailnet>.ts.net/sse?token=…`.
 
-**Autostart at system startup is the default.** The installer registers `RemoteHarnessMCPService` (SYSTEM, starts before anyone logs on, restarts on failure); the wizard's "Start at system startup as a Windows service" switch is already ticked. Clear it, or refuse elevation, and the node starts at logon through `rhm-node.vbs` instead — and the installer records which one it really registered (`autostart.state.json` in the configuration directory). A reinstall restarts the running task: otherwise the old process keeps serving in its previous mode and the Funnel answers `502`.
+**Autostart at logon is the default.** The node starts through `rhm-node.vbs` in the Startup folder and lives in **your own session**, which is why screen capture, the clipboard and the tray icon work. The installer records what it really registered (`autostart.state.json` in the configuration directory). Starting before anyone logs on means the machine-wide `RemoteHarnessMCPService` (SYSTEM, restarts on failure) — the wizard's "Start at system startup as a Windows service" switch, cleared by default. A SYSTEM task runs in session 0, which has no desktop: there `screen_capture` answers `available: false` and the clipboard and tray are unavailable, so tick that switch only for a machine nobody sits at. A reinstall restarts the running node: otherwise the old process keeps serving in its previous mode and the Funnel answers `502`.
 
 The `rhm` command (the node menu) is installed into `%LOCALAPPDATA%\Programs\RemoteHarnessMCP\bin` and added to the user `PATH`: in a new PowerShell or cmd window, `rhm` is enough. The menu describes the **installed** node: in Funnel mode it prints that node's own `https://<node>.<tailnet>.ts.net/sse?token=…` and the token from `standalone.env`, not the gateway link an earlier tunnel install left in `agent.env`/`domain.env`.
 

@@ -34,6 +34,23 @@ Gemini в браузере или на телефоне умеет разгов�
 
 ---
 
+## 🛡️ Модель угроз
+
+Remote Harness MCP даёт AI-клиенту контролируемый доступ к вашей машине, минимизируя лишнюю поверхность атаки.
+
+**Что защищено по умолчанию:**
+- **Привязка только к loopback (`127.0.0.1`)** — standalone-сервер по умолчанию не слушает `0.0.0.0`; внешний вход идёт только через TLS (Tailscale Funnel или `--quick-tunnel` через `cloudflared`).
+- **Обязательная аутентификация** — каждый MCP-запрос требует секретный токен (`MESH_TOKEN` / `lk_…`) или **OAuth 2.1 с PKCE S256** (`/.well-known/oauth-authorization-server`, `/oauth/register`, `/oauth/authorize`, `/oauth/token`); неавторизованные запросы получают HTTP `401`.
+- **Защита метаданных git** — `write_file`, `edit_file` и `batch_edit` блокируют запись в `.git/hooks/*` и `.git/config`; `git_status` и `git_diff` запускаются без оболочки (`shell=False`) с `-c core.fsmonitor=false -c core.hooksPath=`.
+- **Защита от SSRF в `fetch_url`** — только `https://`, проверка всех разрешённых IP через `ipaddress` (блокировка loopback, приватных RFC1918, link-local и metadata-адресов), лимит 5 редиректов и 300 КБ на ответ.
+- **Ограниченные и изолированные режимы** — `--folder <dir>` ограничивает рабочую папку и корни записи одним каталогом; `--no-shell` (`MESH_ENABLE_SHELL=0`) отключает `bash_exec`, `run_script` и `run_job`; `read_only` (`MESH_READ_ONLY=1`) запрещает любые мутации; контейнер Docker/Podman (`node_control(action="sandbox")`) изолирует выполнение команд в `/workspace` без сети по умолчанию и с `--cap-drop ALL`.
+
+**Остаточные риски при включённой оболочке:**
+- Когда оболочка включена (режим `full` без `--no-shell` и без Docker-песочницы), любой обладатель MCP-ссылки/токена — или скомпрометированная через prompt-injection сессия модели — может выполнять произвольные команды с правами пользователя ОС, от имени которого запущен узел.
+- Относитесь к MCP-ссылке и токену как к паролю. Для недоверенных промптов или работы с одним проектом комбинируйте `--folder`, `--no-shell`, `read_only` или Docker-песочницу (см. также [docs/SANDBOX_SECURITY.md](docs/SANDBOX_SECURITY.md)).
+
+---
+
 ## 🏗️ Архитектура 0.7.0 — вся инфраструктура на вашей машине
 
 **До 0.6.x включительно** каждому узлу был нужен мост: отдельный сервер (VPS) с
@@ -190,7 +207,7 @@ SSID и оба адреса замазаны, остальное пришло и
 
 ## 🛠️ Что Gemini может делать на вашей машине (MCP-инструменты)
 
-**28 инструментов.** Все они выполняются на вашей машине под вашей учётной записью — шлюз только передаёт вызовы.
+**36 инструментов на узле (`ALL_TOOLS`), 38 через шлюз.** Все они выполняются на вашей машине под вашей учётной записью — шлюз только передаёт вызовы. Два лишних в режиме с мостом — подтверждаемые двойники `system_change` (установка/удаление) и `system_write` (запись в системный путь): на standalone-узле их нет. Для экономии контекста LLM `tools/list` поддерживает профили через `MESH_TOOLSETS` (`all`, `core`, `git`, `web`, `device`, `admin`) и автопрофиль по платформе (на настольных узлах без Android инструменты `device_capture` и `device_messages` скрыты по умолчанию — отдаётся 34 инструмента, если не задано `MESH_DEVICE=1` или `MESH_TOOLSETS=all`).
 
 ### На какие вызовы Gemini спросит подтверждение
 
@@ -198,7 +215,7 @@ Gemini Spark решает, останавливаться ли с вопросо
 
 | Класс | Инструменты | Подтверждение |
 | :--- | :--- | :--- |
-| Только чтение | `mesh_status`, `system_info`, `system_vitals`, `get_orchestration_skill`, `list_dir`, `read_file`, `grep_search`, `glob_find`, `job_output`, `job_list`, `share_list`, `device_info` | не запрашивается |
+| Только чтение | `mesh_status`, `system_info`, `system_vitals`, `get_orchestration_skill`, `list_dir`, `read_file`, `read_media`, `grep_search`, `glob_find`, `job_output`, `job_list`, `share_list`, `device_info` | не запрашивается |
 | Локальная работа — команды, сборки, запись файлов, задачи, публикации и вся ветка устройства | `bash_exec`, `run_job`, `write_file`, `edit_file`, `job_kill`, `node_control`, `goal`, `schedule`, `share_file`, `serve_dir`, `unshare`, `device_control`, `device_capture`, `device_messages`, `screen_capture` | не запрашивается |
 | **Подтверждаемые — установка/удаление, `sudo`, системные пути** | `system_change` (установка/удаление ПО, удаление данных, `sudo`, правка системных путей через оболочку), `system_write` (запись файла в системный путь), `mesh_update` (устанавливает релиз) | **запрашивается** |
 
@@ -242,6 +259,7 @@ Gemini Spark решает, останавливаться ли с вопросо
 | :--- | :--- |
 | `list_dir(path)` | Список файлов и каталогов (по умолчанию — рабочий каталог). |
 | `read_file(path, start_line, end_line, max_chars, cursor)` | Читает текстовый файл с номерами строк, при желании — диапазон строк. Постранично, как `bash_exec`. |
+| `read_media(path, offset, max_chars, max_side, max_frames, include_audio, page_start, page_end, render_pages, encoding)` | Отдаёт файл модели **в том блоке, который понимает MCP**, а не сырыми байтами и не ссылкой: картинка (PNG/JPEG/WebP/GIF) уходит блоком `image` (base64 + `mimeType`) и ужимается под лимит ответа; PDF — текстом страниц, а если текстового слоя нет, страницы рендерятся в `image`; аудио — метаданными (длительность, кодек, частота, битрейт), а с `include_audio=true` ещё и блоком `audio`; видео — метаданными и равномерно нарезанными JPEG-кадрами; текст, JSON, CSV и логи — текстом с определением кодировки (UTF-8/BOM, `cp1251`, `cp1252`, `latin-1`) и курсором для следующей порции. Бюджеты: файл до 30 МиБ, картинка до 700 КиБ и до 1280 px по большей стороне, до 4 кадров, ~2,6 МБ base64 на ответ. Тяжёлые конверсии делают `ffmpeg` (кадры, ужатие фото) и PyMuPDF/`pdftoppm` (страницы PDF): если их нет, ответ так и говорит, вместо того чтобы молча упасть. Текст с картинки дополнительно распознаётся (OCR: `winsdk`/Windows OCR, `tesseract` или свой `MESH_OCR_CMD`) и попадает в текстовый блок — это важно, потому что клиент Gemini пока не передаёт модели `image`-блоки. |
 | `write_file(path, content, create_dirs, mode)` | Атомарно создаёт или перезаписывает файл (временный файл + `os.replace`). `mode` — только для POSIX: на Windows он не применяется, и результат об этом честно сообщает. Путь внутри системы **отклоняется** — для него есть `system_write`. |
 | `edit_file(path, old_string, new_string, expected_sha256, replace_all)` | Заменяет точную подстроку. `old_string` должен встречаться ровно один раз, если не задан `replace_all`; `expected_sha256` защищает от перезаписи файла, изменившегося после чтения. Системные пути отклоняются — прочитайте файл и отправьте новое содержимое целиком в `system_write`. |
 | `system_write(path, content, create_dirs, mode)` | Запись файла в системный путь (`/etc`, `/usr`, `/boot`, `/var/lib`, `C:\Windows`, `C:\Program Files`, `ProgramData`, реестр) — «подтверждаемый» двойник `write_file` и единственный способ туда писать. Gemini спрашивает подтверждение. Содержимое передаётся точно, экранировать для оболочки ничего не нужно. |
@@ -250,8 +268,18 @@ Gemini Spark решает, останавливаться ли с вопросо
 
 | Инструмент | Что делает |
 | :--- | :--- |
-| `grep_search(pattern, path, glob, limit, ignore_case, fixed, context)` | Рекурсивно ищет по содержимому файлов, пропуская двоичные файлы и тяжёлые каталоги. `fixed` — поиск как по обычному тексту, `context` — строки вокруг совпадения, `limit` — 1–1000 (по умолчанию 200). |
+| `grep_search(pattern, path, glob, limit, ignore_case, fixed, context, format)` | Рекурсивно ищет по содержимому файлов, пропуская двоичные файлы и тяжёлые каталоги. `fixed` — поиск как по обычному тексту, `context` — строки вокруг совпадения, `limit` — 1–1000 (по умолчанию 200), `format="compact"` возвращает компактные строки `path:line: text`. |
 | `glob_find(pattern, path)` | Ищет файлы по маске (`*` и `**`). |
+
+### Git и веб (без оболочки)
+
+Эти read-only инструменты работают даже при активном `--no-shell` (`MESH_ENABLE_SHELL=0`):
+
+| Инструмент | Что делает |
+| :--- | :--- |
+| `git_status(path, short, untracked, max_chars)` | Read-only `git status` напрямую без оболочки (`shell=False`) с `-c core.fsmonitor=false -c core.hooksPath=`. |
+| `git_diff(path, staged, stat, ref, file, max_chars)` | Read-only `git diff` без оболочки (`--staged`, `--stat`, опциональные `ref` и фильтр `file`). |
+| `fetch_url(url, strip_html, max_bytes, timeout_sec)` | Загружает `https://` URL с защитой от SSRF (блокировка loopback/приватных/link-local IP), лимитом 5 редиректов, 300 КБ и опциональной очисткой HTML в текст. |
 
 ### Долгие задачи
 
@@ -436,6 +464,15 @@ rhm --json status                   # то же машинно-читаемым 
 ```
 
 ### 1. Установите узел на ПК, которым хотите управлять
+
+**⚡ Лёгкий standalone-режим для одной папки (без установщика)**
+```bash
+python3 -m core.server --folder ./my-project --no-shell --quick-tunnel
+```
+- `--folder <dir>` ограничивает рабочую папку и корни записи одним каталогом.
+- `--no-shell` (`MESH_ENABLE_SHELL=0`) отключает `bash_exec`, `run_script` и `run_job`, оставляя файловые инструменты, поиск, `git_status`, `git_diff` и `fetch_url`.
+- `--quick-tunnel` публикует локальный сервер по временному HTTPS-адресу `trycloudflare.com` при наличии `cloudflared`.
+- В standalone-режиме также поддерживаются **OAuth 2.1 (PKCE S256)** (`/.well-known/oauth-authorization-server`, `/oauth/register`, `/oauth/authorize`, `/oauth/token`) и профили `MESH_TOOLSETS` (`core,git,web`).
 
 **🐧 Linux / 🍎 macOS**
 ```bash

@@ -20,7 +20,7 @@ from __future__ import annotations
 import os
 import re
 import shlex
-from typing import Awaitable, Callable, List, Optional
+from typing import Awaitable, Callable, List, Optional, Tuple, Union
 
 try:  # pragma: no cover - the import succeeds on a node with the SDK installed
     from google.antigravity import types
@@ -124,6 +124,70 @@ def validate_workspace_path(path: str, allowed_workspaces: Optional[List[str]] =
         if _is_within(abs_path, os.path.abspath(ws)):
             return True
     return False
+
+def _normalize_git_part(part: str) -> str:
+    cleaned = part.lower()
+    if os.name == "nt":
+        # Strip NTFS alternate data streams (e.g. "config::$DATA") and trailing
+        # dots/spaces, which Win32 silently ignores when resolving paths.
+        if ":" in cleaned and not (len(cleaned) == 2 and cleaned[1] == ":"):
+            cleaned = cleaned.split(":", 1)[0]
+        cleaned = cleaned.rstrip(". ")
+    return cleaned
+
+
+def _has_protected_git_segments(path_str: str) -> bool:
+    norm = os.path.normpath(path_str).replace("\\", "/")
+    parts = [_normalize_git_part(p) for p in norm.split("/") if p and p != "."]
+    for idx, part in enumerate(parts):
+        if part == ".git" and idx + 1 < len(parts):
+            nxt = parts[idx + 1]
+            if nxt in ("hooks", "config"):
+                return True
+    return False
+
+
+def is_protected_git_path(path: Union[str, os.PathLike[str]]) -> bool:
+    """Return True if *path* targets ``.git/hooks/*`` or ``.git/config``.
+
+    Accounts for lexical path normalization (``..``, mixed separators),
+    case-insensitivity (including Windows NTFS ADS/trailing dots), and
+    symlink resolution via ``os.path.realpath``.
+    """
+    if not path:
+        return False
+    try:
+        raw = os.fspath(path)
+    except TypeError:
+        return False
+    if not isinstance(raw, str) or not raw.strip():
+        return False
+
+    candidates = [raw]
+    try:
+        candidates.append(os.path.abspath(raw))
+    except OSError:
+        pass
+    try:
+        candidates.append(os.path.realpath(raw))
+    except OSError:
+        pass
+
+    return any(_has_protected_git_segments(candidate) for candidate in candidates)
+
+
+def check_write_allowed(path: Union[str, os.PathLike[str]]) -> Tuple[bool, str]:
+    """Check whether writing or editing *path* is permitted by safety policies.
+
+    Returns ``(True, "")`` when allowed, or ``(False, reason)`` when blocked.
+    """
+    if is_protected_git_path(path):
+        return (
+            False,
+            f"Refusing to write or edit protected git path (.git/hooks/* or .git/config): {os.fspath(path)}",
+        )
+    return True, ""
+
 
 def _extract_command(args: dict) -> str:
     if not isinstance(args, dict):

@@ -82,6 +82,19 @@ def _audit(actor: str, action: str, ok: bool, detail: str = "") -> None:
 # Snapshot
 # ---------------------------------------------------------------------------
 
+def toolsets_setting() -> str:
+    """Return configured MESH_TOOLSETS value (or 'auto' when unset)."""
+    return (os.environ.get("MESH_TOOLSETS") or "").strip().lower() or "auto"
+
+
+def shell_enabled_setting() -> bool:
+    """Return False when MESH_ENABLE_SHELL is explicitly disabled."""
+    raw = os.environ.get("MESH_ENABLE_SHELL")
+    if raw is None or not str(raw).strip():
+        return True
+    return str(raw).strip().lower() in ("1", "true", "yes", "on", "y", "t")
+
+
 def snapshot() -> Dict[str, Any]:
     """Everything a caller needs to render the settings, in one call."""
     state = control.state()
@@ -95,6 +108,8 @@ def snapshot() -> Dict[str, Any]:
         "remote_control": state.get("remote_control") or control.remote_control_state(),
         "sandbox": isolation,
         "modes": list(control.ACCESS_MODES),
+        "toolsets": toolsets_setting(),
+        "shell_enabled": shell_enabled_setting(),
     }
 
 

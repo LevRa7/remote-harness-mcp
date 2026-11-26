@@ -21,7 +21,7 @@ import fnmatch
 import os
 import re
 import time
-from typing import Any, Dict, FrozenSet, Iterator, List, Optional, Tuple
+from typing import Any, Dict, FrozenSet, Iterator, List, Optional, Sequence, Tuple
 
 IS_WINDOWS = os.name == "nt"
 
@@ -324,12 +324,64 @@ def glob_find(
     return result
 
 
+_REGEX_META_CHARS: FrozenSet[str] = frozenset(".^$*+?{}[]\\|()")
+
+
+def _is_literal_regex(pattern: str) -> bool:
+    """Return True when *pattern* has no regex metacharacters and can match literally."""
+    return bool(pattern) and not any(ch in _REGEX_META_CHARS for ch in pattern)
+
+
 def _is_probably_binary(path: str) -> bool:
     try:
         with open(path, "rb") as handle:
             return b"\x00" in handle.read(4096)
     except OSError:
         return True
+
+
+def format_grep_compact(matches: Sequence[Dict[str, Any]], root_path: str) -> str:
+    """Format grep_search matches as compact ``rel/path.py:line: text`` lines.
+
+    Paths are made relative to *root_path* when possible and always use forward
+    slashes (``/``). Falls back to normalized forward-slash paths when a match
+    cannot be expressed relative to *root_path* (e.g., different drive on Windows).
+    """
+    if not matches:
+        return ""
+
+    root_real = os.path.realpath(root_path) if root_path else ""
+    root_is_file = bool(root_real) and os.path.isfile(root_real)
+    root_real_cmp = os.path.normcase(root_real) if root_real else ""
+
+    lines: List[str] = []
+    for item in matches:
+        raw_path = str(item.get("path", ""))
+        line_no = item.get("line", 0)
+        text = str(item.get("text", ""))
+
+        display_path = raw_path
+        if root_real and raw_path:
+            if os.path.isabs(raw_path):
+                path_real = os.path.realpath(raw_path)
+                if root_is_file and os.path.normcase(path_real) == root_real_cmp:
+                    display_path = os.path.basename(path_real)
+                else:
+                    base_for_rel = os.path.dirname(root_real) if root_is_file else root_real
+                    try:
+                        rel = os.path.relpath(path_real, base_for_rel)
+                    except ValueError:
+                        rel = raw_path
+                    display_path = rel
+            else:
+                display_path = raw_path
+
+        display_path = display_path.replace("\\", "/")
+        while display_path.startswith("./"):
+            display_path = display_path[2:]
+        lines.append(f"{display_path}:{line_no}: {text}")
+
+    return "\n".join(lines)
 
 
 def grep_search(
@@ -364,6 +416,16 @@ def grep_search(
         except re.error as exc:
             return {"error": "invalid regular expression: %s" % exc}
 
+    # Fast bytes pre-filter for case-sensitive literal searches (fixed=True or
+    # regex without metacharacters). Skip when pattern contains U+FFFD because
+    # invalid UTF-8 bytes decode to U+FFFD under errors="replace".
+    needle_bytes: Optional[bytes] = None
+    if not ignore_case and pattern and "\ufffd" not in pattern:
+        if fixed or _is_literal_regex(pattern):
+            needle_bytes = pattern.encode("utf-8")
+            if not fixed:
+                needle = pattern
+
     stats: Dict[str, int] = {}
     matches: List[Dict[str, Any]] = []
     truncated = False
@@ -388,24 +450,31 @@ def grep_search(
                 continue
         except OSError:
             continue
-        if _is_probably_binary(file_path):
-            continue
+
         try:
-            with open(file_path, "r", encoding="utf-8", errors="replace") as handle:
-                lines = handle.read().splitlines()
+            with open(file_path, "rb") as handle:
+                head = handle.read(4096)
+                if b"\x00" in head:
+                    continue
+                tail = handle.read()
         except OSError:
             continue
 
+        raw_bytes = head + tail if tail else head
         scanned_files += 1
+        if needle_bytes is not None and needle_bytes not in raw_bytes:
+            continue
+
+        lines = raw_bytes.decode("utf-8", errors="replace").splitlines()
         hit_lines = []
-        for idx, line in enumerate(lines):
-            found = (
-                (needle in (line.lower() if ignore_case else line))
-                if fixed
-                else bool(regex.search(line))  # type: ignore[union-attr]
-            )
-            if found:
-                hit_lines.append(idx)
+        if fixed or needle_bytes is not None:
+            for idx, line in enumerate(lines):
+                if needle in (line.lower() if ignore_case else line):
+                    hit_lines.append(idx)
+        else:
+            for idx, line in enumerate(lines):
+                if regex.search(line):  # type: ignore[union-attr]
+                    hit_lines.append(idx)
         if not hit_lines:
             continue
 
@@ -456,6 +525,7 @@ __all__ = [
     "MAX_TIME_BUDGET_MS",
     "SKIP_DIRS_DEFAULT",
     "compile_rel_glob",
+    "format_grep_compact",
     "glob_find",
     "grep_search",
     "iter_files_bfs",

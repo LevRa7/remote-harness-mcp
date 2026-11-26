@@ -2315,16 +2315,7 @@ async def messages_endpoint(request: Request):
                 # tests/test_gateway_share_route.py pins the copy for these four.
                 {
                     "name": "device_info",
-                    "description": (
-                        "One-call report for the device this node runs on: battery and charging, "
-                        "network interfaces with Wi-Fi and cellular signal strength, language, time and "
-                        "timezone, CPU, RAM, storage, cameras, microphones, sensors and what the platform "
-                        "can actually reach. On an Android/Termux node it reads the phone through the "
-                        "termux-api commands; on a laptop or desktop it reads the local system. Every "
-                        "section carries available/source, so 'not exposed here' is never reported as a "
-                        "zero - and on a non-phone the phone-only sections explain themselves instead of "
-                        "failing. Use device_control, device_capture or device_messages to act."
-                    ),
+                    "description": "Device telemetry: battery, network, hardware, sensors.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
@@ -2332,38 +2323,18 @@ async def messages_endpoint(request: Request):
                                 "type": "string",
                                 "enum": ["summary", "all", "device", "battery", "network", "locale",
                                          "time", "hardware", "storage", "cameras", "microphones",
-                                         "sensors", "capabilities"],
-                                "description": "Which blocks to return (default: all)."
+                                         "sensors", "capabilities"]
                             },
-                            "sensor": {
-                                "type": "string",
-                                "description": ("Name one sensor to take a single live sample from "
-                                                "(Android only; needs a name from the sensors block).")
-                            },
-                            "fresh": {
-                                "type": "boolean",
-                                "description": "Bypass the short-lived cache (default false)."
-                            },
-                            "quick": {
-                                "type": "boolean",
-                                "description": ("Skip the slow sections: network, cameras, microphones, "
-                                                "sensors (default false).")
-                            }
+                            "sensor": {"type": "string"},
+                            "fresh": {"type": "boolean"},
+                            "quick": {"type": "boolean"}
                         },
                         "additionalProperties": False
                     }
                 },
                 {
                     "name": "device_control",
-                    "description": (
-                        "Reversible actions on the node's own device: torch, vibrate, volume, screen "
-                        "brightness, text-to-speech, toast, notifications, clipboard, media playback, "
-                        "media scan, wake lock, download, opening or sharing a file, a text dialog and "
-                        "the wallpaper. Each action is a fixed termux-api command on Android and an "
-                        "explained no-op elsewhere; the result names the command and its argv so nothing "
-                        "is guessed. Nothing here is destructive, and all of it is refused when the node "
-                        "runs with MESH_READ_ONLY=1."
-                    ),
+                    "description": "Reversible device actions (torch, volume, notify, clipboard, media).",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
@@ -2373,53 +2344,24 @@ async def messages_endpoint(request: Request):
                                          "tts_speak", "toast", "notify", "notify_list",
                                          "notify_remove", "clipboard_get", "clipboard_set", "media",
                                          "media_scan", "wakelock", "download", "open", "share",
-                                         "dialog", "wallpaper"],
-                                "description": "Action to perform."
+                                         "dialog", "wallpaper"]
                             },
-                            "on": {
-                                "type": "boolean",
-                                "description": "torch: true lights it, false puts it out."
-                            },
-                            "value": {
-                                "type": "integer",
-                                "description": ("vibrate: milliseconds; volume: level 0-15; "
-                                                "brightness: 0-255.")
-                            },
+                            "on": {"type": "boolean"},
+                            "value": {"type": "integer"},
                             "stream": {
                                 "type": "string",
-                                "enum": ["music", "call", "alarm", "notification", "ring", "system"],
-                                "description": "volume: which audio stream (default music)."
+                                "enum": ["music", "call", "alarm", "notification", "ring", "system"]
                             },
-                            "text": {
-                                "type": "string",
-                                "description": ("tts_speak/toast/notify/clipboard_set/dialog body; media: "
-                                                "play|pause|stop|info.")
-                            },
-                            "title": {
-                                "type": "string",
-                                "description": "notify/dialog: heading text."
-                            },
-                            "id": {
-                                "type": "string",
-                                "description": "notify_remove: the id the notification was posted with."
-                            },
-                            "url": {
-                                "type": "string",
-                                "description": "download/open/wallpaper: URL to use."
-                            },
-                            "path": {
-                                "type": "string",
-                                "description": "open/share/media/download/media_scan/wallpaper: file on the node."
-                            },
+                            "text": {"type": "string"},
+                            "title": {"type": "string"},
+                            "id": {"type": "string"},
+                            "url": {"type": "string"},
+                            "path": {"type": "string"},
                             "state": {
                                 "type": "string",
-                                "enum": ["acquire", "release", "status"],
-                                "description": "wakelock: what to do (default status)."
+                                "enum": ["acquire", "release", "status"]
                             },
-                            "timeout_sec": {
-                                "type": "integer",
-                                "description": "dialog: seconds to wait for the person (5-120, default 30)."
-                            }
+                            "timeout_sec": {"type": "integer"}
                         },
                         "required": ["action"],
                         "additionalProperties": False
@@ -2427,19 +2369,7 @@ async def messages_endpoint(request: Request):
                 },
                 {
                     "name": "device_capture",
-                    "description": (
-                        "Camera, microphone, location, fingerprint, USB and infrared actions. These "
-                        "observe the physical world or authenticate the person holding the phone, but "
-                        "they install and remove nothing, so they carry no confirmation prompt - the "
-                        "guard is the node's own switch (MESH_DEVICE, MESH_DEVICE_ACTIONS, "
-                        "MESH_READ_ONLY), which refuses a call before any command runs. A photo or a "
-                        "recording is written to the node's capture directory and is never uploaded "
-                        "anywhere by itself; "
-                        "fingerprint returns only the verdict, never biometric data; USB access requests "
-                        "permission and returns the descriptor but deliberately refuses to run a program "
-                        "for you; and on Android 11+ the Termux:API app has to be in the foreground for a "
-                        "recording."
-                    ),
+                    "description": "Phone capture: camera, mic, location, fingerprint, USB, IR.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
@@ -2448,37 +2378,17 @@ async def messages_endpoint(request: Request):
                                 "enum": ["camera_list", "camera_photo", "mic_record_start",
                                          "mic_record_stop", "mic_record_status", "location",
                                          "fingerprint", "usb_list", "usb_access",
-                                         "infrared_frequencies", "infrared_transmit"],
-                                "description": "Capture action to perform."
+                                         "infrared_frequencies", "infrared_transmit"]
                             },
-                            "camera_id": {
-                                "type": "integer",
-                                "description": "camera_photo: id from camera_list (default 0)."
-                            },
-                            "path": {
-                                "type": "string",
-                                "description": ("camera_photo/mic_record_start: output file (default: the "
-                                                "node's capture directory); usb_access: device path from "
-                                                "usb_list.")
-                            },
-                            "seconds": {
-                                "type": "integer",
-                                "description": "mic_record_start: recording length limit in seconds."
-                            },
+                            "camera_id": {"type": "integer"},
+                            "path": {"type": "string"},
+                            "seconds": {"type": "integer"},
                             "provider": {
                                 "type": "string",
-                                "enum": ["gps", "network", "passive"],
-                                "description": "location: which Android provider to use (default gps)."
+                                "enum": ["gps", "network", "passive"]
                             },
-                            "frequency": {
-                                "type": "integer",
-                                "description": "infrared_transmit: carrier frequency in Hz."
-                            },
-                            "pattern": {
-                                "type": "string",
-                                "description": ("infrared_transmit: durations in microseconds, e.g. "
-                                                "1000,2000,1000.")
-                            }
+                            "frequency": {"type": "integer"},
+                            "pattern": {"type": "string"}
                         },
                         "required": ["action"],
                         "additionalProperties": False
@@ -2486,47 +2396,20 @@ async def messages_endpoint(request: Request):
                 },
                 {
                     "name": "device_messages",
-                    "description": (
-                        "SMS, call log, contacts and placing a call. This is private data about the person "
-                        "who owns the phone, so the node refuses "
-                        "until its operator enables it with MESH_DEVICE_PIM=1. The refusal names the flag "
-                        "and the Android permissions to grant, so the answer is an instruction rather than "
-                        "a dead end. Sending an SMS and placing a call are also refused under "
-                        "MESH_READ_ONLY=1."
-                    ),
+                    "description": "Phone PIM: SMS, call log, contacts, call (MESH_DEVICE_PIM=1).",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
                             "action": {
                                 "type": "string",
-                                "enum": ["sms_list", "sms_send", "call_log", "contacts", "call"],
-                                "description": "Message or PIM action to perform."
+                                "enum": ["sms_list", "sms_send", "call_log", "contacts", "call"]
                             },
-                            "number": {
-                                "type": "string",
-                                "description": "sms_send/call: recipient number."
-                            },
-                            "text": {
-                                "type": "string",
-                                "description": "sms_send: message body."
-                            },
-                            "limit": {
-                                "type": "integer",
-                                "description": "How many records (1-50, default 10)."
-                            },
-                            "offset": {
-                                "type": "integer",
-                                "description": "Record offset, for paging."
-                            },
-                            "type": {
-                                "type": "string",
-                                "description": ("sms_list/call_log: filter, e.g. inbox/sent or "
-                                                "incoming/outgoing/missed.")
-                            },
-                            "query": {
-                                "type": "string",
-                                "description": "contacts: filter by name or number."
-                            }
+                            "number": {"type": "string"},
+                            "text": {"type": "string"},
+                            "limit": {"type": "integer"},
+                            "offset": {"type": "integer"},
+                            "type": {"type": "string"},
+                            "query": {"type": "string"}
                         },
                         "required": ["action"],
                         "additionalProperties": False

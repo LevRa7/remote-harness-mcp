@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import hmac
 import json
 import logging
@@ -54,12 +55,13 @@ import shutil
 import socket
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
-from urllib.parse import parse_qs, quote, urlparse, urlsplit
+from urllib.parse import parse_qs, quote, urlencode, urlparse, urlsplit, urlunsplit
 
 logger = logging.getLogger("remote-harness-mcp.standalone")
 
@@ -306,8 +308,8 @@ def truncate_output(text: str, max_chars: int = MAX_OUTPUT_CHARS) -> str:
 
 
 def _workspace_dir() -> str:
-    """Base directory used to resolve relative paths (current working dir)."""
-    return os.getcwd()
+    """Base directory used to resolve relative paths (MESH_WORKSPACE or cwd)."""
+    return os.environ.get("MESH_WORKSPACE") or os.getcwd()
 
 
 # ---------------------------------------------------------------------------
@@ -324,12 +326,13 @@ def _load_orchestration_skill() -> str:
 # ---------------------------------------------------------------------------
 
 # Metadata advertised through ``tools/list`` - the single source of truth is
-# core/mcp_tools.TOOLS (name/description/inputSchema), shared with the tunnel node.
-TOOL_DEFINITIONS: List[Dict[str, Any]] = mcp_tools.TOOLS
+# core/mcp_tools.ALL_TOOLS (filtered dynamically via mcp_tools.list_tools()).
+TOOL_DEFINITIONS: List[Dict[str, Any]] = mcp_tools.ALL_TOOLS
 
 _REQUIRED_ARGS: Dict[str, Tuple[str, ...]] = {
     "bash_exec": ("command",),
     "read_file": ("path",),
+    "read_media": ("path",),
     "write_file": ("path", "content"),
     "edit_file": ("path", "old_string", "new_string"),
     "grep_search": ("pattern",),
@@ -340,6 +343,7 @@ _REQUIRED_ARGS: Dict[str, Tuple[str, ...]] = {
     "share_file": ("path",),
     "serve_dir": ("path",),
     "unshare": ("name",),
+    "fetch_url": ("url",),
 }
 
 
@@ -398,9 +402,12 @@ class RemoteHarnessMCPServer(object):
             self._spec_order.append(name)
 
     def list_tool_specs(self) -> List[Dict[str, Any]]:
-        specs = []
+        active = mcp_tools.list_tools()
+        active_names = {spec["name"] for spec in active}
+        specs = [spec for spec in active if spec["name"] in self.tools]
+        builtin_names = {spec["name"] for spec in mcp_tools.ALL_TOOLS}
         for name in self._spec_order:
-            if name in self.tools:
+            if name in self.tools and name not in builtin_names and name not in active_names:
                 specs.append(self._specs[name])
         return specs
 
@@ -607,6 +614,28 @@ class RemoteHarnessMCPServer(object):
         except _InvalidParams as exc:
             return 200, self._error(req_id, -32602, "Invalid params: %s" % exc)
 
+        if name in ("bash_exec", "run_script", "run_job") and str(
+            os.environ.get("MESH_ENABLE_SHELL", "1")
+        ).strip().lower() in ("0", "false", "no", "off"):
+            return 200, {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": json.dumps(
+                                {
+                                    "error": "shell_disabled",
+                                    "message": "Shell execution is disabled (--no-shell / MESH_ENABLE_SHELL=0).",
+                                }
+                            ),
+                        }
+                    ],
+                    "isError": True,
+                },
+            }
+
         try:
             value = mcp_tools.call_tool(name, arguments)
         except Exception as exc:  # defensive: call_tool itself never raises
@@ -627,10 +656,31 @@ class RemoteHarnessMCPServer(object):
             "jsonrpc": "2.0",
             "id": req_id,
             "result": {
-                "content": [{"type": "text", "text": self._result_to_text(value)}],
+                "content": self._result_to_content(value),
                 "isError": self._is_error_result(value),
             },
         }
+
+    @classmethod
+    def _result_to_content(cls, value: Any) -> List[Dict[str, Any]]:
+        """The MCP content array for one tool result.
+
+        Almost every tool answers with data, and a single text block is the honest
+        shape for that. A media tool is different: it returns ``image`` and
+        ``audio`` blocks whose base64 must reach the client byte for byte, so a
+        result that already is a content array is forwarded rather than described.
+        The blocks are validated on the way out - a block of a type this server
+        does not know is a protocol invention the client cannot render, so it is
+        dropped instead of breaking the whole answer.
+        """
+        blocks = value.get("content") if isinstance(value, dict) else None
+        if isinstance(blocks, list):
+            forwarded = [block for block in blocks
+                         if isinstance(block, dict)
+                         and block.get("type") in mcp_tools.MEDIA_BLOCK_TYPES]
+            if forwarded:
+                return forwarded
+        return [{"type": "text", "text": cls._result_to_text(value)}]
 
     def _validate_arguments(self, name: str, arguments: Dict[str, Any]) -> None:
         for key in _REQUIRED_ARGS.get(name, ()):  # required arguments
@@ -909,6 +959,237 @@ def ensure_auth_token(token: Optional[str] = None, path: Optional[str] = None) -
     return generated
 
 
+_OAUTH_PUBLIC_PATHS = frozenset({"/oauth/register", "/oauth/authorize", "/oauth/token"})
+
+
+def _pkce_s256(code_verifier: str) -> str:
+    digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
+    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+
+
+def _valid_redirect_uri(value: Any) -> bool:
+    if not isinstance(value, str) or not value.strip() or len(value) > 2048:
+        return False
+    try:
+        parts = urlsplit(value.strip())
+    except Exception:
+        return False
+    return parts.scheme in ("http", "https") and bool(parts.netloc)
+
+
+class StandaloneOAuthStore(object):
+    """Minimal in-memory OAuth 2.1 store for standalone MCP clients.
+
+    Supports RFC 8414 metadata, RFC 7591 dynamic client registration, and
+    Authorization Code + PKCE S256 token issuance without conflicting with the
+    gateway's Google OIDC cabinet under ``/account``.
+    """
+
+    DEFAULT_CODE_TTL = 300
+    DEFAULT_TOKEN_TTL = 3600
+    MAX_CLIENTS = 256
+    MAX_CODES = 512
+    MAX_TOKENS = 512
+
+    def __init__(self, code_ttl: int = DEFAULT_CODE_TTL, token_ttl: Optional[int] = None) -> None:
+        self._lock = threading.Lock()
+        self._code_ttl = max(30, int(code_ttl))
+        self._explicit_token_ttl = token_ttl
+        self._clients: Dict[str, Dict[str, Any]] = {}
+        self._codes: Dict[str, Dict[str, Any]] = {}
+        self._tokens: Dict[str, Dict[str, Any]] = {}
+
+    def _token_ttl(self) -> int:
+        if self._explicit_token_ttl is not None:
+            return max(60, int(self._explicit_token_ttl))
+        try:
+            return max(60, int(os.environ.get("MESH_OAUTH_TOKEN_TTL", self.DEFAULT_TOKEN_TTL)))
+        except (TypeError, ValueError):
+            return self.DEFAULT_TOKEN_TTL
+
+    def _prune_locked(self, now: float) -> None:
+        self._codes = {k: v for k, v in self._codes.items() if v["expires_at"] > now}
+        self._tokens = {k: v for k, v in self._tokens.items() if v["expires_at"] > now}
+
+    @staticmethod
+    def metadata(base_url: str) -> Dict[str, Any]:
+        issuer = base_url.rstrip("/")
+        return {
+            "issuer": issuer,
+            "authorization_endpoint": f"{issuer}/oauth/authorize",
+            "token_endpoint": f"{issuer}/oauth/token",
+            "registration_endpoint": f"{issuer}/oauth/register",
+            "response_types_supported": ["code"],
+            "grant_types_supported": ["authorization_code"],
+            "token_endpoint_auth_methods_supported": ["none"],
+            "code_challenge_methods_supported": ["S256"],
+            "scopes_supported": ["mcp"],
+        }
+
+    def register_client(self, payload: Any) -> Tuple[int, Dict[str, Any]]:
+        if not isinstance(payload, dict):
+            return 400, {
+                "error": "invalid_client_metadata",
+                "error_description": "Registration body must be a JSON object.",
+            }
+        redirect_uris = payload.get("redirect_uris")
+        if (
+            not isinstance(redirect_uris, list)
+            or not redirect_uris
+            or not all(_valid_redirect_uri(uri) for uri in redirect_uris)
+        ):
+            return 400, {
+                "error": "invalid_client_metadata",
+                "error_description": "redirect_uris must be a non-empty list of http(s) URLs.",
+            }
+        client_name = str(payload.get("client_name") or "mcp-client")[:120]
+        client_id = "rhm_" + secrets.token_urlsafe(16)
+        issued_at = int(time.time())
+        record: Dict[str, Any] = {
+            "client_id": client_id,
+            "client_id_issued_at": issued_at,
+            "client_name": client_name,
+            "redirect_uris": [str(u).strip() for u in redirect_uris],
+            "grant_types": ["authorization_code"],
+            "response_types": ["code"],
+            "token_endpoint_auth_method": "none",
+        }
+        with self._lock:
+            if len(self._clients) >= self.MAX_CLIENTS:
+                oldest_key = next(iter(self._clients))
+                self._clients.pop(oldest_key, None)
+            self._clients[client_id] = record
+        return 201, dict(record)
+
+    def create_authorization_code(
+        self,
+        *,
+        client_id: str,
+        redirect_uri: str,
+        code_challenge: str,
+        code_challenge_method: str,
+        scope: str = "mcp",
+    ) -> Tuple[Optional[str], Optional[Dict[str, str]]]:
+        now = time.time()
+        with self._lock:
+            self._prune_locked(now)
+            client = self._clients.get(client_id)
+            if not client:
+                return None, {
+                    "error": "invalid_client",
+                    "error_description": "Unknown client_id.",
+                }
+            if redirect_uri not in client["redirect_uris"]:
+                return None, {
+                    "error": "invalid_request",
+                    "error_description": "redirect_uri is not registered for this client.",
+                }
+            if code_challenge_method != "S256":
+                return None, {
+                    "error": "invalid_request",
+                    "error_description": "PKCE code_challenge_method must be S256.",
+                }
+            if not isinstance(code_challenge, str) or not (43 <= len(code_challenge) <= 128):
+                return None, {
+                    "error": "invalid_request",
+                    "error_description": "Missing or invalid PKCE code_challenge.",
+                }
+            code = secrets.token_urlsafe(32)
+            if len(self._codes) >= self.MAX_CODES:
+                oldest_code = next(iter(self._codes))
+                self._codes.pop(oldest_code, None)
+            self._codes[code] = {
+                "client_id": client_id,
+                "redirect_uri": redirect_uri,
+                "code_challenge": code_challenge,
+                "code_challenge_method": "S256",
+                "scope": scope or "mcp",
+                "expires_at": now + self._code_ttl,
+            }
+            return code, None
+
+    def exchange_code(
+        self,
+        *,
+        code: str,
+        code_verifier: str,
+        client_id: str,
+        redirect_uri: str,
+    ) -> Tuple[int, Dict[str, Any]]:
+        now = time.time()
+        with self._lock:
+            self._prune_locked(now)
+            record = self._codes.pop(code, None)
+            if not record or record["expires_at"] <= now:
+                return 400, {
+                    "error": "invalid_grant",
+                    "error_description": "Invalid or expired authorization code.",
+                }
+            if not hmac.compare_digest(
+                str(client_id).encode("utf-8", "surrogateescape"),
+                str(record["client_id"]).encode("utf-8", "surrogateescape"),
+            ):
+                return 400, {
+                    "error": "invalid_grant",
+                    "error_description": "client_id does not match authorization code.",
+                }
+            if not hmac.compare_digest(
+                str(redirect_uri).encode("utf-8", "surrogateescape"),
+                str(record["redirect_uri"]).encode("utf-8", "surrogateescape"),
+            ):
+                return 400, {
+                    "error": "invalid_grant",
+                    "error_description": "redirect_uri does not match authorization code.",
+                }
+            if not isinstance(code_verifier, str) or not (43 <= len(code_verifier) <= 128):
+                return 400, {
+                    "error": "invalid_grant",
+                    "error_description": "Invalid PKCE code_verifier.",
+                }
+            try:
+                computed = _pkce_s256(code_verifier)
+            except UnicodeEncodeError:
+                return 400, {
+                    "error": "invalid_grant",
+                    "error_description": "PKCE code_verifier must be ASCII.",
+                }
+            if not hmac.compare_digest(computed, record["code_challenge"]):
+                return 400, {
+                    "error": "invalid_grant",
+                    "error_description": "PKCE code_verifier mismatch.",
+                }
+            ttl = self._token_ttl()
+            access_token = secrets.token_urlsafe(32)
+            if len(self._tokens) >= self.MAX_TOKENS:
+                oldest_tok = next(iter(self._tokens))
+                self._tokens.pop(oldest_tok, None)
+            self._tokens[access_token] = {
+                "client_id": record["client_id"],
+                "scope": record["scope"],
+                "expires_at": now + ttl,
+            }
+            return 200, {
+                "access_token": access_token,
+                "token_type": "Bearer",
+                "expires_in": ttl,
+                "scope": record["scope"],
+            }
+
+    def validate_access_token(self, token: str) -> bool:
+        if not token:
+            return False
+        now = time.time()
+        with self._lock:
+            self._prune_locked(now)
+            for candidate, meta in self._tokens.items():
+                if meta["expires_at"] > now and hmac.compare_digest(
+                    str(token).encode("utf-8", "surrogateescape"),
+                    str(candidate).encode("utf-8", "surrogateescape"),
+                ):
+                    return True
+        return False
+
+
 class StandaloneMCPHandler(BaseHTTPRequestHandler):
     """Threaded HTTP handler exposing the MCP endpoints of the standalone server."""
 
@@ -921,6 +1202,7 @@ class StandaloneMCPHandler(BaseHTTPRequestHandler):
     # Set by ``run_standalone_server`` (class-level so each request thread sees it).
     server_mcp: Optional[RemoteHarnessMCPServer] = None
     auth_token: str = ""
+    oauth_store: StandaloneOAuthStore = StandaloneOAuthStore()
     bind_host: str = "127.0.0.1"
     bind_port: int = 8096
 
@@ -1084,26 +1366,29 @@ class StandaloneMCPHandler(BaseHTTPRequestHandler):
         return None
 
     def _token_valid(self) -> bool:
-        """True only when the supplied token matches the configured one.
+        """True when the supplied token matches the configured token or a valid OAuth token.
 
         There is no "auth disabled" branch any more: ``run_standalone_server``
         generates a token when the operator did not set one.
         """
-        token = self.auth_token or ""
-        if not token:
-            return False
         try:
             provided = self._provided_token()
             if not provided:
                 return False
+            token = self.auth_token or ""
             # Compare raw UTF-8 bytes: hmac.compare_digest() rejects str inputs
             # containing non-ASCII characters, which would otherwise raise a
             # TypeError and drop the connection on a malformed token.
             # surrogateescape keeps any undecodable byte round-trippable.
-            return hmac.compare_digest(
+            if token and hmac.compare_digest(
                 str(provided).encode("utf-8", "surrogateescape"),
                 str(token).encode("utf-8", "surrogateescape"),
-            )
+            ):
+                return True
+            store = getattr(self, "oauth_store", None)
+            if store is not None and store.validate_access_token(provided):
+                return True
+            return False
         except Exception:
             # Defensive: authentication must never crash the handler.
             return False
@@ -1112,10 +1397,9 @@ class StandaloneMCPHandler(BaseHTTPRequestHandler):
         path = self._clean_path()
         if path in _PUBLIC_PATHS:
             return True
-        # OAuth discovery is unauthenticated by definition: a client fetches it
-        # to learn HOW to authenticate. Answering 401 there makes a connector
-        # conclude the server is unreachable rather than that it needs a token.
-        if path.startswith("/.well-known/"):
+        # OAuth discovery and standalone OAuth 2.1 endpoints are unauthenticated
+        # by definition (protected by Host/Origin gate and PKCE S256).
+        if path.startswith("/.well-known/") or path in _OAUTH_PUBLIC_PATHS:
             return True
         return self._token_valid()
 
@@ -1250,13 +1534,161 @@ class StandaloneMCPHandler(BaseHTTPRequestHandler):
                 (self.headers.get("Sec-Fetch-Dest") or ""),
             )
             self._stream_sse(announce_endpoint=(path == "/sse"))
+        elif path == "/.well-known/oauth-authorization-server":
+            self._send_json(200, self.oauth_store.metadata(self._public_base()))
+        elif path == "/.well-known/oauth-protected-resource":
+            base = self._public_base().rstrip("/")
+            self._send_json(
+                200,
+                {
+                    "resource": base,
+                    "authorization_servers": [base],
+                    "bearer_methods_supported": ["header"],
+                },
+            )
+        elif path == "/oauth/authorize":
+            self._handle_oauth_authorize()
         elif path.startswith("/.well-known/"):
-            # There is no OAuth here: this node authenticates with the token in
-            # the URL. A 404 is the standard "no metadata" answer and sends the
-            # client down the no-auth path; 401 would look like a broken server.
-            self._send_json(404, {"error": "not_found", "auth": "token-in-url"})
+            self._send_json(404, {"error": "not_found", "auth": "oauth2.1"})
         else:
             self._send_json(404, {"error": "not_found", "path": path})
+
+    def _send_oauth_json(self, status: int, payload: Any) -> None:
+        body = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
+        self._send_headers(status, "application/json")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _handle_oauth_authorize(self) -> None:
+        query = parse_qs(urlsplit(self.path).query, keep_blank_values=False)
+        response_type = (query.get("response_type") or [""])[0]
+        client_id = (query.get("client_id") or [""])[0]
+        redirect_uri = (query.get("redirect_uri") or [""])[0]
+        code_challenge = (query.get("code_challenge") or [""])[0]
+        code_challenge_method = (query.get("code_challenge_method") or [""])[0]
+        state = (query.get("state") or [""])[0]
+        scope = (query.get("scope") or ["mcp"])[0]
+
+        if response_type != "code":
+            self._send_oauth_json(
+                400,
+                {
+                    "error": "unsupported_response_type",
+                    "error_description": "Only response_type=code is supported.",
+                },
+            )
+            return
+
+        code, err = self.oauth_store.create_authorization_code(
+            client_id=client_id,
+            redirect_uri=redirect_uri,
+            code_challenge=code_challenge,
+            code_challenge_method=code_challenge_method,
+            scope=scope,
+        )
+        if err is not None or not code:
+            self._send_oauth_json(400, err or {"error": "invalid_request"})
+            return
+
+        parts = urlsplit(redirect_uri)
+        existing_pairs = parse_qs(parts.query, keep_blank_values=True)
+        params: List[Tuple[str, str]] = []
+        for k, vals in existing_pairs.items():
+            for v in vals:
+                params.append((k, v))
+        params.append(("code", code))
+        if state:
+            params.append(("state", state))
+        location = urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(params), parts.fragment))
+
+        self.send_response(302)
+        self._cors_headers()
+        self.send_header("Location", location)
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def _handle_oauth_register(self) -> None:
+        if not json_content_type(self.headers.get("Content-Type", "")):
+            self._send_oauth_json(
+                415,
+                {
+                    "error": "unsupported_media_type",
+                    "error_description": "Content-Type must be application/json.",
+                },
+            )
+            return
+        raw_body = self._read_body()
+        try:
+            payload = json.loads(raw_body.decode("utf-8")) if raw_body else {}
+        except Exception:
+            self._send_oauth_json(
+                400,
+                {
+                    "error": "invalid_client_metadata",
+                    "error_description": "Malformed JSON body.",
+                },
+            )
+            return
+        status, result = self.oauth_store.register_client(payload)
+        self._send_oauth_json(status, result)
+
+    def _handle_oauth_token(self) -> None:
+        content_type = (self.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+        raw_body = self._read_body()
+        params: Dict[str, str] = {}
+        if content_type == "application/json":
+            try:
+                parsed = json.loads(raw_body.decode("utf-8")) if raw_body else {}
+                if isinstance(parsed, dict):
+                    params = {str(k): str(v) for k, v in parsed.items() if v is not None}
+            except Exception:
+                self._send_oauth_json(
+                    400,
+                    {"error": "invalid_request", "error_description": "Malformed JSON body."},
+                )
+                return
+        elif content_type in ("application/x-www-form-urlencoded", ""):
+            try:
+                parsed_qs = parse_qs(raw_body.decode("utf-8"), keep_blank_values=False)
+                params = {k: vals[0] for k, vals in parsed_qs.items() if vals}
+            except Exception:
+                self._send_oauth_json(
+                    400,
+                    {"error": "invalid_request", "error_description": "Malformed form body."},
+                )
+                return
+        else:
+            self._send_oauth_json(
+                415,
+                {
+                    "error": "unsupported_media_type",
+                    "error_description": "Content-Type must be application/x-www-form-urlencoded or application/json.",
+                },
+            )
+            return
+
+        if params.get("grant_type") != "authorization_code":
+            self._send_oauth_json(
+                400,
+                {
+                    "error": "unsupported_grant_type",
+                    "error_description": "Only grant_type=authorization_code is supported.",
+                },
+            )
+            return
+
+        status, result = self.oauth_store.exchange_code(
+            code=params.get("code", ""),
+            code_verifier=params.get("code_verifier", ""),
+            client_id=params.get("client_id", ""),
+            redirect_uri=params.get("redirect_uri", ""),
+        )
+        self._send_oauth_json(status, result)
 
     def do_POST(self) -> None:  # noqa: N802 - http.server API
         if not self._request_allowed():
@@ -1267,6 +1699,12 @@ class StandaloneMCPHandler(BaseHTTPRequestHandler):
             return
 
         path = self._clean_path()
+        if path == "/oauth/register":
+            self._handle_oauth_register()
+            return
+        if path == "/oauth/token":
+            self._handle_oauth_token()
+            return
         if path not in _JSONRPC_POST_PATHS:
             self._send_json(404, {"error": "not_found", "path": path})
             return
@@ -1451,41 +1889,125 @@ class _StandaloneHTTPServer(ThreadingHTTPServer):
     MCP requests and public shares from this one socket, and a page that pulls
     ten assets at once overflowed it - the browser saw connection resets while
     the node was idle. 128 is the value nginx uses by default.
+
+    On Windows, ``SO_REUSEADDR`` allows a second process to hijack an already
+    bound port without raising ``OSError``. Disabling ``allow_reuse_address``
+    and setting ``SO_EXCLUSIVEADDRUSE`` guarantees a second instance fails fast.
     """
 
     daemon_threads = True
     request_queue_size = 128
+    allow_reuse_address = sys.platform != "win32"
+
+    def server_bind(self) -> None:
+        if sys.platform == "win32":
+            self.allow_reuse_address = False
+            if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+                self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
 
 
-def run_standalone_server(host: str = "127.0.0.1", port: int = 8096, token: Optional[str] = None) -> None:
-    """Start the blocking standalone MCP HTTP server."""
-    global _STANDALONE_PORT
-    _STANDALONE_PORT = int(port)
-    if token is None:
-        token = os.environ.get("MESH_TOKEN", "")
-    token = ensure_auth_token(token)
-    mcp = create_mcp_server()
-    StandaloneMCPHandler.server_mcp = mcp
-    StandaloneMCPHandler.auth_token = token
-    StandaloneMCPHandler.bind_host = host
-    StandaloneMCPHandler.bind_port = int(port)
+_QUICK_TUNNEL_URL_RE = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com", re.IGNORECASE)
 
-    httpd = _StandaloneHTTPServer((host, int(port)), StandaloneMCPHandler)
-    httpd.daemon_threads = True
-    logger.info(
-        "Remote Harness MCP standalone MCP server listening on http://%s:%s/sse (auth: enabled)",
-        host,
-        port,
+
+def parse_quick_tunnel_url(text: str) -> Optional[str]:
+    """Extract a ``https://<slug>.trycloudflare.com`` URL from cloudflared output."""
+    if not text:
+        return None
+    match = _QUICK_TUNNEL_URL_RE.search(text)
+    return match.group(0) if match else None
+
+
+def _add_allowed_host(hostname: str) -> None:
+    candidate = (hostname or "").strip().lower()
+    if not _is_public_hostname(candidate):
+        return
+    existing = [p.strip().lower() for p in (os.environ.get(_ALLOWED_HOSTS_ENV, "") or "").split(",") if p.strip()]
+    if candidate not in existing:
+        existing.append(candidate)
+    os.environ[_ALLOWED_HOSTS_ENV] = ",".join(existing)
+
+
+def start_quick_tunnel(
+    port: int,
+    token: str,
+    host: str = "127.0.0.1",
+    *,
+    cloudflared_bin: Optional[str] = None,
+    wait_timeout: float = 15.0,
+) -> Tuple[Optional[subprocess.Popen], Optional[str], str]:
+    """Launch a Cloudflare Quick Tunnel (``cloudflared tunnel --url``) if available.
+
+    Returns ``(process_or_None, public_url_or_None, user_message)``.
+    When ``cloudflared`` is not installed, returns ``(None, None, install_hint)``.
+    """
+    binary = cloudflared_bin or shutil.which("cloudflared")
+    if not binary:
+        hint = (
+            "cloudflared is not installed or not on PATH. Install it to use --quick-tunnel:\n"
+            "  Windows: winget install Cloudflare.cloudflared\n"
+            "  macOS:   brew install cloudflared\n"
+            "  Linux:   https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/\n"
+            f"Server is still listening locally on http://{host}:{int(port)}/mcp"
+        )
+        return None, None, hint
+
+    target_url = f"http://{host}:{int(port)}"
+    proc = subprocess.Popen(
+        [binary, "tunnel", "--url", target_url],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
     )
-    try:
-        httpd.serve_forever()
-    except KeyboardInterrupt:  # pragma: no cover - interactive shutdown
-        logger.info("Standalone server stopped.")
-    finally:
-        httpd.server_close()
+
+    found_url: List[str] = []
+    ready = threading.Event()
+
+    def _reader() -> None:
+        stream = proc.stdout
+        if stream is None:
+            ready.set()
+            return
+        try:
+            for line in stream:
+                url = parse_quick_tunnel_url(line)
+                if url and not found_url:
+                    found_url.append(url)
+                    ready.set()
+        except Exception:
+            pass
+        finally:
+            ready.set()
+
+    reader_thread = threading.Thread(target=_reader, name="rhm-cloudflared-reader", daemon=True)
+    reader_thread.start()
+    ready.wait(timeout=max(0.1, float(wait_timeout)))
+
+    if found_url:
+        public_url = found_url[0].rstrip("/")
+        parsed = urlsplit(public_url)
+        if parsed.hostname:
+            _add_allowed_host(parsed.hostname)
+        os.environ["MESH_PUBLIC_URL"] = public_url
+        mcp_url = f"{public_url}/mcp?token={quote(token, safe='')}"
+        sse_url = f"{public_url}/sse?token={quote(token, safe='')}"
+        message = (
+            f"Quick tunnel ready: {public_url}\n"
+            f"  MCP (Streamable HTTP): {mcp_url}\n"
+            f"  MCP (SSE):             {sse_url}\n"
+            f"  MCP (OAuth 2.1):       {public_url}/mcp"
+        )
+        return proc, public_url, message
+
+    message = (
+        f"Started cloudflared for {target_url}, but no trycloudflare.com URL appeared "
+        f"within {wait_timeout:.0f}s."
+    )
+    return proc, None, message
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="core.server",
         description="Remote Harness MCP Standalone MCP Server (localhost by default).",
@@ -1509,10 +2031,105 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Shared auth token. Defaults to $MESH_TOKEN; when absent a random token is "
              "generated and written 0600 to the config directory.",
     )
+    parser.add_argument(
+        "--folder",
+        default=None,
+        help="Lock workspace and writes to a single directory (disables remote admin control and enables .git protection).",
+    )
+    parser.add_argument(
+        "--no-shell",
+        action="store_true",
+        help="Disable shell execution tools (sets MESH_ENABLE_SHELL=0).",
+    )
+    parser.add_argument(
+        "--quick-tunnel",
+        action="store_true",
+        help="Start a Cloudflare Quick Tunnel (cloudflared) and print the public MCP URL.",
+    )
+    return parser
+
+
+def apply_cli_flags(args: argparse.Namespace) -> None:
+    """Apply standalone CLI security/mode flags (--folder, --no-shell) to os.environ."""
+    folder = getattr(args, "folder", None)
+    if folder:
+        resolved = os.path.realpath(os.path.abspath(os.path.expanduser(str(folder))))
+        if not os.path.isdir(resolved):
+            raise ValueError(f"--folder path does not exist or is not a directory: {folder}")
+        os.environ["MESH_WORKSPACE"] = resolved
+        os.environ["MESH_WRITE_ROOTS"] = resolved
+        os.environ["MESH_PROTECT_GIT"] = "1"
+        os.environ["MESH_REMOTE_CONTROL"] = "0"
+    if getattr(args, "no_shell", False):
+        os.environ["MESH_ENABLE_SHELL"] = "0"
+
+
+def run_standalone_server(
+    host: str = "127.0.0.1",
+    port: int = 8096,
+    token: Optional[str] = None,
+    *,
+    quick_tunnel: bool = False,
+) -> None:
+    """Start the blocking standalone MCP HTTP server."""
+    global _STANDALONE_PORT
+    _STANDALONE_PORT = int(port)
+    if token is None:
+        token = os.environ.get("MESH_TOKEN", "")
+    token = ensure_auth_token(token)
+    mcp = create_mcp_server()
+    StandaloneMCPHandler.server_mcp = mcp
+    StandaloneMCPHandler.auth_token = token
+    StandaloneMCPHandler.oauth_store = StandaloneOAuthStore()
+    StandaloneMCPHandler.bind_host = host
+    StandaloneMCPHandler.bind_port = int(port)
+
+    httpd = _StandaloneHTTPServer((host, int(port)), StandaloneMCPHandler)
+    httpd.daemon_threads = True
+    tunnel_proc: Optional[subprocess.Popen] = None
+    if quick_tunnel:
+        tunnel_proc, _public_url, tunnel_msg = start_quick_tunnel(
+            port=int(port),
+            token=token,
+            host="127.0.0.1" if host in ("0.0.0.0", "") else host,
+        )
+        print(tunnel_msg, file=sys.stderr, flush=True)
+    logger.info(
+        "Remote Harness MCP standalone MCP server listening on http://%s:%s/sse (auth: enabled)",
+        host,
+        port,
+    )
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:  # pragma: no cover - interactive shutdown
+        logger.info("Standalone server stopped.")
+    finally:
+        if tunnel_proc is not None:
+            try:
+                tunnel_proc.terminate()
+            except Exception:
+                pass
+        httpd.server_close()
+        try:
+            from core import usage as _usage
+
+            _usage.flush()
+        except Exception:
+            pass
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    parser = build_arg_parser()
     args = parser.parse_args(argv)
     # The token and the tunnel hostname come from the installer-written file,
     # so the autostart entry never carries a secret on its command line.
     apply_standalone_env()
+
+    try:
+        apply_cli_flags(args)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
 
     logging.basicConfig(
         level=logging.INFO,
@@ -1530,7 +2147,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             "Bound to 0.0.0.0 without a configured token: a random token was generated. "
             "Read it from the config directory (standalone.token) or set --token."
         )
-    run_standalone_server(host=args.host, port=args.port, token=args.token)
+    run_standalone_server(
+        host=args.host,
+        port=args.port,
+        token=args.token,
+        quick_tunnel=bool(args.quick_tunnel),
+    )
     return 0
 
 

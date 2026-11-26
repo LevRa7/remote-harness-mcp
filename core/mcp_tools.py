@@ -28,8 +28,11 @@ from __future__ import annotations
 import fnmatch
 import glob as _glob
 import hashlib
+import html.parser
+import ipaddress
 import json
 import locale
+import mimetypes
 import os
 import re
 import shutil
@@ -39,10 +42,13 @@ import subprocess
 import tempfile
 import threading
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, FrozenSet, List, Optional, Tuple
 
 #: The public domain is owned by core/domain.py; this module asks for it instead of
 #: keeping a fallback chain of its own. Standard library only, so importing it here
@@ -236,6 +242,7 @@ _SKIP_DIRS = frozenset((".git", ".hg", ".svn", "node_modules", "__pycache__", ".
 
 _WORKSPACE = os.path.realpath(os.getcwd())
 _READ_ONLY = False
+_SHELL_ENABLED = True
 _WRITE_ROOTS: Optional[List[str]] = None
 _JOBS_DIR = os.path.realpath(os.path.expanduser(_DEFAULT_JOBS_DIR))
 _MAX_OUTPUT_CHARS = _DEFAULT_MAX_OUTPUT_CHARS
@@ -307,7 +314,7 @@ def configure(**kwargs: Any) -> None:
     leaving it out keeps the value that :mod:`core.domain` resolves (environment,
     then the domain file, then the one default).
     """
-    global _WORKSPACE, _READ_ONLY, _WRITE_ROOTS, _JOBS_DIR, _MAX_OUTPUT_CHARS
+    global _WORKSPACE, _READ_ONLY, _SHELL_ENABLED, _WRITE_ROOTS, _JOBS_DIR, _MAX_OUTPUT_CHARS
     global _PUBLIC_URL, _DEVICE_ENABLED, _DEVICE_ACTIONS, _DEVICE_PIM, _DEVICE_QUICK
 
     if kwargs.get("workspace"):
@@ -316,6 +323,8 @@ def configure(**kwargs: Any) -> None:
         _READ_ONLY = _parse_bool(kwargs["read_only"])
     elif "allow_write" in kwargs and kwargs["allow_write"] is not None:
         _READ_ONLY = not _parse_bool(kwargs["allow_write"])
+    if "enable_shell" in kwargs and kwargs["enable_shell"] is not None:
+        _SHELL_ENABLED = _parse_bool(kwargs["enable_shell"])
     if "write_roots" in kwargs:
         _WRITE_ROOTS = _split_roots(kwargs["write_roots"])
     if kwargs.get("jobs_dir"):
@@ -475,10 +484,63 @@ def _read_only_active() -> bool:
     return _READ_ONLY or control.access_mode() == "read_only"
 
 
-def _write_guard(target: str) -> Optional[str]:
+SHELL_DISABLED_ERROR = (
+    "shell_disabled: shell execution is disabled on this node "
+    "(MESH_ENABLE_SHELL=0 / --no-shell)."
+)
+
+
+def _shell_enabled() -> bool:
+    """Return False when shell execution is disabled via env or configure()."""
+    raw = os.environ.get("MESH_ENABLE_SHELL")
+    if raw is not None and str(raw).strip() != "":
+        return _parse_bool(raw)
+    return _SHELL_ENABLED
+
+
+def _local_is_protected_git_path(path: str) -> bool:
+    """Fallback guard blocking writes to .git/hooks/* and .git/config."""
+    if not path:
+        return False
+    candidates = []
+    try:
+        candidates.append(os.path.abspath(os.path.expanduser(str(path))))
+    except Exception:
+        candidates.append(str(path))
+    try:
+        candidates.append(os.path.realpath(os.path.expanduser(str(path))))
+    except Exception:
+        pass
+    for cand in candidates:
+        norm = cand.replace("\\", "/")
+        parts = [p.lower() for p in norm.split("/") if p]
+        for idx, part in enumerate(parts):
+            if part == ".git" and idx + 1 < len(parts):
+                nxt = parts[idx + 1]
+                if nxt == "hooks":
+                    return True
+                if nxt == "config" and idx + 2 == len(parts):
+                    return True
+    return False
+
+
+def _is_protected_git_path(path: str) -> bool:
+    """Delegate to core.policies.is_protected_git_path if available, else local fallback."""
+    try:
+        from core.policies import is_protected_git_path as _policy_git_guard  # type: ignore
+        if _policy_git_guard(path):
+            return True
+    except Exception:
+        pass
+    return _local_is_protected_git_path(path)
+
+
+def _write_guard(target: str, raw_path: Optional[str] = None) -> Optional[str]:
     """Return an error string when writing to *target* is not permitted."""
     if _read_only_active():
         return "server is in read-only mode"
+    if _is_protected_git_path(target) or (raw_path and _is_protected_git_path(raw_path)):
+        return "protected git path: writing to .git/hooks or .git/config is forbidden: %s" % target
     if not _within_write_roots(target):
         return "path is outside allowed write roots: %s" % target
     return None
@@ -539,6 +601,14 @@ _READ_ONLY_SELF_GUARDED = frozenset({
     # implementation refuses every escalation while read-only is set, so it has
     # to reach that implementation instead of being refused as a whole.
     "node_control",
+})
+
+#: Extended read-only tools (git_status, git_diff, fetch_url) allowed in
+#: read-only mode without mutating _READ_ONLY_ALLOWED (pinned by test_policy.py).
+_EXTENDED_READ_ONLY_ALLOWED = frozenset({
+    "git_status",
+    "git_diff",
+    "fetch_url",
 })
 
 READ_ONLY_ERROR = (
@@ -2198,6 +2268,8 @@ def _background_hint() -> str:
 def _tool_bash_exec(args: Dict[str, Any]) -> Dict[str, Any]:
     if _read_only_active():
         return {"error": READ_ONLY_ERROR}
+    if not _shell_enabled():
+        return {"error": SHELL_DISABLED_ERROR}
     command = args.get("command")
     if not isinstance(command, str) or not command.strip():
         return {"error": "command is required and must be a non-empty string"}
@@ -2252,6 +2324,29 @@ def _tool_read_file(args: Dict[str, Any]) -> Dict[str, Any]:
             return {"error": "[TOOL ERROR] File not found: %s -- does not exist, do not report it as real." % target}
         if os.path.isdir(target):
             return _tool_list_dir({"path": target})
+
+        with open(target, "rb") as bin_handle:
+            head = bin_handle.read(8192)
+        if b"\x00" in head:
+            try:
+                size_bytes = os.path.getsize(target)
+            except OSError:
+                size_bytes = len(head)
+            ext = os.path.splitext(target)[1].lower()
+            mime_type = mimetypes.guess_type(target)[0] or "application/octet-stream"
+            return {
+                "error": (
+                    "Binary file detected (%d bytes, ext=%s, mime=%s): "
+                    "cannot read as text. Use read_media instead of read_file."
+                    % (size_bytes, ext or "none", mime_type)
+                ),
+                "binary": True,
+                "path": target,
+                "size_bytes": size_bytes,
+                "extension": ext,
+                "mime_type": mime_type,
+                "suggested_tool": "read_media",
+            }
 
         with open(target, "r", encoding="utf-8", errors="replace") as handle:
             lines = handle.readlines()
@@ -2359,7 +2454,7 @@ def _tool_write_file(args: Dict[str, Any]) -> Dict[str, Any]:
             content = str(content)
 
         target = _resolve(path)
-        guard = _write_guard(target)
+        guard = _write_guard(target, raw_path=path)
         if guard:
             return {"error": guard}
 
@@ -2426,7 +2521,7 @@ def _tool_edit_file(args: Dict[str, Any]) -> Dict[str, Any]:
             return {"error": "new_string is required and must be a string"}
 
         target = _resolve(path)
-        guard = _write_guard(target)
+        guard = _write_guard(target, raw_path=path)
         if guard:
             return {"error": guard}
         if not os.path.isfile(target):
@@ -2534,7 +2629,11 @@ def _tool_grep_search(args: Dict[str, Any]) -> Dict[str, Any]:
         )
         include_ignored = _parse_bool(args.get("include_ignored"))
 
-        return fs_search.grep_search(
+        fmt = str(args.get("format") or "json").strip().lower()
+        if fmt not in ("compact", "json"):
+            fmt = "json"
+
+        res = fs_search.grep_search(
             base,
             pattern,
             glob_filter=glob_filter,
@@ -2546,6 +2645,42 @@ def _tool_grep_search(args: Dict[str, Any]) -> Dict[str, Any]:
             time_budget_ms=time_budget_ms,
             include_ignored=include_ignored,
         )
+        if not isinstance(res, dict) or "error" in res:
+            return res
+
+        if fmt != "compact":
+            return res
+
+        ws = _current_workspace()
+        compact_root = ws if _within(base, ws) else base
+        matches = res.get("matches") or []
+        if hasattr(fs_search, "format_grep_compact"):
+            compact_text = fs_search.format_grep_compact(matches, compact_root)
+        else:
+            lines_out: List[str] = []
+            for item in matches:
+                p = str(item.get("path", ""))
+                try:
+                    p = os.path.relpath(p, compact_root)
+                except ValueError:
+                    pass
+                p = p.replace("\\", "/")
+                lines_out.append("%s:%s: %s" % (p, item.get("line", 0), item.get("text", "")))
+            compact_text = "\n".join(lines_out)
+
+        out_dict: Dict[str, Any] = {
+            "output": compact_text,
+            "count": res.get("count", 0),
+            "truncated": res.get("truncated", False),
+            "partial": res.get("partial", False),
+            "format": "compact",
+            "elapsed_ms": res.get("elapsed_ms", 0),
+            "scanned_files": res.get("scanned_files", 0),
+            "note": res.get("note", ""),
+        }
+        if "next_hint" in res:
+            out_dict["next_hint"] = res["next_hint"]
+        return out_dict
     except Exception as exc:
         return {"error": "grep_search failed: %s" % exc}
 
@@ -2817,7 +2952,7 @@ def _dry_run_edit_op(op_type: str, item: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(path_arg, str) or not path_arg.strip():
         return {"ok": False, "error": "path is required"}
     target = _resolve(path_arg)
-    guard = _write_guard(target)
+    guard = _write_guard(target, raw_path=path_arg)
     if guard:
         return {"ok": False, "error": guard}
     if op_type == "write":
@@ -2950,6 +3085,8 @@ def _script_argv(lang: str, script_path: str) -> List[str]:
 def _tool_run_script(args: Dict[str, Any]) -> Dict[str, Any]:
     if _read_only_active():
         return {"error": READ_ONLY_ERROR}
+    if not _shell_enabled():
+        return {"error": SHELL_DISABLED_ERROR}
     try:
         code = args.get("code")
         if not isinstance(code, str) or not code.strip():
@@ -3408,6 +3545,8 @@ def _reap(job_id: str, proc: "subprocess.Popen", started_mono: float) -> None:
 def _tool_run_job(args: Dict[str, Any]) -> Dict[str, Any]:
     if _read_only_active():
         return {"error": READ_ONLY_ERROR}
+    if not _shell_enabled():
+        return {"error": SHELL_DISABLED_ERROR}
     try:
         command = args.get("command")
         if not isinstance(command, str) or not command.strip():
@@ -3771,6 +3910,322 @@ def _tool_http_share(args: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Tool 15: git_status & git_diff (read-only, shell=False, hooks disabled)
+# ---------------------------------------------------------------------------
+
+_GIT_SAFE_PREFIX = ("git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=")
+_GIT_DEFAULT_TIMEOUT = 15
+_GIT_MAX_TIMEOUT = 60
+
+
+def _run_git(
+    git_args: List[str],
+    cwd: str,
+    timeout_sec: int = _GIT_DEFAULT_TIMEOUT,
+    max_chars: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Run git directly with shell=False and fsmonitor/hooks disabled."""
+    argv = list(_GIT_SAFE_PREFIX) + list(git_args)
+    cap = _max_chars(max_chars)
+    popen_kwargs: Dict[str, Any] = {
+        "cwd": cwd,
+        "env": _child_env(),
+        "stdin": subprocess.DEVNULL,
+        "capture_output": True,
+        "timeout": _clamp_int(timeout_sec, 1, _GIT_MAX_TIMEOUT, _GIT_DEFAULT_TIMEOUT),
+        "shell": False,
+    }
+    if _IS_WINDOWS:
+        popen_kwargs["creationflags"] = _POPEN_FLAGS
+    try:
+        proc = subprocess.run(argv, **popen_kwargs)
+    except FileNotFoundError:
+        return {"error": "git is not installed or not in PATH"}
+    except subprocess.TimeoutExpired:
+        return {"error": "git command timed out after %ds" % popen_kwargs["timeout"]}
+    except Exception as exc:
+        return {"error": "git execution failed: %s" % exc}
+
+    stdout_text = _sanitize_output(_decode_output(proc.stdout))
+    stderr_text = _sanitize_output(_decode_output(proc.stderr))
+    truncated = False
+    if len(stdout_text) > cap:
+        stdout_text = stdout_text[:cap]
+        truncated = True
+    if len(stderr_text) > cap:
+        stderr_text = stderr_text[:cap]
+        truncated = True
+
+    return {
+        "stdout": stdout_text,
+        "stderr": stderr_text,
+        "exit_code": int(proc.returncode),
+        "truncated": truncated,
+        "cwd": cwd,
+    }
+
+
+def _tool_git_status(args: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        target = _resolve(args.get("path") or ".")
+        if os.path.isfile(target):
+            target = os.path.dirname(target) or "."
+        if not os.path.isdir(target):
+            return {"error": "directory not found: %s" % target}
+        short = True if args.get("short") is None else _parse_bool(args.get("short"))
+        untracked = True if args.get("untracked") is None else _parse_bool(args.get("untracked"))
+        git_args = ["status"]
+        if short:
+            git_args.extend(["--short", "--branch"])
+        if not untracked:
+            git_args.append("--untracked-files=no")
+        return _run_git(git_args, cwd=target, max_chars=args.get("max_chars"))
+    except Exception as exc:
+        return {"error": "git_status failed: %s" % exc}
+
+
+def _tool_git_diff(args: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        raw_path = args.get("path") or "."
+        target = _resolve(raw_path)
+        file_filter = args.get("file")
+        if os.path.isfile(target):
+            if not file_filter:
+                file_filter = os.path.basename(target)
+            target = os.path.dirname(target) or "."
+        if not os.path.isdir(target):
+            return {"error": "directory not found: %s" % target}
+
+        staged = _parse_bool(args.get("staged"))
+        stat = _parse_bool(args.get("stat"))
+        ref = args.get("ref")
+        if ref is not None:
+            if not isinstance(ref, str) or not ref.strip():
+                return {"error": "ref must be a non-empty string"}
+            ref = ref.strip()
+            if ref.startswith("-"):
+                return {"error": "invalid git ref (cannot start with '-'): %s" % ref}
+
+        git_args = ["diff"]
+        if staged:
+            git_args.append("--staged")
+        if stat:
+            git_args.append("--stat")
+        if ref:
+            git_args.append(ref)
+        if file_filter is not None:
+            if not isinstance(file_filter, str) or not file_filter.strip():
+                return {"error": "file must be a non-empty string"}
+            git_args.extend(["--", file_filter.strip()])
+
+        return _run_git(git_args, cwd=target, max_chars=args.get("max_chars"))
+    except Exception as exc:
+        return {"error": "git_diff failed: %s" % exc}
+
+
+# ---------------------------------------------------------------------------
+# Tool 16: fetch_url (read-only HTTPS fetch with SSRF protection)
+# ---------------------------------------------------------------------------
+
+FETCH_URL_MAX_BYTES = 300 * 1024  # 300 KiB
+FETCH_URL_MAX_REDIRECTS = 5
+FETCH_URL_DEFAULT_TIMEOUT = 15
+FETCH_URL_MAX_TIMEOUT = 30
+
+
+class _HTMLTextExtractor(html.parser.HTMLParser):
+    """Lightweight stdlib HTML-to-text extractor skipping script/style blocks."""
+
+    _SKIP_TAGS = frozenset({"script", "style", "noscript", "template"})
+    _BLOCK_TAGS = frozenset({
+        "p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6",
+        "section", "article", "header", "footer", "blockquote", "pre",
+    })
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._skip_depth = 0
+        self._parts: List[str] = []
+
+    def handle_starttag(self, tag: str, attrs: Any) -> None:
+        t = tag.lower()
+        if t in self._SKIP_TAGS:
+            self._skip_depth += 1
+        elif self._skip_depth == 0 and t in self._BLOCK_TAGS:
+            self._parts.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        t = tag.lower()
+        if t in self._SKIP_TAGS and self._skip_depth > 0:
+            self._skip_depth -= 1
+        elif self._skip_depth == 0 and t in self._BLOCK_TAGS:
+            self._parts.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        if self._skip_depth == 0 and data:
+            self._parts.append(data)
+
+    def get_text(self) -> str:
+        raw = "".join(self._parts)
+        lines = [re.sub(r"[ \t]+", " ", ln).strip() for ln in raw.splitlines()]
+        compact = "\n".join(ln for ln in lines if ln)
+        return compact
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Disable automatic redirect following so each hop is SSRF-validated."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _is_blocked_ip(ip_str: str) -> bool:
+    """Return True if *ip_str* is private, loopback, link-local, multicast, reserved, or unspecified."""
+    try:
+        addr = ipaddress.ip_address(ip_str)
+    except ValueError:
+        return True
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+        addr = addr.ipv4_mapped
+    return bool(
+        addr.is_private
+        or addr.is_loopback
+        or addr.is_link_local
+        or addr.is_multicast
+        or addr.is_reserved
+        or addr.is_unspecified
+        or not addr.is_global
+    )
+
+
+def _validate_fetch_url(url: str) -> str:
+    """Validate HTTPS scheme and ensure every resolved IP is globally routable."""
+    if not isinstance(url, str) or not url.strip():
+        raise ValueError("url is required and must be a non-empty string")
+    cleaned = url.strip()
+    parsed = urllib.parse.urlsplit(cleaned)
+    if parsed.scheme.lower() != "https":
+        raise ValueError("only https:// URLs are allowed (got %r)" % (parsed.scheme or "none",))
+    if parsed.username or parsed.password:
+        raise ValueError("embedded URL credentials are not allowed")
+    host = parsed.hostname
+    if not host:
+        raise ValueError("URL must include a hostname")
+    port = parsed.port or 443
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except OSError as exc:
+        raise ValueError("DNS resolution failed for %s: %s" % (host, exc))
+    if not infos:
+        raise ValueError("DNS resolution returned no addresses for %s" % host)
+    for info in infos:
+        ip_str = info[4][0]
+        if _is_blocked_ip(ip_str):
+            raise ValueError("SSRF blocked: %s resolved to restricted IP %s" % (host, ip_str))
+    return cleaned
+
+
+def _strip_html_to_text(html_text: str) -> str:
+    parser = _HTMLTextExtractor()
+    parser.feed(html_text)
+    parser.close()
+    return parser.get_text()
+
+
+def _tool_fetch_url(args: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        url = args.get("url")
+        current_url = _validate_fetch_url(url)
+        max_bytes = _clamp_int(args.get("max_bytes"), 1, FETCH_URL_MAX_BYTES, FETCH_URL_MAX_BYTES)
+        timeout_sec = _clamp_int(
+            args.get("timeout_sec"), 1, FETCH_URL_MAX_TIMEOUT, FETCH_URL_DEFAULT_TIMEOUT
+        )
+        strip_html = True if args.get("strip_html") is None else _parse_bool(args.get("strip_html"))
+
+        opener = urllib.request.build_opener(_NoRedirectHandler())
+        headers = {"User-Agent": "remote-harness-mcp/fetch_url"}
+
+        redirects = 0
+        status = 0
+        content_type = ""
+        raw = b""
+        truncated = False
+
+        while True:
+            req = urllib.request.Request(current_url, headers=headers, method="GET")
+            try:
+                resp = opener.open(req, timeout=timeout_sec)
+            except urllib.error.HTTPError as exc:
+                if exc.code in (301, 302, 303, 307, 308):
+                    location = exc.headers.get("Location") if exc.headers else None
+                    exc.close()
+                    if not location:
+                        return {"error": "redirect (%d) without Location header" % exc.code}
+                    redirects += 1
+                    if redirects > FETCH_URL_MAX_REDIRECTS:
+                        return {"error": "too many redirects (max %d)" % FETCH_URL_MAX_REDIRECTS}
+                    next_url = urllib.parse.urljoin(current_url, location)
+                    current_url = _validate_fetch_url(next_url)
+                    continue
+                status = exc.code
+                content_type = (exc.headers.get("Content-Type") or "") if exc.headers else ""
+                try:
+                    raw = exc.read(max_bytes + 1)
+                except Exception:
+                    raw = b""
+                finally:
+                    exc.close()
+                break
+            else:
+                with resp:
+                    status = int(getattr(resp, "status", 200) or 200)
+                    content_type = resp.headers.get("Content-Type") or ""
+                    if status in (301, 302, 303, 307, 308):
+                        location = resp.headers.get("Location")
+                        if not location:
+                            return {"error": "redirect (%d) without Location header" % status}
+                        redirects += 1
+                        if redirects > FETCH_URL_MAX_REDIRECTS:
+                            return {"error": "too many redirects (max %d)" % FETCH_URL_MAX_REDIRECTS}
+                        next_url = urllib.parse.urljoin(current_url, location)
+                        current_url = _validate_fetch_url(next_url)
+                        continue
+                    raw = resp.read(max_bytes + 1)
+                break
+
+        if len(raw) > max_bytes:
+            raw = raw[:max_bytes]
+            truncated = True
+
+        charset = "utf-8"
+        m = re.search(r"charset=([A-Za-z0-9._-]+)", content_type, re.IGNORECASE)
+        if m:
+            charset = m.group(1)
+        try:
+            text = raw.decode(charset, errors="replace")
+        except LookupError:
+            text = raw.decode("utf-8", errors="replace")
+
+        is_html = "html" in content_type.lower() or text.lstrip()[:64].lower().startswith(("<!doctype html", "<html"))
+        if strip_html and is_html:
+            text = _strip_html_to_text(text)
+
+        return {
+            "url": current_url,
+            "status": status,
+            "content_type": content_type,
+            "bytes": len(raw),
+            "truncated": truncated,
+            "redirects": redirects,
+            "content": _sanitize_output(text),
+        }
+    except ValueError as exc:
+        return {"error": str(exc)}
+    except Exception as exc:
+        return {"error": "fetch_url failed: %s" % exc}
+
+
+# ---------------------------------------------------------------------------
 # Tool definitions (MCP schemas)
 # ---------------------------------------------------------------------------
 
@@ -3909,80 +4364,60 @@ TOOL_ANNOTATIONS: Dict[str, Dict[str, Any]] = {
     "mesh_update": _ANNOTATIONS_DESTRUCTIVE,
 }
 
+_ANNOTATIONS_READ_ONLY_OPEN_WORLD: Dict[str, Any] = {
+    "readOnlyHint": True,
+    "destructiveHint": False,
+    "idempotentHint": True,
+    "openWorldHint": True,
+}
+
 TOOLS: List[Dict[str, Any]] = [
     {
         "name": "mesh_status",
         "title": "Mesh Status",
-        "description": ("Confirm this node is reachable. Call this first if you think the host is "
-                        "offline; it reports live evidence from the host itself, plus what kind "
-                        "of machine answered (device_class, scenario) and its battery level."),
+        "description": "Node reachability, device class, scenario, battery.",
         "inputSchema": _schema({}),
     },
     {
         "name": "system_info",
         "title": "System Info",
-        "description": ("One-call host summary: OS, desktop, user, home, disks, memory, load, "
-                        "top processes, the current wallpaper, and the device blocks - "
-                        "battery and charging, network and signal, language, time, timezone, "
-                        "CPU, RAM, storage, cameras, microphones and sensors. On a phone it "
-                        "reads Android through the termux-api commands; on a laptop it reads "
-                        "the local system. Every device block carries available/source, and a "
-                        "block the platform cannot answer says why instead of showing a zero."),
+        "description": "Host OS, user, disks, RAM, processes, telemetry.",
         "inputSchema": _schema({}),
     },
     {
         "name": "system_vitals",
         "title": "System Vitals",
-        "description": ("Retrieve CPU, RAM and disk metrics of the local host, plus the "
-                        "battery block (and thermal sensors where the platform exposes them)."),
+        "description": "CPU, RAM, disk, battery, thermal metrics.",
         "inputSchema": _schema({}),
     },
     {
         "name": "screen_capture",
         "title": "Screen Capture",
-        "description": (
-            "Take a PNG screenshot of the host's desktop and save it on the host. "
-            "Windows captures through GDI (works on a clean install, no PowerShell "
-            "needed); a headless Linux server and an Android app session have no "
-            "accessible display, so they answer available=false with the reason "
-            "instead of returning a black image. Use share_file on the returned path "
-            "when the picture has to reach the chat."
-        ),
-        "inputSchema": _schema({
-            "path": {"type": "string",
-                     "description": ("Optional destination file (default: a timestamped "
-                                     "PNG in the node's cache directory).")},
-        }),
+        "description": "Save desktop PNG screenshot on host.",
+        "inputSchema": _schema({"path": {"type": "string"}}),
     },
     {
         "name": "get_orchestration_skill",
         "title": "Get Orchestration Skill",
-        "description": "Load the current Remote Harness orchestration skill and rules.",
+        "description": "Load Remote Harness orchestration rules.",
         "inputSchema": _schema({}),
     },
     {
         "name": "list_dir",
         "title": "List Directory",
-        "description": "List files and directories at the given path (workspace by default).",
-        "inputSchema": _schema({"path": {"type": "string", "description": "Directory or file path."}}),
+        "description": "List directory entries (default workspace).",
+        "inputSchema": _schema({"path": {"type": "string"}}),
     },
     {
         "name": "bash_exec",
         "title": "Execute Bash Command",
-        "description": (
-            "Execute a shell command on the local host. The shell matches the host, not this "
-            "tool's name: run system_info and read command_shell first (bash on Linux/macOS, "
-            "PowerShell or cmd.exe on Windows) and write the command for that shell. "
-            "Output is paginated: when the result is "
-            "cut, call again with cursor=next_cursor to continue (nothing is dropped). Large "
-            "outputs (above 2 MB) are spooled to a file returned in saved_to."
-        ),
+        "description": "Run host shell command; paginated, >2MB spooled.",
         "inputSchema": _schema(
             {
-                "command": {"type": "string", "description": "Shell command to execute."},
-                "timeout_sec": {"type": "integer", "description": "Timeout in seconds (1-120, default 25)."},
-                "max_chars": {"type": "integer", "description": "Maximum characters per response."},
-                "cursor": {"type": "integer", "description": "Character offset to continue from."},
+                "command": {"type": "string"},
+                "timeout_sec": {"type": "integer", "description": "1-120s (25)."},
+                "max_chars": {"type": "integer"},
+                "cursor": {"type": "integer"},
             },
             ["command"],
         ),
@@ -3990,17 +4425,14 @@ TOOLS: List[Dict[str, Any]] = [
     {
         "name": "read_file",
         "title": "Read File",
-        "description": (
-            "Read a text file with %4d | line numbers, optionally restricted to a line range. "
-            "Supports max_chars/cursor pagination."
-        ),
+        "description": "Read numbered text lines; rejects binaries (use read_media).",
         "inputSchema": _schema(
             {
-                "path": {"type": "string", "description": "File path to read."},
-                "start_line": {"type": "integer", "description": "First line (1-based)."},
-                "end_line": {"type": "integer", "description": "Last line (inclusive)."},
-                "max_chars": {"type": "integer", "description": "Maximum characters per response."},
-                "cursor": {"type": "integer", "description": "Character offset to continue from."},
+                "path": {"type": "string"},
+                "start_line": {"type": "integer"},
+                "end_line": {"type": "integer"},
+                "max_chars": {"type": "integer"},
+                "cursor": {"type": "integer"},
             },
             ["path"],
         ),
@@ -4008,40 +4440,20 @@ TOOLS: List[Dict[str, Any]] = [
     {
         "name": "read_media",
         "title": "Read Media",
-        "description": (
-            "Send a file to the client in the content block MCP has for it, instead of as "
-            "text: an image (PNG/JPEG/WebP/GIF) becomes an image block, downscaled to stay "
-            "inside the response budget; a PDF becomes its page text, plus page images when "
-            "a page has no text layer; audio becomes metadata, plus the audio block itself "
-            "when include_audio is set; video becomes metadata plus evenly spaced JPEG "
-            "frames; text, JSON, CSV and logs become text with a cursor to page through. "
-            "Use this - not read_file - for anything that is not source code, and share_file "
-            "only when the person, not the model, has to open the file. Video frames and "
-            "oversized photos need ffmpeg; scanned PDF pages need PyMuPDF or pdftoppm; the "
-            "answer names the one that is missing instead of failing."
-        ),
+        "description": "Read image/PDF/audio/video/text as MCP blocks.",
         "inputSchema": _schema(
             {
-                "path": {"type": "string",
-                         "description": "File to send (absolute, or relative to the workspace)."},
-                "offset": {"type": "integer",
-                           "description": "Character offset when the answer is text."},
-                "max_chars": {"type": "integer",
-                              "description": "Maximum characters of text in one answer (default 24000)."},
-                "max_side": {"type": "integer",
-                             "description": "Longest side of a downscaled image (320-4096, default 1280)."},
-                "max_frames": {"type": "integer",
-                               "description": "Video frames or PDF page images to render (1-12, default 4)."},
-                "include_audio": {"type": "boolean",
-                                  "description": "Also send the audio bytes as an audio block (default false)."},
-                "ocr": {"type": "boolean",
-                        "description": "Also read the text of an image with OCR (default false; needs tesseract or MESH_OCR_CMD on the node)."},
-                "page_start": {"type": "integer", "description": "First PDF page (1-based)."},
-                "page_end": {"type": "integer", "description": "Last PDF page."},
-                "render_pages": {"type": "boolean",
-                                 "description": "Render PDF pages as images; default: only pages without text."},
-                "encoding": {"type": "string",
-                             "description": "Force a text encoding (utf-8, cp1251, cp1252...); default: detected."},
+                "path": {"type": "string"},
+                "offset": {"type": "integer"},
+                "max_chars": {"type": "integer"},
+                "max_side": {"type": "integer"},
+                "max_frames": {"type": "integer"},
+                "include_audio": {"type": "boolean"},
+                "ocr": {"type": "boolean"},
+                "page_start": {"type": "integer"},
+                "page_end": {"type": "integer"},
+                "render_pages": {"type": "boolean"},
+                "encoding": {"type": "string"},
             },
             ["path"],
         ),
@@ -4049,17 +4461,13 @@ TOOLS: List[Dict[str, Any]] = [
     {
         "name": "write_file",
         "title": "Write File",
-        "description": (
-            "Atomically create or overwrite a file (tmp file + os.replace). On Windows the "
-            "optional mode is not honoured (no POSIX permission bits) and the result says so."
-        ),
+        "description": "Atomically write file (blocks .git/hooks & .git/config).",
         "inputSchema": _schema(
             {
-                "path": {"type": "string", "description": "File path to write."},
-                "content": {"type": "string", "description": "Full file content."},
-                "create_dirs": {"type": "boolean", "description": "Create parent directories (default true)."},
-                "mode": {"type": "string",
-                         "description": "Octal file mode, e.g. \"0644\". POSIX only; ignored on Windows."},
+                "path": {"type": "string"},
+                "content": {"type": "string"},
+                "create_dirs": {"type": "boolean"},
+                "mode": {"type": "string"},
             },
             ["path", "content"],
         ),
@@ -4067,18 +4475,14 @@ TOOLS: List[Dict[str, Any]] = [
     {
         "name": "edit_file",
         "title": "Edit File",
-        "description": (
-            "Replace an exact substring in a file. old_string must match exactly once unless "
-            "replace_all is set. Optional expected_sha256 guards against overwriting a file "
-            "that changed since it was read."
-        ),
+        "description": "Replace exact substring (optional expected_sha256).",
         "inputSchema": _schema(
             {
-                "path": {"type": "string", "description": "File path to edit."},
-                "old_string": {"type": "string", "description": "Exact text to replace."},
-                "new_string": {"type": "string", "description": "Replacement text."},
-                "expected_sha256": {"type": "string", "description": "Expected current sha256 of the file."},
-                "replace_all": {"type": "boolean", "description": "Replace every occurrence."},
+                "path": {"type": "string"},
+                "old_string": {"type": "string"},
+                "new_string": {"type": "string"},
+                "expected_sha256": {"type": "string"},
+                "replace_all": {"type": "boolean"},
             },
             ["path", "old_string", "new_string"],
         ),
@@ -4086,19 +4490,20 @@ TOOLS: List[Dict[str, Any]] = [
     {
         "name": "grep_search",
         "title": "Grep Search",
-        "description": "Recursively search file contents; skips binary files and heavy directories with a time budget.",
+        "description": "Search file contents; json or compact (path:line: text).",
         "inputSchema": _schema(
             {
-                "pattern": {"type": "string", "description": "Regular expression (or literal text with fixed)."},
-                "path": {"type": "string", "description": "Root directory or file (default workspace)."},
-                "glob": {"type": "string", "description": "File name filter, e.g. *.py."},
-                "limit": {"type": "integer", "description": "Maximum matches (1-1000, default 200)."},
-                "ignore_case": {"type": "boolean", "description": "Case-insensitive search."},
-                "fixed": {"type": "boolean", "description": "Treat pattern as literal text."},
-                "context": {"type": "integer", "description": "Context lines around each match."},
-                "max_depth": {"type": "integer", "description": "Optional maximum directory depth (0 = root only)."},
-                "time_budget_ms": {"type": "integer", "description": "Wall-clock budget in ms (50-20000, default 12000)."},
-                "include_ignored": {"type": "boolean", "description": "Descend into heavy/ignored dirs (.git, node_modules, .cache, etc.)."},
+                "pattern": {"type": "string"},
+                "path": {"type": "string"},
+                "glob": {"type": "string"},
+                "limit": {"type": "integer"},
+                "ignore_case": {"type": "boolean"},
+                "fixed": {"type": "boolean"},
+                "context": {"type": "integer"},
+                "max_depth": {"type": "integer"},
+                "time_budget_ms": {"type": "integer"},
+                "include_ignored": {"type": "boolean"},
+                "format": {"type": "string", "enum": ["compact", "json"]},
             },
             ["pattern"],
         ),
@@ -4106,16 +4511,16 @@ TOOLS: List[Dict[str, Any]] = [
     {
         "name": "glob_find",
         "title": "Glob Find",
-        "description": "Find files by glob pattern (* and **) with early directory pruning and a time budget.",
+        "description": "Find files by glob with pruning and optional FTS5 index.",
         "inputSchema": _schema(
             {
-                "pattern": {"type": "string", "description": "Glob pattern, e.g. **/*.py."},
-                "path": {"type": "string", "description": "Root directory (default workspace)."},
-                "max_depth": {"type": "integer", "description": "Optional maximum directory depth (0 = root only)."},
-                "max_results": {"type": "integer", "description": "Maximum paths to return (1-10000)."},
-                "time_budget_ms": {"type": "integer", "description": "Wall-clock budget in ms (50-20000, default 12000)."},
-                "include_ignored": {"type": "boolean", "description": "Descend into heavy/ignored dirs (.git, node_modules, .cache, etc.)."},
-                "use_index": {"type": "string", "enum": ["auto", "only", "off"], "description": "Use local SQLite FTS5 file index when available (default 'auto')."},
+                "pattern": {"type": "string"},
+                "path": {"type": "string"},
+                "max_depth": {"type": "integer"},
+                "max_results": {"type": "integer"},
+                "time_budget_ms": {"type": "integer"},
+                "include_ignored": {"type": "boolean"},
+                "use_index": {"type": "string", "enum": ["auto", "only", "off"]},
             },
             ["pattern"],
         ),
@@ -4123,39 +4528,33 @@ TOOLS: List[Dict[str, Any]] = [
     {
         "name": "win_places",
         "title": "Windows Places & Recent Files",
-        "description": (
-            "Instant (<100 ms) user-context snapshot without scanning disks: real Known Folders "
-            "(Desktop, Documents, Downloads, OneDrive, Telegram Desktop), recent opened files "
-            "resolved from Windows .lnk shortcuts, and fixed drives with 1st-level directories. "
-            "On Linux/macOS returns standard home folders and mount roots."
-        ),
+        "description": "Known Folders, recent files, and top-level drive dirs.",
         "inputSchema": _schema({
-            "recent_limit": {"type": "integer", "description": "Max recent files to return (1-100, default 30)."},
-            "top_level_limit": {"type": "integer", "description": "Max 1st-level folders per drive (0-100, default 30)."},
-            "only_existing_recent": {"type": "boolean", "description": "Skip recent shortcuts whose target no longer exists (default true)."},
+            "recent_limit": {"type": "integer"},
+            "top_level_limit": {"type": "integer"},
+            "only_existing_recent": {"type": "boolean"},
         }),
     },
     {
         "name": "batch_read",
         "title": "Batch Read",
-        "description": "Execute up to 16 read-only inspection calls (list_dir, read_file, glob_find, grep_search, win_places, mesh_status, system_vitals, job_list, job_output) in one MCP round-trip.",
+        "description": "Run up to 16 read-only tool calls in one call.",
         "inputSchema": _schema(
             {
                 "ops": {
                     "type": "array",
-                    "description": "List of {id?, tool, args?} objects (max 16, read-only tools only).",
                     "items": {
                         "type": "object",
                         "properties": {
-                            "id": {"type": "string", "description": "Optional caller-defined identifier."},
-                            "tool": {"type": "string", "description": "Read-only tool name."},
-                            "args": {"type": "object", "description": "Arguments for the tool."},
+                            "id": {"type": "string"},
+                            "tool": {"type": "string"},
+                            "args": {"type": "object"},
                         },
                         "required": ["tool"],
                     },
                 },
-                "time_budget_ms": {"type": "integer", "description": "Total wall-clock budget in ms (100-20000, default 18000)."},
-                "max_total_chars": {"type": "integer", "description": "Total serialized output cap in chars (1000-200000, default 40000)."},
+                "time_budget_ms": {"type": "integer"},
+                "max_total_chars": {"type": "integer"},
             },
             ["ops"],
         ),
@@ -4163,15 +4562,11 @@ TOOLS: List[Dict[str, Any]] = [
     {
         "name": "batch_edit",
         "title": "Batch Edit / Write",
-        "description": (
-            "Apply up to 16 edit/write file operations in one MCP round-trip (supports "
-            "dry_run validation and stop_on_error). Cuts tool-call rounds for multi-file changes."
-        ),
+        "description": "Apply up to 16 edit/write ops (supports dry_run).",
         "inputSchema": _schema(
             {
                 "ops": {
                     "type": "array",
-                    "description": "List of {id?, op: 'edit'|'write', path, ...} objects (max 16).",
                     "items": {
                         "type": "object",
                         "properties": {
@@ -4188,8 +4583,8 @@ TOOLS: List[Dict[str, Any]] = [
                         "required": ["op", "path"],
                     },
                 },
-                "stop_on_error": {"type": "boolean", "description": "Stop on first failed op (default true)."},
-                "dry_run": {"type": "boolean", "description": "Validate all ops without modifying files (default false)."},
+                "stop_on_error": {"type": "boolean"},
+                "dry_run": {"type": "boolean"},
             },
             ["ops"],
         ),
@@ -4197,19 +4592,15 @@ TOOLS: List[Dict[str, Any]] = [
     {
         "name": "run_script",
         "title": "Run Multi-Step Script",
-        "description": (
-            "Write and execute a temporary script (python, powershell, bash, cmd) in one call "
-            "without shell-quoting issues. Set background=true to hand off long pipelines to run_job."
-        ),
+        "description": "Run temp python/powershell/bash/cmd script.",
         "inputSchema": _schema(
             {
-                "code": {"type": "string", "description": "Full script source code."},
-                "lang": {"type": "string", "enum": ["python", "powershell", "bash", "cmd"],
-                         "description": "Script language (default python)."},
-                "cwd": {"type": "string", "description": "Working directory (default workspace)."},
-                "timeout_sec": {"type": "integer", "description": "Foreground timeout in seconds (1-120, default 25)."},
-                "background": {"type": "boolean", "description": "Run via run_job and return job_id immediately (default false)."},
-                "max_chars": {"type": "integer", "description": "Max stdout/stderr chars to return."},
+                "code": {"type": "string"},
+                "lang": {"type": "string", "enum": ["python", "powershell", "bash", "cmd"]},
+                "cwd": {"type": "string"},
+                "timeout_sec": {"type": "integer"},
+                "background": {"type": "boolean"},
+                "max_chars": {"type": "integer"},
             },
             ["code"],
         ),
@@ -4217,34 +4608,26 @@ TOOLS: List[Dict[str, Any]] = [
     {
         "name": "fs_index",
         "title": "Local File Index",
-        "description": (
-            "Manage the local SQLite FTS5 file index for instant (<30 ms) glob_find queries: "
-            "action='status' (read-only), 'refresh' (background=true by default), or 'schedule' "
-            "(periodic background refresh via schedule)."
-        ),
+        "description": "Manage local SQLite FTS5 index (status/refresh/schedule).",
         "inputSchema": _schema(
             {
-                "action": {"type": "string", "enum": ["status", "refresh", "schedule"],
-                           "description": "Action to perform (default status)."},
-                "roots": {"type": "array", "items": {"type": "string"},
-                          "description": "Directories to index (default current workspace)."},
-                "background": {"type": "boolean", "description": "refresh: run in background thread (default true)."},
-                "time_budget_ms": {"type": "integer", "description": "refresh (foreground): wall-clock budget in ms."},
-                "every_sec": {"type": "integer", "description": "schedule: repeat interval in seconds (60-86400, default 1800)."},
-                "label": {"type": "string", "description": "schedule: timer label (default fs-index-refresh)."},
+                "action": {"type": "string", "enum": ["status", "refresh", "schedule"]},
+                "roots": {"type": "array", "items": {"type": "string"}},
+                "background": {"type": "boolean"},
+                "time_budget_ms": {"type": "integer"},
+                "every_sec": {"type": "integer"},
+                "label": {"type": "string"},
             }
         ),
     },
     {
         "name": "run_job",
         "title": "Run Background Job",
-        "description": "Start a command in the background; returns a job_id for job_output/job_kill. "
-                       "On an Android/Termux node the job's wake lock is taken automatically so "
-                       "Android does not freeze it while the screen is off.",
+        "description": "Start background command; returns job_id.",
         "inputSchema": _schema(
             {
-                "command": {"type": "string", "description": "Shell command to run in the background."},
-                "cwd": {"type": "string", "description": "Working directory (default workspace)."},
+                "command": {"type": "string"},
+                "cwd": {"type": "string"},
             },
             ["command"],
         ),
@@ -4252,13 +4635,13 @@ TOOLS: List[Dict[str, Any]] = [
     {
         "name": "job_output",
         "title": "Job Output",
-        "description": "Read a background job's output, optionally waiting up to 20 s for completion.",
+        "description": "Read background job output (wait up to 20s).",
         "inputSchema": _schema(
             {
-                "job_id": {"type": "string", "description": "Job id returned by run_job."},
-                "wait_ms": {"type": "integer", "description": "Milliseconds to wait (0-20000)."},
-                "max_chars": {"type": "integer", "description": "Maximum stdout characters per response."},
-                "cursor": {"type": "integer", "description": "stdout character offset to continue from."},
+                "job_id": {"type": "string"},
+                "wait_ms": {"type": "integer"},
+                "max_chars": {"type": "integer"},
+                "cursor": {"type": "integer"},
             },
             ["job_id"],
         ),
@@ -4266,11 +4649,11 @@ TOOLS: List[Dict[str, Any]] = [
     {
         "name": "job_kill",
         "title": "Job Kill",
-        "description": "Terminate a running background job.",
+        "description": "Terminate a background job.",
         "inputSchema": _schema(
             {
-                "job_id": {"type": "string", "description": "Job id returned by run_job."},
-                "signal": {"type": "string", "description": "TERM (default), KILL, INT, HUP or QUIT."},
+                "job_id": {"type": "string"},
+                "signal": {"type": "string"},
             },
             ["job_id"],
         ),
@@ -4278,68 +4661,33 @@ TOOLS: List[Dict[str, Any]] = [
     {
         "name": "job_list",
         "title": "Job List",
-        "description": "List recent background jobs, newest first (20 by default, max 50).",
-        "inputSchema": _schema({
-            "limit": {"type": "integer", "description": "How many jobs to return (1-50, default 20)."},
-        }),
+        "description": "List recent background jobs (max 50).",
+        "inputSchema": _schema({"limit": {"type": "integer"}}),
     },
     {
         "name": "mesh_update",
         "title": "Mesh Update (self-update)",
-        "description": (
-            "Report, check for, or install a newer release of this node's own code from "
-            "GitHub. action=status reads local state without network; action=check asks "
-            "GitHub Releases; action=apply downloads the release payload, verifies its "
-            "published SHA-256, installs it with a rollback backup and restarts the agent "
-            "(the tunnel drops for a few seconds; the tool result is still sent first). "
-            "Use status or check first, and apply only when the operator wants this node "
-            "updated now."
-        ),
+        "description": "Check or apply GitHub release update.",
         "inputSchema": _schema({
-            "action": {"type": "string", "enum": ["status", "check", "apply"],
-                       "description": "What to do (default: status)."},
-            "force": {"type": "boolean",
-                      "description": "Ignore the check interval and the failed-apply backoff."},
-            "offline": {"type": "boolean",
-                        "description": "check: report the cached answer without touching the network."},
-            "restart": {"type": "boolean",
-                        "description": "apply: restart the node afterwards (default true)."},
+            "action": {"type": "string", "enum": ["status", "check", "apply"]},
+            "force": {"type": "boolean"},
+            "offline": {"type": "boolean"},
+            "restart": {"type": "boolean"},
         }),
     },
     {
         "name": "node_control",
         "title": "Node Control (settings)",
-        "description": (
-            "Read or change this node's own switches: the access mode (read_only / full), "
-            "pause and resume, the working directory (the `cd` of "
-            "every other tool - follow it with list_dir), the isolated container "
-            "(Docker/Podman with only the project mounted) and the remote-control "
-            "lock. Use action=status first: it answers the current mode, paused, "
-            "workspace, isolation and remote_control without changing anything. A "
-            "node in read-only mode cannot be lifted by a remote caller, and remote "
-            "control must be switched back on at the machine - both refusals say so."
-        ),
+        "description": "Read/change mode, pause, workspace (cd), sandbox, remote_control.",
         "inputSchema": _schema(
             {
                 "action": {"type": "string",
-                           "enum": ["status", "mode", "pause", "resume", "cd", "sandbox",
-                                    "remote_control"],
-                           "description": "What to do (status reports without changing anything)."},
-                "mode": {"type": "string", "enum": ["read_only", "full"],
-                         "description": "mode: the access mode to apply."},
-                "path": {"type": "string",
-                         "description": "cd: the directory that becomes the working directory."},
-                "workspace": {"type": "string",
-                              "description": "sandbox: project directory to mount (default: the "
-                                             "current working directory)."},
-                "enabled": {"type": "boolean",
-                            "description": "sandbox: start (true) or stop (false) the isolated "
-                                           "container; remote_control: allow or forbid remote "
-                                           "settings changes."},
-                "network": {"type": "boolean",
-                            "description": "sandbox: allow network access inside the container "
-                                           "(default false; a client that asks will do so "
-                                           "before the call)."},
+                           "enum": ["status", "mode", "pause", "resume", "cd", "sandbox", "remote_control"]},
+                "mode": {"type": "string", "enum": ["read_only", "full"]},
+                "path": {"type": "string"},
+                "workspace": {"type": "string"},
+                "enabled": {"type": "boolean"},
+                "network": {"type": "boolean"},
             },
             ["action"],
         ),
@@ -4347,25 +4695,13 @@ TOOLS: List[Dict[str, Any]] = [
     {
         "name": "goal",
         "title": "Goal (persistent objective)",
-        "description": (
-            "Record the objective this chat is working on, so it survives a "
-            "reconnect, an agent restart or a new session: the node stores it and "
-            "the gateway puts it back into the session instructions (and into "
-            "mesh_status). action=set with text starts or replaces the objective; "
-            "get reads it; complete or blocked closes it (note optional); clear "
-            "forgets it. Use it when the user states a goal that outlives this "
-            "turn, not for every message. The note is metadata: it runs nothing "
-            "and works in read-only mode."
-        ),
+        "description": "Set/get/complete/block/clear persistent objective.",
         "inputSchema": _schema(
             {
                 "action": {"type": "string",
-                           "enum": ["set", "get", "complete", "blocked", "clear"],
-                           "description": "What to do (default: get)."},
-                "text": {"type": "string",
-                         "description": "set: the objective, as one sentence."},
-                "note": {"type": "string",
-                         "description": "complete/blocked: what was achieved, or what stops it."},
+                           "enum": ["set", "get", "complete", "blocked", "clear"]},
+                "text": {"type": "string"},
+                "note": {"type": "string"},
             },
             ["action"],
         ),
@@ -4373,37 +4709,17 @@ TOOLS: List[Dict[str, Any]] = [
     {
         "name": "schedule",
         "title": "Schedule (timer / cron on the node)",
-        "description": (
-            "Set a timer on the node and continue when it fires - the way to survive "
-            "a long task, because a tool call must answer within ~30 s and the chat "
-            "cannot be woken by the server. action=set needs a label and exactly one "
-            "of after_sec (once), every_sec (repeat, >=10) or at (\"HH:MM\" daily); "
-            "an optional command runs as a background job at that moment (job id is "
-            "kept in the continuation), a note-only timer is a reminder. When it "
-            "fires, the firing appears in mesh_status and in the session "
-            "instructions as a pending continuation: read it, collect the job with "
-            "job_output if there is one, and acknowledge it with action=ack. "
-            "action=list shows timers and pending continuations, action=cancel "
-            "stops one by id."
-        ),
+        "description": "Set/list/cancel/ack node timers.",
         "inputSchema": _schema(
             {
-                "action": {"type": "string",
-                           "enum": ["set", "list", "cancel", "ack"],
-                           "description": "What to do (default: list)."},
-                "label": {"type": "string", "description": "set: short name for the timer."},
-                "command": {"type": "string",
-                            "description": "set: optional shell command to run when it fires."},
-                "note": {"type": "string",
-                         "description": "set: what to remember/continue with."},
-                "after_sec": {"type": "integer",
-                              "description": "set: fire once after this many seconds."},
-                "every_sec": {"type": "integer",
-                              "description": "set: repeat every this many seconds (>=10)."},
-                "at": {"type": "string",
-                       "description": "set: fire every day at this local time, e.g. 09:30."},
-                "id": {"type": "string",
-                       "description": "cancel/ack: the timer id, or the continuation id."},
+                "action": {"type": "string", "enum": ["set", "list", "cancel", "ack"]},
+                "label": {"type": "string"},
+                "command": {"type": "string"},
+                "note": {"type": "string"},
+                "after_sec": {"type": "integer"},
+                "every_sec": {"type": "integer"},
+                "at": {"type": "string"},
+                "id": {"type": "string"},
             },
             ["action"],
         ),
@@ -4411,147 +4727,72 @@ TOOLS: List[Dict[str, Any]] = [
     {
         "name": "device_info",
         "title": "Device Info",
-        "description": (
-            "One-call report for the device this node runs on: battery and charging, "
-            "network interfaces with Wi-Fi and cellular signal strength, language, time and "
-            "timezone, CPU, RAM, storage, cameras, microphones, sensors and what the platform "
-            "can actually reach. On an Android/Termux node it reads the phone through the "
-            "termux-api commands; on a laptop or desktop it reads the local system. Every "
-            "section carries available/source, so 'not exposed here' is never reported as a "
-            "zero - and on a non-phone the phone-only sections explain themselves instead of "
-            "failing. Use device_control, device_capture or device_messages to act."
-        ),
+        "description": "Device telemetry: battery, network, hardware, sensors.",
         "inputSchema": _schema({
             "section": {"type": "string",
                         "enum": ["summary", "all", "device", "battery", "network", "locale",
                                  "time", "hardware", "storage", "cameras", "microphones",
-                                 "sensors", "capabilities"],
-                        "description": "Which blocks to return (default: all)."},
-            "sensor": {"type": "string",
-                       "description": "Name one sensor to take a single live sample from "
-                                      "(Android only; needs a name from the sensors block)."},
-            "fresh": {"type": "boolean",
-                      "description": "Bypass the short-lived cache (default false)."},
-            "quick": {"type": "boolean",
-                      "description": "Skip the slow sections: network, cameras, microphones, "
-                                     "sensors (default false)."},
+                                 "sensors", "capabilities"]},
+            "sensor": {"type": "string"},
+            "fresh": {"type": "boolean"},
+            "quick": {"type": "boolean"},
         }),
     },
     {
         "name": "device_control",
         "title": "Device Control",
-        "description": (
-            "Reversible actions on the node's own device: torch, vibrate, volume, screen "
-            "brightness, text-to-speech, toast, notifications, clipboard, media playback, "
-            "media scan, wake lock, download, opening or sharing a file, a text dialog and "
-            "the wallpaper. Each action is a fixed termux-api command on Android and an "
-            "explained no-op elsewhere; the result names the command and its argv so nothing "
-            "is guessed. Nothing here is destructive, and all of it is refused when the node "
-            "runs with MESH_READ_ONLY=1."
-        ),
+        "description": "Reversible device actions (torch, volume, notify, clipboard, media).",
         "inputSchema": _schema({
-            "action": {"type": "string",
-                       "enum": list(DEVICE_CONTROL_ACTIONS),
-                       "description": "Action to perform."},
-            "on": {"type": "boolean", "description": "torch: true lights it, false puts it out."},
-            "value": {"type": "integer",
-                      "description": "vibrate: milliseconds; volume: level 0-15; brightness: 0-255."},
-            "stream": {"type": "string", "enum": list(_DEVICE_STREAMS),
-                       "description": "volume: which audio stream (default music)."},
-            "text": {"type": "string",
-                     "description": "tts_speak/toast/notify/clipboard_set/dialog body; media: "
-                                    "play|pause|stop|info."},
-            "title": {"type": "string", "description": "notify/dialog: heading text."},
-            "id": {"type": "string",
-                   "description": "notify_remove: the id the notification was posted with."},
-            "url": {"type": "string", "description": "download/open/wallpaper: URL to use."},
-            "path": {"type": "string",
-                     "description": "open/share/media/download/media_scan/wallpaper: file on the node."},
-            "state": {"type": "string", "enum": ["acquire", "release", "status"],
-                      "description": "wakelock: what to do (default status)."},
-            "timeout_sec": {"type": "integer",
-                            "description": "dialog: seconds to wait for the person (5-120, default 30)."},
+            "action": {"type": "string", "enum": list(DEVICE_CONTROL_ACTIONS)},
+            "on": {"type": "boolean"},
+            "value": {"type": "integer"},
+            "stream": {"type": "string", "enum": list(_DEVICE_STREAMS)},
+            "text": {"type": "string"},
+            "title": {"type": "string"},
+            "id": {"type": "string"},
+            "url": {"type": "string"},
+            "path": {"type": "string"},
+            "state": {"type": "string", "enum": ["acquire", "release", "status"]},
+            "timeout_sec": {"type": "integer"},
         }, ["action"]),
     },
     {
         "name": "device_capture",
         "title": "Device Capture",
-        "description": (
-            "Camera, microphone, location, fingerprint, USB and infrared actions. These "
-            "observe the physical world or authenticate the person holding the phone, but "
-            "they install and remove nothing, so they carry no confirmation prompt - the "
-            "guard is the node's own switch (MESH_DEVICE, MESH_DEVICE_ACTIONS, "
-            "MESH_READ_ONLY), which refuses a call before any command runs. A photo or a "
-            "recording is written to the node's capture directory and is never uploaded "
-            "anywhere by itself; "
-            "fingerprint returns only the verdict, never biometric data; USB access requests "
-            "permission and returns the descriptor but deliberately refuses to run a program "
-            "for you; and on Android 11+ the Termux:API app has to be in the foreground for a "
-            "recording."
-        ),
+        "description": "Phone capture: camera, mic, location, fingerprint, USB, IR.",
         "inputSchema": _schema({
-            "action": {"type": "string",
-                       "enum": list(DEVICE_CAPTURE_ACTIONS),
-                       "description": "Capture action to perform."},
-            "camera_id": {"type": "integer",
-                          "description": "camera_photo: id from camera_list (default 0)."},
-            "path": {"type": "string",
-                     "description": "camera_photo/mic_record_start: output file (default: the "
-                                    "node's capture directory); usb_access: device path from "
-                                    "usb_list."},
-            "seconds": {"type": "integer",
-                        "description": "mic_record_start: recording length limit in seconds."},
-            "provider": {"type": "string", "enum": ["gps", "network", "passive"],
-                         "description": "location: which Android provider to use (default gps)."},
-            "frequency": {"type": "integer",
-                          "description": "infrared_transmit: carrier frequency in Hz."},
-            "pattern": {"type": "string",
-                        "description": "infrared_transmit: durations in microseconds, e.g. "
-                                       "1000,2000,1000."},
+            "action": {"type": "string", "enum": list(DEVICE_CAPTURE_ACTIONS)},
+            "camera_id": {"type": "integer"},
+            "path": {"type": "string"},
+            "seconds": {"type": "integer"},
+            "provider": {"type": "string", "enum": ["gps", "network", "passive"]},
+            "frequency": {"type": "integer"},
+            "pattern": {"type": "string"},
         }, ["action"]),
     },
     {
         "name": "device_messages",
         "title": "Device Messages",
-        "description": (
-            "SMS, call log, contacts and placing a call. This is private data about the person "
-            "who owns the phone, so the node refuses "
-            "until its operator enables it with MESH_DEVICE_PIM=1. The refusal names the flag "
-            "and the Android permissions to grant, so the answer is an instruction rather than "
-            "a dead end. Sending an SMS and placing a call are also refused under "
-            "MESH_READ_ONLY=1."
-        ),
+        "description": "Phone PIM: SMS, call log, contacts, call (MESH_DEVICE_PIM=1).",
         "inputSchema": _schema({
-            "action": {"type": "string", "enum": list(DEVICE_MESSAGES_ACTIONS),
-                       "description": "Message or PIM action to perform."},
-            "number": {"type": "string", "description": "sms_send/call: recipient number."},
-            "text": {"type": "string", "description": "sms_send: message body."},
-            "limit": {"type": "integer", "description": "How many records (1-50, default 10)."},
-            "offset": {"type": "integer", "description": "Record offset, for paging."},
-            "type": {"type": "string",
-                     "description": "sms_list/call_log: filter, e.g. inbox/sent or "
-                                    "incoming/outgoing/missed."},
-            "query": {"type": "string", "description": "contacts: filter by name or number."},
+            "action": {"type": "string", "enum": list(DEVICE_MESSAGES_ACTIONS)},
+            "number": {"type": "string"},
+            "text": {"type": "string"},
+            "limit": {"type": "integer"},
+            "offset": {"type": "integer"},
+            "type": {"type": "string"},
+            "query": {"type": "string"},
         }, ["action"]),
     },
     {
         "name": "share_file",
         "title": "Share File (public URL)",
-        "description": (
-            "Publish ONE local file on the internet through the Mesh gateway. The file is copied "
-            "into the node's share root and a public HTTPS link is returned on the shared domain: "
-            "https://<shared-domain>/<node>/<name>-<random>/<filename>. Anyone who has the link can "
-            "read the file (the random part of the path is the credential), so treat the link like a "
-            "password. The node must be connected to the Mesh gateway for the link to work. Use "
-            "share_list to see active shares and unshare to revoke one."
-        ),
+        "description": "Publish one local file to a public HTTPS URL.",
         "inputSchema": _schema(
             {
-                "path": {"type": "string", "description": "Path of the local file to publish."},
-                "name": {"type": "string",
-                         "description": "Human name in the URL (default: the file name without extension)."},
-                "overwrite": {"type": "boolean",
-                              "description": "Replace an existing share with the same name (default false)."},
+                "path": {"type": "string"},
+                "name": {"type": "string"},
+                "overwrite": {"type": "boolean"},
             },
             ["path"],
         ),
@@ -4559,18 +4800,11 @@ TOOLS: List[Dict[str, Any]] = [
     {
         "name": "serve_dir",
         "title": "Serve Directory (public URL)",
-        "description": (
-            "Start a static web server for a local directory and return its public HTTPS link: "
-            "https://<shared-domain>/<node>/<name>-<random>/. The directory is served in place "
-            "(no copy): index.html is used when present, otherwise a directory listing is shown. "
-            "Serving is read-only (GET/HEAD only) and the random path segment is the credential. "
-            "Use unshare to stop the server; the directory itself is never deleted."
-        ),
+        "description": "Serve local directory read-only over public HTTPS URL.",
         "inputSchema": _schema(
             {
-                "path": {"type": "string", "description": "Local directory to serve."},
-                "name": {"type": "string",
-                         "description": "Human name in the URL (default: the directory name)."},
+                "path": {"type": "string"},
+                "name": {"type": "string"},
             },
             ["path"],
         ),
@@ -4578,20 +4812,61 @@ TOOLS: List[Dict[str, Any]] = [
     {
         "name": "share_list",
         "title": "Share List",
-        "description": "List active public shares with their URLs, roots and whether the local server is running.",
+        "description": "List active public shares.",
         "inputSchema": _schema({}),
     },
     {
         "name": "unshare",
         "title": "Unshare (revoke URL)",
-        "description": (
-            "Stop a public share and revoke its link. Accepts the share name, its slug or the full "
-            "URL. A file share also deletes the copy that was made in the share root; a served "
-            "directory is left untouched on disk."
-        ),
+        "description": "Stop public share and revoke URL.",
+        "inputSchema": _schema({"name": {"type": "string"}}, ["name"]),
+    },
+]
+
+
+EXTENDED_TOOL_ANNOTATIONS: Dict[str, Dict[str, Any]] = {
+    "git_status": _ANNOTATIONS_READ_ONLY,
+    "git_diff": _ANNOTATIONS_READ_ONLY,
+    "fetch_url": _ANNOTATIONS_READ_ONLY_OPEN_WORLD,
+}
+
+EXTENDED_TOOLS: List[Dict[str, Any]] = [
+    {
+        "name": "git_status",
+        "title": "Git Status",
+        "description": "Read-only git status without shell or hooks.",
+        "inputSchema": _schema({
+            "path": {"type": "string", "description": "Repo path (default workspace)."},
+            "short": {"type": "boolean", "description": "Short branch format (default true)."},
+            "untracked": {"type": "boolean", "description": "Show untracked files (default true)."},
+            "max_chars": {"type": "integer", "description": "Max output chars."},
+        }),
+    },
+    {
+        "name": "git_diff",
+        "title": "Git Diff",
+        "description": "Read-only git diff without shell or hooks.",
+        "inputSchema": _schema({
+            "path": {"type": "string", "description": "Repo or file path."},
+            "staged": {"type": "boolean", "description": "Show staged diff (--staged)."},
+            "stat": {"type": "boolean", "description": "Diffstat only (--stat)."},
+            "ref": {"type": "string", "description": "Git ref/range."},
+            "file": {"type": "string", "description": "Relative file filter."},
+            "max_chars": {"type": "integer", "description": "Max output chars."},
+        }),
+    },
+    {
+        "name": "fetch_url",
+        "title": "Fetch HTTPS URL",
+        "description": "Fetch an https:// URL with SSRF protection, 5-redirect cap, 300 KB limit.",
         "inputSchema": _schema(
-            {"name": {"type": "string", "description": "Share name, slug or public URL from share_list."}},
-            ["name"],
+            {
+                "url": {"type": "string", "description": "HTTPS URL."},
+                "strip_html": {"type": "boolean", "description": "Convert HTML to text (default true)."},
+                "max_bytes": {"type": "integer", "description": "Max response bytes (1-307200)."},
+                "timeout_sec": {"type": "integer", "description": "Timeout s (1-30, default 15)."},
+            },
+            ["url"],
         ),
     },
 ]
@@ -4606,14 +4881,100 @@ if not goal.enabled():
 
 # Attach the confirmation policy to the advertised specs. Kept out of the literal
 # above so the policy reads as one table instead of twenty scattered flags.
-def _attach_annotations(tools: List[Dict[str, Any]]) -> None:
+def _attach_annotations(tools: List[Dict[str, Any]], table: Optional[Dict[str, Dict[str, Any]]] = None) -> None:
+    mapping = TOOL_ANNOTATIONS if table is None else table
     for spec in tools:
-        profile = TOOL_ANNOTATIONS.get(spec.get("name"))
+        profile = mapping.get(spec.get("name"))
         if profile is not None:
             spec["annotations"] = dict(profile)
 
 
 _attach_annotations(TOOLS)
+_attach_annotations(EXTENDED_TOOLS, EXTENDED_TOOL_ANNOTATIONS)
+
+ALL_TOOLS: List[Dict[str, Any]] = list(TOOLS) + list(EXTENDED_TOOLS)
+
+# ---------------------------------------------------------------------------
+# Toolsets & platform auto-profile (MESH_TOOLSETS)
+# ---------------------------------------------------------------------------
+
+VALID_TOOLSETS: FrozenSet[str] = frozenset({"all", "core", "git", "web", "device", "admin"})
+
+TOOLSET_GROUPS: Dict[str, FrozenSet[str]] = {
+    "core": frozenset({
+        "mesh_status", "system_info", "system_vitals", "screen_capture",
+        "get_orchestration_skill", "list_dir", "bash_exec", "read_file",
+        "read_media", "write_file", "edit_file", "grep_search", "glob_find",
+        "win_places", "batch_read", "batch_edit", "run_script", "fs_index",
+        "run_job", "job_output", "job_kill", "job_list",
+    }),
+    "git": frozenset({"git_status", "git_diff"}),
+    "web": frozenset({"fetch_url", "share_file", "serve_dir", "share_list", "unshare"}),
+    "device": frozenset({"device_info", "device_control", "device_capture", "device_messages"}),
+    "admin": frozenset({"mesh_update", "node_control", "schedule", "goal"}),
+}
+
+_PHONE_ONLY_TOOLS: FrozenSet[str] = frozenset({"device_messages", "device_capture"})
+
+
+def _is_android_platform() -> bool:
+    """Return True when running on an Android/Termux host."""
+    if os.environ.get("TERMUX_VERSION") or os.environ.get("ANDROID_ROOT"):
+        return True
+    try:
+        if os.path.isdir("/data/data/com.termux"):
+            return True
+    except OSError:
+        pass
+    return False
+
+
+def parse_toolsets(raw: Any = None) -> Optional[FrozenSet[str]]:
+    """Parse MESH_TOOLSETS (or explicit value) into a normalized frozenset, or None for auto."""
+    if raw is None:
+        raw = os.environ.get("MESH_TOOLSETS", "")
+    if isinstance(raw, (list, tuple, set, frozenset)):
+        tokens = [str(x).strip().lower() for x in raw if str(x).strip()]
+    else:
+        text = str(raw).strip().lower()
+        if not text:
+            return None
+        tokens = [p.strip() for p in text.replace(";", ",").split(",") if p.strip()]
+    valid = frozenset(t for t in tokens if t in VALID_TOOLSETS)
+    return valid or None
+
+
+def list_tools(
+    toolsets: Any = None,
+    *,
+    is_android: Optional[bool] = None,
+    device_enabled: Optional[bool] = None,
+    include_extended: bool = True,
+) -> List[Dict[str, Any]]:
+    """Return MCP tool specs filtered by MESH_TOOLSETS and platform auto-profile."""
+    pool = ALL_TOOLS if include_extended else TOOLS
+    selected = parse_toolsets(toolsets)
+    if selected is not None:
+        if "all" in selected:
+            return list(pool)
+        allowed_names = set()
+        for group in selected:
+            allowed_names.update(TOOLSET_GROUPS.get(group, ()))
+        return [spec for spec in pool if spec.get("name") in allowed_names]
+
+    # Auto-profile: on non-Android nodes hide phone-only tools unless MESH_DEVICE=1.
+    android = _is_android_platform() if is_android is None else bool(is_android)
+    if device_enabled is None:
+        env_dev = os.environ.get("MESH_DEVICE")
+        dev_forced = (_DEVICE_ENABLED is True) or (
+            env_dev is not None and str(env_dev).strip() != "" and _parse_bool(env_dev)
+        )
+    else:
+        dev_forced = bool(device_enabled)
+
+    if android or dev_forced:
+        return list(pool)
+    return [spec for spec in pool if spec.get("name") not in _PHONE_ONLY_TOOLS]
 
 
 # ---------------------------------------------------------------------------
@@ -4655,6 +5016,9 @@ _HANDLERS: Dict[str, Callable[[Dict[str, Any]], Any]] = {
     "serve_dir": _tool_serve_dir,
     "share_list": _tool_share_list,
     "unshare": _tool_unshare,
+    "git_status": _tool_git_status,
+    "git_diff": _tool_git_diff,
+    "fetch_url": _tool_fetch_url,
     # Internal gateway relay (never advertised in TOOLS / tools/list). The deployed
     # gateway reaches a share by calling this tool over the tunnel.
     "_http_share": _tool_http_share,
@@ -4670,6 +5034,8 @@ def _usage_status(result: Any) -> Tuple[str, Optional[str]]:
         return "denied", "node_paused"
     if error.startswith("remote_control_disabled"):
         return "denied", "remote_control_disabled"
+    if error.startswith("shell_disabled"):
+        return "denied", "shell_disabled"
     if error.startswith("MESH_READ_ONLY") or "read-only" in error.lower():
         return "denied", "read_only"
     if error.startswith("Unknown tool"):
@@ -4706,6 +5072,8 @@ def _is_ungated_read(name: Any, args: Dict[str, Any]) -> bool:
     and read-only mode refuses it; seeing what is pending or cancelling it must
     never be blocked by the very gate it exists to describe.
     """
+    if name in _EXTENDED_READ_ONLY_ALLOWED:
+        return True
     if name != "schedule" or not isinstance(args, dict):
         return False
     return str(args.get("action") or "list").strip().lower() in _SCHEDULE_READ_ACTIONS
