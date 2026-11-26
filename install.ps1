@@ -1,4 +1,4 @@
-﻿# ==============================================================================
+# ==============================================================================
 #  Remote Harness MCP - Windows PowerShell Universal Installer
 # ==============================================================================
 param(
@@ -1240,6 +1240,8 @@ if (-not $ScriptDir -or -not (Test-Path "$ScriptDir\core\agent.py")) {
         "core/doc_read.py",
         "core/fs_search.py",
         "core/fs_index.py",
+        # One trust store for fetch_url and self-update (bundle -> certifi -> OS).
+        "core/tls.py",
         "core/settings.py",
         "core/subagents.py",
         "core/termux.py",
