@@ -69,6 +69,14 @@ def test_build_deb_produces_valid_universal_archive(tmp_path):
         assert not any("__pycache__" in n or n.endswith(".pyc") for n in names)
         assert dtf.getmember("./usr/bin/remote-harness-mcp").mode == 0o755
         assert dtf.getmember("./usr/bin/rhm").mode == 0o755
+        # dpkg requires explicit directory entries before files inside them
+        seen_dirs = set()
+        for m in dtf.getmembers():
+            if m.isdir():
+                seen_dirs.add(m.name.rstrip("/"))
+            else:
+                parent = m.name.rsplit("/", 1)[0]
+                assert parent in seen_dirs, f"missing parent dir {parent} before {m.name}"
 
     if shutil.which("dpkg-deb"):
         info = subprocess.run(["dpkg-deb", "--info", str(built)], capture_output=True, text=True, check=True)

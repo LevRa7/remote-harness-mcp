@@ -136,7 +136,7 @@ jobs:
         run: |
           deb=$(ls dist/remote-harness-mcp_*_all.deb)
           dpkg-deb --info "$deb"
-          dpkg-deb --contents "$deb" | head -n 30
+          dpkg-deb --contents "$deb" | head -n 30 || true
           sudo apt-get install -y "./$deb"
           remote-harness-mcp --help >/dev/null
           rhm --help >/dev/null

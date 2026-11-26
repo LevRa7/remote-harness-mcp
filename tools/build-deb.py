@@ -76,6 +76,33 @@ def _read_normalized(path: Path) -> bytes:
     return data
 
 
+def _add_tar_dir(tf: tarfile.TarFile, arcname: str, mode: int = 0o755) -> None:
+    info = tarfile.TarInfo(name=arcname)
+    info.type = tarfile.DIRTYPE
+    info.size = 0
+    info.mode = mode
+    info.uid = 0
+    info.gid = 0
+    info.uname = "root"
+    info.gname = "root"
+    info.mtime = FIXED_MTIME
+    tf.addfile(info)
+
+
+def _ensure_parent_dirs(tf: tarfile.TarFile, seen: set, rel_path: str) -> None:
+    if "./" not in seen:
+        _add_tar_dir(tf, "./")
+        seen.add("./")
+    parts = rel_path.strip("/").split("/")[:-1]
+    cur = "."
+    for part in parts:
+        cur = f"{cur}/{part}"
+        dname = cur + "/"
+        if dname not in seen:
+            _add_tar_dir(tf, dname)
+            seen.add(dname)
+
+
 def _add_tar_bytes(tf: tarfile.TarFile, arcname: str, data: bytes, mode: int = 0o644) -> None:
     info = tarfile.TarInfo(name=arcname)
     info.size = len(data)
@@ -108,11 +135,13 @@ def _build_data_tar(root: Path) -> Tuple[bytes, int, List[str]]:
     total_bytes = 0
     md5_lines: List[str] = []
 
+    seen_dirs: set = set()
     with tarfile.open(fileobj=buf, mode="w:gz", format=tarfile.GNU_FORMAT) as tf:
         # 1. Application payload under /opt/remote-harness-mcp
         for abs_p, rel_p in _iter_payload(root):
             data = _read_normalized(abs_p)
             dest = f"{INSTALL_PREFIX}/{rel_p}"
+            _ensure_parent_dirs(tf, seen_dirs, dest)
             mode = 0o755 if rel_p.endswith(".sh") else 0o644
             _add_tar_bytes(tf, f"./{dest}", data, mode=mode)
             total_bytes += len(data)
@@ -125,6 +154,7 @@ def _build_data_tar(root: Path) -> Tuple[bytes, int, List[str]]:
             'export PYTHONPATH="/opt/remote-harness-mcp${PYTHONPATH:+:$PYTHONPATH}"\n'
             'exec python3 -m core.server "$@"\n'
         ).encode("utf-8")
+        _ensure_parent_dirs(tf, seen_dirs, "usr/bin/remote-harness-mcp")
         _add_tar_bytes(tf, "./usr/bin/remote-harness-mcp", cli_sh, mode=0o755)
         total_bytes += len(cli_sh)
         md5_lines.append(f"{hashlib.md5(cli_sh).hexdigest()}  usr/bin/remote-harness-mcp")
@@ -136,6 +166,7 @@ def _build_data_tar(root: Path) -> Tuple[bytes, int, List[str]]:
             'cd /opt/remote-harness-mcp\n'
             'exec python3 -m core.menu "$@"\n'
         ).encode("utf-8")
+        _ensure_parent_dirs(tf, seen_dirs, "usr/bin/rhm")
         _add_tar_bytes(tf, "./usr/bin/rhm", rhm_sh, mode=0o755)
         total_bytes += len(rhm_sh)
         md5_lines.append(f"{hashlib.md5(rhm_sh).hexdigest()}  usr/bin/rhm")
