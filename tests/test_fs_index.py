@@ -32,13 +32,21 @@ def test_file_index_refresh_and_queries(tmp_path):
     assert idx.is_covered(str(root)) is True
     assert idx.is_covered(str(sub)) is True
 
-    # Basename glob across whole root (case-insensitive on Windows)
+    # Basename glob across whole root (case-insensitive on Windows, case-sensitive on POSIX)
     res = idx.query(str(root), "*resume*")
     assert res is not None
-    assert res["count"] == 2
     assert res["backend"] in ("sqlite_fts5", "sqlite")
     names = sorted(os.path.basename(p) for p in res["files"])
-    assert names == ["Resume_Final.docx", "resume_2026.pdf"]
+    if fs_index.IS_WINDOWS:
+        assert res["count"] == 2
+        assert names == ["Resume_Final.docx", "resume_2026.pdf"]
+    else:
+        assert res["count"] == 1
+        assert names == ["resume_2026.pdf"]
+        upper = idx.query(str(root), "*Resume*")
+        assert upper is not None
+        assert upper["count"] == 1
+        assert [os.path.basename(p) for p in upper["files"]] == ["Resume_Final.docx"]
 
     # Relative ** glob
     py_res = idx.query(str(root), "**/*.py")
@@ -52,7 +60,8 @@ def test_file_index_refresh_and_queries(tmp_path):
     assert [os.path.basename(p) for p in shallow["files"]] == ["resume_2026.pdf"]
 
     # Subdirectory query only returns files under that subdirectory
-    sub_res = idx.query(str(sub), "*resume*")
+    sub_pattern = "*resume*" if fs_index.IS_WINDOWS else "*Resume*"
+    sub_res = idx.query(str(sub), sub_pattern)
     assert sub_res is not None
     assert [os.path.basename(p) for p in sub_res["files"]] == ["Resume_Final.docx"]
 
