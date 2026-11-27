@@ -2213,7 +2213,7 @@ if [ "$MODE" = "standalone" ]; then
         fi
     elif [ "$(uname -s)" = "Darwin" ]; then
         LAUNCH_AGENTS="$HOME/Library/LaunchAgents"
-        mkdir -p "$LAUNCH_AGENTS"
+        mkdir -p "$LAUNCH_AGENTS" "$CONFIG_DIR"
         PLIST_FILE="$LAUNCH_AGENTS/com.remoteharness.mcp.standalone.plist"
         cat << EOF > "$PLIST_FILE"
 <?xml version="1.0" encoding="UTF-8"?>
@@ -2236,6 +2236,10 @@ if [ "$MODE" = "standalone" ]; then
     <true/>
     <key>KeepAlive</key>
     <true/>
+    <key>StandardOutPath</key>
+    <string>$CONFIG_DIR/standalone.log</string>
+    <key>StandardErrorPath</key>
+    <string>$CONFIG_DIR/standalone.log</string>
 $PLIST_ENV_BLOCK
 </dict>
 </plist>
@@ -2323,6 +2327,9 @@ EOF
                 echo -e "  Логи:   ${CYAN}$TERMUX_PREFIX/var/log/sv/rhm-standalone/current${RESET}" >&2
                 echo -e "  Локальный сервер на телефоне доступен только внутри Termux (127.0.0.1):" >&2
                 echo -e "  для Gemini с телефона используйте режим туннеля (--mode=tunnel)." >&2
+            elif [ "$(uname -s)" = "Darwin" ]; then
+                echo -e "  Статус: ${CYAN}launchctl list | grep remoteharness${RESET} (launchd)" >&2
+                echo -e "  Логи:   ${CYAN}$CONFIG_DIR/standalone.log${RESET}" >&2
             else
                 echo -e "  Проверьте статус: ${CYAN}systemctl --user status rhm-standalone.service${RESET}" >&2
                 echo -e "  Логи:             ${CYAN}journalctl --user -u rhm-standalone.service -n 50 --no-pager${RESET}" >&2
@@ -2334,6 +2341,9 @@ EOF
                 echo -e "  Logs:   ${CYAN}$TERMUX_PREFIX/var/log/sv/rhm-standalone/current${RESET}" >&2
                 echo -e "  A local server on a phone is reachable inside Termux only (127.0.0.1):" >&2
                 echo -e "  use --mode=tunnel to drive this phone from Gemini." >&2
+            elif [ "$(uname -s)" = "Darwin" ]; then
+                echo -e "  Status: ${CYAN}launchctl list | grep remoteharness${RESET} (launchd)" >&2
+                echo -e "  Logs:   ${CYAN}$CONFIG_DIR/standalone.log${RESET}" >&2
             else
                 echo -e "  Check status: ${CYAN}systemctl --user status rhm-standalone.service${RESET}" >&2
                 echo -e "  Logs:         ${CYAN}journalctl --user -u rhm-standalone.service -n 50 --no-pager${RESET}" >&2
@@ -2680,7 +2690,7 @@ if [ "$CONTAINER_MODE" = true ]; then
     fi
 elif [ "$(uname -s)" = "Darwin" ]; then
     LAUNCH_AGENTS="$HOME/Library/LaunchAgents"
-    mkdir -p "$LAUNCH_AGENTS"
+    mkdir -p "$LAUNCH_AGENTS" "$CONFIG_DIR"
     PLIST_FILE="$LAUNCH_AGENTS/com.remoteharness.mcp.agent.plist"
     cat << EOF > "$PLIST_FILE"
 <?xml version="1.0" encoding="UTF-8"?>
@@ -2710,6 +2720,10 @@ elif [ "$(uname -s)" = "Darwin" ]; then
     <true/>
     <key>KeepAlive</key>
     <true/>
+    <key>StandardOutPath</key>
+    <string>$CONFIG_DIR/agent.log</string>
+    <key>StandardErrorPath</key>
+    <string>$CONFIG_DIR/agent.log</string>
 </dict>
 </plist>
 EOF
