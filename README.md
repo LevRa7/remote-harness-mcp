@@ -472,7 +472,7 @@ python3 -m core.server --folder ./my-project --no-shell --quick-tunnel
 - `--folder <dir>` scopes workspace and write roots to a single directory.
 - `--no-shell` (`MESH_ENABLE_SHELL=0`) disables `bash_exec`, `run_script`, and `run_job`, keeping file, search, `git_status`, `git_diff`, and `fetch_url` tools available.
 - `--quick-tunnel` publishes the loopback server over an ephemeral `trycloudflare.com` HTTPS URL when `cloudflared` is installed.
-- Standalone mode also supports **OAuth 2.1 (PKCE S256)** (`/.well-known/oauth-authorization-server`, `/oauth/register`, `/oauth/authorize`, `/oauth/token`) and `MESH_TOOLSETS` filtering (`core,git,web`).
+- Standalone mode also supports **OAuth 2.1 (PKCE S256)** (`/.well-known/oauth-authorization-server`, `/oauth/authorize`, `/oauth/token`) and `MESH_TOOLSETS` filtering (`core,git,web`). Dynamic Client Registration is used by default; setting `MESH_OAUTH_CLIENT_ID`, `MESH_OAUTH_CLIENT_SECRET`, and Gemini's exact callback in `MESH_OAUTH_REDIRECT_URI` enables a pre-registered confidential Gemini client instead. The manual client gets an explicit local consent page; dynamic clients keep the existing redirect flow. Registered clients and SHA-256 digests of unexpired access tokens are stored under the private config directory so a service restart does not invalidate an active session.
 
 At the end the installer prints your personal MCP link and copies it to the clipboard:
 ```text
@@ -483,7 +483,9 @@ https://<your-node-name>.<your-tailnet>.ts.net/sse?token=<your_secret_token>
 
 1. Open **[gemini.google.com/customize/connectors](https://gemini.google.com/customize/connectors)** in a browser or in the Gemini mobile app.
 2. Click **Add connector** (or **Settings ⚙️ → Connectors**) and name it **MyDevice**.
-3. Paste the link (**Ctrl+V**) into the **Server URL** field and click **Connect**.
+3. For Gemini, use the HTTPS MCP URL without a query token: `https://<your-node-name>.<your-tailnet>.ts.net/sse`. In the default dynamic-client mode, leave **Client ID** and **Client secret** blank. In pre-registered mode, enter the `MESH_OAUTH_CLIENT_ID` and `MESH_OAUTH_CLIENT_SECRET` values from the server's private `standalone.env`, and set `MESH_OAUTH_REDIRECT_URI` to the exact Redirect Link shown by Gemini's advanced settings. When Gemini opens the authorization page, review the access requested and approve it to finish connecting.
+
+Clients that support bearer tokens in headers can continue using the generated token link shown by the installer.
 
 ### 3. Give it a task
 
