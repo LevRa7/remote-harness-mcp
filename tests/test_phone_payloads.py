@@ -516,7 +516,7 @@ def test_a_phone_cpu_model_falls_back_to_the_board_when_ro_soc_is_absent(phone, 
     assert block["cpu"]["model"] == "kalama"
 
 
-@pytest.mark.skipif(os.name == "nt", reason="reads the real /proc/meminfo")
+@pytest.mark.skipif(not os.path.exists("/proc/meminfo"), reason="reads the real /proc/meminfo")
 def test_vitals_treat_android_as_linux(monkeypatch):
     """Python 3.13+ answers ``platform.system() == "Android"`` on a phone.
 

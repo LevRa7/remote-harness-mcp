@@ -275,6 +275,13 @@ def fake_phone(tmp_path):
     _shim(shim, "python3", 'exec "%s" "$@"\n' % _posix(sys.executable))
     # pkg: records what the installer asks for. It must never see python3-pip.
     _shim(shim, "pkg", 'echo "pkg $*" >> "%s"\nexit 0\n' % _posix(log))
+    # Kernel identity: Android runs Linux, so macOS runners must not route
+    # fake_phone into the Darwin launchd branch.
+    _shim(shim, "uname",
+          'case "$1" in\n'
+          '  -m) echo "aarch64" ;;\n'
+          '  *) echo "Linux" ;;\n'
+          'esac\nexit 0\n')
     # Android properties: the device model is the node name.
     _shim(shim, "getprop",
           'case "$1" in\n'
