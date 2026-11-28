@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import html
 import hashlib
 import hmac
 import json
@@ -61,7 +62,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
-from urllib.parse import parse_qs, quote, urlencode, urlparse, urlsplit, urlunsplit
+from urllib.parse import parse_qs, quote, unquote_plus, urlencode, urlparse, urlsplit, urlunsplit
 
 logger = logging.getLogger("remote-harness-mcp.standalone")
 
@@ -977,12 +978,41 @@ def _valid_redirect_uri(value: Any) -> bool:
     return parts.scheme in ("http", "https") and bool(parts.netloc)
 
 
+def _valid_google_oauth_redirect_uri(value: Any) -> bool:
+    """Accept only Google's documented HTTPS redirect hosts and route families."""
+    if not isinstance(value, str) or not value.strip() or len(value) > 2048:
+        return False
+    try:
+        parts = urlsplit(value.strip())
+        host = (parts.hostname or "").lower()
+        port = parts.port
+    except Exception:
+        return False
+    return (
+        parts.scheme == "https"
+        and host in {
+            "oauth-redirect.googleusercontent.com",
+            "oauth-redirect-sandbox.googleusercontent.com",
+            "oauth-redirect-test.googleusercontent.com",
+        }
+        and port in (None, 443)
+        and not parts.username
+        and not parts.password
+        and parts.path.startswith(("/r/", "/a/"))
+        and bool(parts.path.split("/", 2)[-1])
+        and not parts.query
+        and not parts.fragment
+    )
+
+
 class StandaloneOAuthStore(object):
-    """Minimal in-memory OAuth 2.1 store for standalone MCP clients.
+    """Minimal OAuth 2.1 store for standalone MCP clients.
 
     Supports RFC 8414 metadata, RFC 7591 dynamic client registration, and
     Authorization Code + PKCE S256 token issuance without conflicting with the
-    gateway's Google OIDC cabinet under ``/account``.
+    gateway's Google OIDC cabinet under ``/account``. Dynamic client registrations
+    are persisted when ``clients_path`` is provided; authorization codes and
+    access tokens remain short-lived in-memory state.
     """
 
     DEFAULT_CODE_TTL = 300
@@ -990,14 +1020,144 @@ class StandaloneOAuthStore(object):
     MAX_CLIENTS = 256
     MAX_CODES = 512
     MAX_TOKENS = 512
+    MAX_PENDING_AUTHORIZATIONS = 512
 
-    def __init__(self, code_ttl: int = DEFAULT_CODE_TTL, token_ttl: Optional[int] = None) -> None:
+    def __init__(
+        self,
+        code_ttl: int = DEFAULT_CODE_TTL,
+        token_ttl: Optional[int] = None,
+        clients_path: Optional[str] = None,
+        tokens_path: Optional[str] = None,
+        static_client_id: Optional[str] = None,
+        static_client_secret: Optional[str] = None,
+        static_redirect_uri: Optional[str] = None,
+    ) -> None:
         self._lock = threading.Lock()
         self._code_ttl = max(30, int(code_ttl))
         self._explicit_token_ttl = token_ttl
         self._clients: Dict[str, Dict[str, Any]] = {}
         self._codes: Dict[str, Dict[str, Any]] = {}
         self._tokens: Dict[str, Dict[str, Any]] = {}
+        self._pending_authorizations: Dict[str, Dict[str, Any]] = {}
+        self._completed_authorizations: Dict[str, Dict[str, Any]] = {}
+        self._completion_lock = threading.Lock()
+        self._clients_path = clients_path
+        self._load_clients()
+        self._tokens_path = tokens_path
+        self._load_tokens()
+        self._static_client_id = (static_client_id or os.environ.get("MESH_OAUTH_CLIENT_ID") or "").strip()
+        self._static_client_secret = static_client_secret or os.environ.get("MESH_OAUTH_CLIENT_SECRET") or ""
+        self._static_redirect_uri = (static_redirect_uri or os.environ.get("MESH_OAUTH_REDIRECT_URI") or "").strip()
+        if bool(self._static_client_id) != bool(self._static_client_secret):
+            raise ValueError("MESH_OAUTH_CLIENT_ID and MESH_OAUTH_CLIENT_SECRET must be configured together.")
+        if self._static_client_id and not _valid_google_oauth_redirect_uri(self._static_redirect_uri):
+            raise ValueError("MESH_OAUTH_REDIRECT_URI must be a valid Google OAuth callback URL.")
+        if self._static_client_id:
+            self._clients[self._static_client_id] = {
+                "client_id": self._static_client_id,
+                "client_name": "Gemini Remote Harness MCP",
+                "redirect_uris": [self._static_redirect_uri],
+                "grant_types": ["authorization_code"],
+                "response_types": ["code"],
+                "token_endpoint_auth_method": "client_secret_post",
+                "_client_secret": self._static_client_secret,
+                "_require_consent": True,
+            }
+
+    def _load_clients(self) -> None:
+        if not self._clients_path or not os.path.isfile(self._clients_path):
+            return
+        try:
+            with open(self._clients_path, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+            records = payload.get("clients", []) if isinstance(payload, dict) else []
+            for record in records:
+                if not isinstance(record, dict):
+                    continue
+                client_id = record.get("client_id")
+                redirect_uris = record.get("redirect_uris")
+                if (
+                    isinstance(client_id, str)
+                    and client_id.startswith("rhm_")
+                    and isinstance(redirect_uris, list)
+                    and redirect_uris
+                    and all(_valid_redirect_uri(uri) for uri in redirect_uris)
+                    and record.get("token_endpoint_auth_method") == "none"
+                ):
+                    self._clients[client_id] = record
+                    if len(self._clients) >= self.MAX_CLIENTS:
+                        break
+        except Exception as exc:
+            logger.warning("Could not load standalone OAuth clients: %s", exc)
+
+    def _persist_clients_locked(self) -> None:
+        if not self._clients_path:
+            return
+        parent = os.path.dirname(os.path.abspath(self._clients_path))
+        os.makedirs(parent, mode=0o700, exist_ok=True)
+        tmp = self._clients_path + ".tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            persisted = [
+                record for client_id, record in self._clients.items()
+                if client_id != getattr(self, "_static_client_id", "")
+                and not any(str(key).startswith("_") for key in record)
+            ]
+            json.dump({"clients": persisted}, handle, ensure_ascii=False)
+            handle.write("\n")
+        os.replace(tmp, self._clients_path)
+        try:
+            os.chmod(self._clients_path, 0o600)
+        except OSError:
+            pass
+
+    def _load_tokens(self) -> None:
+        if not self._tokens_path or not os.path.isfile(self._tokens_path):
+            return
+        try:
+            with open(self._tokens_path, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+            records = payload.get("tokens", {}) if isinstance(payload, dict) else {}
+            now = time.time()
+            if not isinstance(records, dict):
+                return
+            for token_hash, record in records.items():
+                if not isinstance(token_hash, str) or len(token_hash) != 64 or not isinstance(record, dict):
+                    continue
+                try:
+                    int(token_hash, 16)
+                    expires_at = float(record.get("expires_at", 0))
+                except (TypeError, ValueError):
+                    continue
+                if expires_at <= now:
+                    continue
+                self._tokens[token_hash] = {
+                    "client_id": str(record.get("client_id") or ""),
+                    "scope": str(record.get("scope") or "mcp"),
+                    "expires_at": expires_at,
+                }
+                if len(self._tokens) >= self.MAX_TOKENS:
+                    break
+        except Exception as exc:
+            logger.warning("Could not load standalone OAuth tokens: %s", exc)
+
+    def _persist_tokens_locked(self) -> None:
+        if not self._tokens_path:
+            return
+        parent = os.path.dirname(os.path.abspath(self._tokens_path))
+        os.makedirs(parent, mode=0o700, exist_ok=True)
+        tmp = self._tokens_path + ".tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump({"tokens": self._tokens}, handle, ensure_ascii=False)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, self._tokens_path)
+        try:
+            os.chmod(self._tokens_path, 0o600)
+        except OSError:
+            pass
 
     def _token_ttl(self) -> int:
         if self._explicit_token_ttl is not None:
@@ -1009,22 +1169,42 @@ class StandaloneOAuthStore(object):
 
     def _prune_locked(self, now: float) -> None:
         self._codes = {k: v for k, v in self._codes.items() if v["expires_at"] > now}
-        self._tokens = {k: v for k, v in self._tokens.items() if v["expires_at"] > now}
+        active_tokens = {k: v for k, v in self._tokens.items() if v["expires_at"] > now}
+        if len(active_tokens) != len(self._tokens):
+            self._tokens = active_tokens
+            try:
+                self._persist_tokens_locked()
+            except Exception as exc:
+                logger.warning("Could not persist pruned standalone OAuth tokens: %s", exc)
 
-    @staticmethod
-    def metadata(base_url: str) -> Dict[str, Any]:
+    def metadata(self, base_url: str) -> Dict[str, Any]:
         issuer = base_url.rstrip("/")
-        return {
+        metadata = {
             "issuer": issuer,
             "authorization_endpoint": f"{issuer}/oauth/authorize",
             "token_endpoint": f"{issuer}/oauth/token",
-            "registration_endpoint": f"{issuer}/oauth/register",
             "response_types_supported": ["code"],
             "grant_types_supported": ["authorization_code"],
-            "token_endpoint_auth_methods_supported": ["none"],
             "code_challenge_methods_supported": ["S256"],
             "scopes_supported": ["mcp"],
         }
+        if self._static_client_id:
+            metadata["token_endpoint_auth_methods_supported"] = ["client_secret_post", "client_secret_basic"]
+        else:
+            metadata["registration_endpoint"] = f"{issuer}/oauth/register"
+            metadata["token_endpoint_auth_methods_supported"] = ["none"]
+        return metadata
+
+    @staticmethod
+    def _redirect_uri_allowed(client: Dict[str, Any], redirect_uri: str) -> bool:
+        if redirect_uri in (client.get("redirect_uris") or []):
+            return True
+        return bool(client.get("_allow_google_redirects") and _valid_google_oauth_redirect_uri(redirect_uri))
+
+    def requires_user_consent(self, client_id: str) -> bool:
+        with self._lock:
+            client = self._clients.get(client_id)
+            return bool(client and client.get("_require_consent"))
 
     def register_client(self, payload: Any) -> Tuple[int, Dict[str, Any]]:
         if not isinstance(payload, dict):
@@ -1055,10 +1235,17 @@ class StandaloneOAuthStore(object):
             "token_endpoint_auth_method": "none",
         }
         with self._lock:
+            previous = dict(self._clients)
             if len(self._clients) >= self.MAX_CLIENTS:
                 oldest_key = next(iter(self._clients))
                 self._clients.pop(oldest_key, None)
             self._clients[client_id] = record
+            try:
+                self._persist_clients_locked()
+            except Exception as exc:
+                self._clients = previous
+                logger.error("Could not persist standalone OAuth client registration: %s", exc)
+                return 500, {"error": "server_error", "error_description": "Could not persist client registration."}
         return 201, dict(record)
 
     def create_authorization_code(
@@ -1079,7 +1266,7 @@ class StandaloneOAuthStore(object):
                     "error": "invalid_client",
                     "error_description": "Unknown client_id.",
                 }
-            if redirect_uri not in client["redirect_uris"]:
+            if not self._redirect_uri_allowed(client, redirect_uri):
                 return None, {
                     "error": "invalid_request",
                     "error_description": "redirect_uri is not registered for this client.",
@@ -1108,6 +1295,103 @@ class StandaloneOAuthStore(object):
             }
             return code, None
 
+    def begin_authorization(
+        self,
+        *,
+        client_id: str,
+        redirect_uri: str,
+        code_challenge: str,
+        code_challenge_method: str,
+        scope: str = "mcp",
+        state: str = "",
+    ) -> Tuple[Optional[str], Optional[str], Optional[Dict[str, str]]]:
+        if not isinstance(state, str) or len(state) > 2048:
+            return None, None, {"error": "invalid_request", "error_description": "Invalid state."}
+        if not isinstance(scope, str) or len(scope) > 512:
+            return None, None, {"error": "invalid_scope", "error_description": "Invalid scope."}
+        if code_challenge_method != "S256":
+            return None, None, {
+                "error": "invalid_request",
+                "error_description": "PKCE code_challenge_method must be S256.",
+            }
+        if not isinstance(code_challenge, str) or not (43 <= len(code_challenge) <= 128):
+            return None, None, {
+                "error": "invalid_request",
+                "error_description": "Missing or invalid PKCE code_challenge.",
+            }
+        with self._lock:
+            client = self._clients.get(client_id)
+            if not client:
+                return None, None, {"error": "invalid_client", "error_description": "Unknown client_id."}
+            if not self._redirect_uri_allowed(client, redirect_uri):
+                return None, None, {
+                    "error": "invalid_request",
+                    "error_description": "redirect_uri is not registered for this client.",
+                }
+            if len(self._pending_authorizations) >= self.MAX_PENDING_AUTHORIZATIONS:
+                self._pending_authorizations.pop(next(iter(self._pending_authorizations)))
+            consent_id = secrets.token_urlsafe(32)
+            self._pending_authorizations[consent_id] = {
+                "client_id": client_id,
+                "client_name": str(client.get("client_name") or "MCP client"),
+                "redirect_uri": redirect_uri,
+                "code_challenge": code_challenge,
+                "code_challenge_method": code_challenge_method,
+                "scope": scope or "mcp",
+                "state": state,
+                "expires_at": time.time() + self._code_ttl,
+            }
+            return consent_id, str(client.get("client_name") or "MCP client"), None
+
+    def complete_authorization(
+        self, consent_id: str, approved: bool
+    ) -> Tuple[Optional[str], Optional[Dict[str, Any]], Optional[Dict[str, str]]]:
+        # Some OAuth clients retry the consent POST after receiving its 302.
+        # Serialize completion and cache the result briefly so retries receive
+        # the same redirect instead of an "expired" error for a valid approval.
+        with self._completion_lock:
+            now = time.time()
+            with self._lock:
+                self._completed_authorizations = {
+                    key: value
+                    for key, value in self._completed_authorizations.items()
+                    if value["expires_at"] > now
+                }
+                completed = self._completed_authorizations.get(consent_id)
+                if completed:
+                    if completed["approved"] != approved:
+                        return None, None, {
+                            "error": "invalid_request",
+                            "error_description": "This consent request was already completed.",
+                        }
+                    return completed["code"], completed["record"], completed["error"]
+                record = self._pending_authorizations.pop(consent_id, None)
+            if not record or record.get("expires_at", 0) <= now:
+                return None, None, {"error": "invalid_request", "error_description": "Consent expired. Start again."}
+            if not approved:
+                error: Optional[Dict[str, str]] = {
+                    "error": "access_denied",
+                    "error_description": "Access was not approved.",
+                }
+                code = None
+            else:
+                code, error = self.create_authorization_code(
+                    client_id=record["client_id"],
+                    redirect_uri=record["redirect_uri"],
+                    code_challenge=record["code_challenge"],
+                    code_challenge_method=record["code_challenge_method"],
+                    scope=record["scope"],
+                )
+            with self._lock:
+                self._completed_authorizations[consent_id] = {
+                    "approved": approved,
+                    "record": record,
+                    "code": code,
+                    "error": error,
+                    "expires_at": now + self._code_ttl,
+                }
+            return code, record, error
+
     def exchange_code(
         self,
         *,
@@ -1115,10 +1399,23 @@ class StandaloneOAuthStore(object):
         code_verifier: str,
         client_id: str,
         redirect_uri: str,
+        client_secret: str = "",
     ) -> Tuple[int, Dict[str, Any]]:
         now = time.time()
         with self._lock:
             self._prune_locked(now)
+            client = self._clients.get(client_id)
+            if not client:
+                return 401, {"error": "invalid_client", "error_description": "Unknown client_id."}
+            expected_secret = client.get("_client_secret")
+            if expected_secret:
+                if not hmac.compare_digest(
+                    str(client_secret).encode("utf-8", "surrogateescape"),
+                    str(expected_secret).encode("utf-8", "surrogateescape"),
+                ):
+                    return 401, {"error": "invalid_client", "error_description": "Client authentication failed."}
+            elif client_secret:
+                return 401, {"error": "invalid_client", "error_description": "This client must not use a secret."}
             record = self._codes.pop(code, None)
             if not record or record["expires_at"] <= now:
                 return 400, {
@@ -1160,14 +1457,22 @@ class StandaloneOAuthStore(object):
                 }
             ttl = self._token_ttl()
             access_token = secrets.token_urlsafe(32)
+            previous_tokens = dict(self._tokens)
             if len(self._tokens) >= self.MAX_TOKENS:
-                oldest_tok = next(iter(self._tokens))
-                self._tokens.pop(oldest_tok, None)
-            self._tokens[access_token] = {
+                oldest_hash = next(iter(self._tokens))
+                self._tokens.pop(oldest_hash, None)
+            token_hash = hashlib.sha256(access_token.encode("ascii")).hexdigest()
+            self._tokens[token_hash] = {
                 "client_id": record["client_id"],
                 "scope": record["scope"],
                 "expires_at": now + ttl,
             }
+            try:
+                self._persist_tokens_locked()
+            except Exception as exc:
+                self._tokens = previous_tokens
+                logger.error("Could not persist standalone OAuth token: %s", exc)
+                return 500, {"error": "server_error", "error_description": "Could not persist access token."}
             return 200, {
                 "access_token": access_token,
                 "token_type": "Bearer",
@@ -1179,15 +1484,11 @@ class StandaloneOAuthStore(object):
         if not token:
             return False
         now = time.time()
+        token_hash = hashlib.sha256(str(token).encode("utf-8", "surrogateescape")).hexdigest()
         with self._lock:
             self._prune_locked(now)
-            for candidate, meta in self._tokens.items():
-                if meta["expires_at"] > now and hmac.compare_digest(
-                    str(token).encode("utf-8", "surrogateescape"),
-                    str(candidate).encode("utf-8", "surrogateescape"),
-                ):
-                    return True
-        return False
+            meta = self._tokens.get(token_hash)
+            return bool(meta and meta["expires_at"] > now)
 
 
 class StandaloneMCPHandler(BaseHTTPRequestHandler):
@@ -1225,17 +1526,33 @@ class StandaloneMCPHandler(BaseHTTPRequestHandler):
         """
         origin = self.headers.get("Origin") or ""
         self.send_header("Vary", "Origin")
-        if origin and origin_allowed(origin, self.bind_host, self.bind_port):
+        gemini_consent_origin = (
+            self._clean_path() == "/oauth/authorize"
+            and self.command == "POST"
+            and origin.rstrip("/").lower() == "https://gemini.google.com"
+        )
+        if origin and (
+            origin_allowed(origin, self.bind_host, self.bind_port)
+            or gemini_consent_origin
+        ):
             self.send_header("Access-Control-Allow-Origin", origin)
             self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS, HEAD")
             self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Mesh-Token")
             self.send_header("Access-Control-Max-Age", "600")
+            if gemini_consent_origin:
+                self.send_header("Access-Control-Expose-Headers", "Location")
 
     def _request_allowed(self) -> bool:
         """Host/Origin gate that runs before auth and before any body read."""
         if not host_allowed(self.headers.get("Host", ""), self.bind_host, self.bind_port):
             return False
         origin = self.headers.get("Origin") or ""
+        # OAuth clients may proxy the consent submission from their own web
+        # origin. The form itself carries an unguessable, one-time consent_id,
+        # and the configured Host allowlist still protects the local listener.
+        # Keep the browser-origin gate on every MCP/tool endpoint.
+        if self._clean_path() == "/oauth/authorize" and self.command == "POST":
+            return True
         return origin_allowed(origin, self.bind_host, self.bind_port)
 
     def _send_headers(self, status: int, content_type: str = "application/json") -> None:
@@ -1336,7 +1653,15 @@ class StandaloneMCPHandler(BaseHTTPRequestHandler):
         self.send_response(401)
         self._cors_headers()
         self.send_header("Content-Type", "application/json")
-        self.send_header("WWW-Authenticate", 'Bearer realm="remote-harness-mcp"')
+        resource_metadata = (
+            self._public_base().rstrip("/")
+            + "/.well-known/oauth-protected-resource"
+        )
+        self.send_header(
+            "WWW-Authenticate",
+            'Bearer realm="remote-harness-mcp", resource_metadata="%s"'
+            % resource_metadata,
+        )
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -1582,35 +1907,137 @@ class StandaloneMCPHandler(BaseHTTPRequestHandler):
             )
             return
 
-        code, err = self.oauth_store.create_authorization_code(
+        # Keep the existing DCR client flow compatible. The locally configured
+        # Gemini client is confidential and receives an explicit consent page.
+        if not self.oauth_store.requires_user_consent(client_id):
+            code, err = self.oauth_store.create_authorization_code(
+                client_id=client_id,
+                redirect_uri=redirect_uri,
+                code_challenge=code_challenge,
+                code_challenge_method=code_challenge_method,
+                scope=scope,
+            )
+            if err is not None or not code:
+                self._send_oauth_json(400, err or {"error": "invalid_request"})
+                return
+
+            parts = urlsplit(redirect_uri)
+            existing_pairs = parse_qs(parts.query, keep_blank_values=True)
+            params: List[Tuple[str, str]] = [
+                (key, value) for key, values in existing_pairs.items() for value in values
+            ]
+            params.append(("code", code))
+            if state:
+                params.append(("state", state))
+            location = urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(params), parts.fragment))
+            self.send_response(302)
+            self._cors_headers()
+            self.send_header("Location", location)
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Pragma", "no-cache")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+
+        consent_id, client_name, err = self.oauth_store.begin_authorization(
             client_id=client_id,
             redirect_uri=redirect_uri,
             code_challenge=code_challenge,
             code_challenge_method=code_challenge_method,
             scope=scope,
+            state=state,
         )
-        if err is not None or not code:
+        if err is not None or not consent_id:
             self._send_oauth_json(400, err or {"error": "invalid_request"})
             return
 
-        parts = urlsplit(redirect_uri)
-        existing_pairs = parse_qs(parts.query, keep_blank_values=True)
-        params: List[Tuple[str, str]] = []
-        for k, vals in existing_pairs.items():
-            for v in vals:
-                params.append((k, v))
-        params.append(("code", code))
-        if state:
-            params.append(("state", state))
-        location = urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(params), parts.fragment))
-
-        self.send_response(302)
-        self._cors_headers()
-        self.send_header("Location", location)
+        safe_name = html.escape(client_name, quote=True)
+        body = (
+            "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\">"
+            "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+            "<title>Authorize MCP access</title>"
+            "<style>body{font:16px system-ui,sans-serif;background:#f4f5f7;color:#171717;"
+            "margin:0;min-height:100vh;display:grid;place-items:center}.card{background:white;"
+            "max-width:520px;margin:24px;padding:28px;border-radius:16px;box-shadow:0 4px 24px #0001}"
+            "h1{font-size:22px}p{line-height:1.55;color:#444}.buttons{display:flex;gap:12px;margin-top:24px}"
+            "button{padding:11px 18px;border:0;border-radius:9px;font-weight:600;cursor:pointer}"
+            ".allow{background:#1769e0;color:white}.deny{background:#eee;color:#222}</style>"
+            "<main class=\"card\"><h1>Allow MCP access to this computer?</h1>"
+            "<p><strong>%s</strong> is requesting access to this computer through Remote Harness MCP.</p>"
+            "<p>After approval, it can use the tools exposed by this server, including reading or changing "
+            "files and running commands. Only approve if you started this connection in Gemini.</p>"
+            "<form method=\"post\" action=\"/oauth/authorize\" target=\"_top\">"
+            "<input type=\"hidden\" name=\"consent_id\" value=\"%s\">"
+            "<div class=\"buttons\"><button class=\"allow\" name=\"decision\" value=\"approve\">"
+            "Allow</button><button class=\"deny\" name=\"decision\" value=\"deny\">Deny</button>"
+            "</div></form></main></html>"
+        ) % (safe_name, html.escape(consent_id, quote=True))
+        raw = body.encode("utf-8")
+        self._send_headers(200, "text/html; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
         self.send_header("Pragma", "no-cache")
-        self.send_header("Content-Length", "0")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
+        self.send_header("Content-Length", str(len(raw)))
         self.end_headers()
+        self.wfile.write(raw)
+
+    def _handle_oauth_consent(self) -> None:
+        content_type = (self.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+        if content_type != "application/x-www-form-urlencoded":
+            self._send_oauth_json(415, {"error": "invalid_request", "error_description": "Expected form submission."})
+            return
+        try:
+            fields = parse_qs(self._read_body().decode("utf-8"), keep_blank_values=False)
+        except Exception:
+            fields = {}
+        consent_id = (fields.get("consent_id") or [""])[0]
+        decision = (fields.get("decision") or [""])[0]
+        if not consent_id or decision not in ("approve", "deny"):
+            self._send_oauth_json(400, {"error": "invalid_request", "error_description": "Invalid consent form."})
+            return
+        code, record, error = self.oauth_store.complete_authorization(consent_id, decision == "approve")
+        if not record:
+            self._send_oauth_json(400, error or {"error": "invalid_request"})
+            return
+        parts = urlsplit(record["redirect_uri"])
+        existing_pairs = parse_qs(parts.query, keep_blank_values=True)
+        params: List[Tuple[str, str]] = [(key, value) for key, values in existing_pairs.items() for value in values]
+        if code:
+            params.append(("code", code))
+        else:
+            params.append(("error", "access_denied"))
+            params.append(("error_description", "Access was not approved."))
+        if record.get("state"):
+            params.append(("state", record["state"]))
+        location = urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(params), parts.fragment))
+        # Some embedded OAuth browsers submit the consent form but leave the
+        # authorization page visible after a 303. Return a tiny top-level
+        # continuation page so the browser can complete the redirect itself;
+        # the link remains available if automatic refresh is blocked.
+        safe_location = html.escape(location, quote=True)
+        body = (
+            "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\">"
+            "<meta name=\"referrer\" content=\"no-referrer\">"
+            "<meta http-equiv=\"refresh\" content=\"0;url=%s\">"
+            "<title>Returning to Gemini</title>"
+            "<main><h1>Access approved</h1>"
+            "<p>Returning to Gemini. If you are not redirected, "
+            "<a href=\"%s\">continue to Gemini</a>.</p></main></html>"
+        ) % (safe_location, safe_location)
+        raw = body.encode("utf-8")
+        self.send_response(200)
+        self._cors_headers()
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Content-Security-Policy", "default-src 'none'; base-uri 'none'; frame-ancestors 'none'")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
 
     def _handle_oauth_register(self) -> None:
         if not json_content_type(self.headers.get("Content-Type", "")):
@@ -1672,6 +2099,25 @@ class StandaloneMCPHandler(BaseHTTPRequestHandler):
             )
             return
 
+        client_id = params.get("client_id", "")
+        client_secret = params.get("client_secret", "")
+        authorization = (self.headers.get("Authorization") or "").strip()
+        if authorization.lower().startswith("basic "):
+            try:
+                encoded = authorization[6:].strip()
+                decoded = base64.b64decode(encoded, validate=True).decode("utf-8")
+                basic_user, basic_password = decoded.split(":", 1)
+                basic_client_id = unquote_plus(basic_user)
+                basic_client_secret = unquote_plus(basic_password)
+            except Exception:
+                self._send_oauth_json(401, {"error": "invalid_client", "error_description": "Client authentication failed."})
+                return
+            if (client_id and client_id != basic_client_id) or client_secret:
+                self._send_oauth_json(400, {"error": "invalid_request", "error_description": "Use only one client authentication method."})
+                return
+            client_id = basic_client_id
+            client_secret = basic_client_secret
+
         if params.get("grant_type") != "authorization_code":
             self._send_oauth_json(
                 400,
@@ -1685,8 +2131,9 @@ class StandaloneMCPHandler(BaseHTTPRequestHandler):
         status, result = self.oauth_store.exchange_code(
             code=params.get("code", ""),
             code_verifier=params.get("code_verifier", ""),
-            client_id=params.get("client_id", ""),
+            client_id=client_id,
             redirect_uri=params.get("redirect_uri", ""),
+            client_secret=client_secret,
         )
         self._send_oauth_json(status, result)
 
@@ -1701,6 +2148,9 @@ class StandaloneMCPHandler(BaseHTTPRequestHandler):
         path = self._clean_path()
         if path == "/oauth/register":
             self._handle_oauth_register()
+            return
+        if path == "/oauth/authorize":
+            self._handle_oauth_consent()
             return
         if path == "/oauth/token":
             self._handle_oauth_token()
@@ -2080,7 +2530,14 @@ def run_standalone_server(
     mcp = create_mcp_server()
     StandaloneMCPHandler.server_mcp = mcp
     StandaloneMCPHandler.auth_token = token
-    StandaloneMCPHandler.oauth_store = StandaloneOAuthStore()
+    from core import paths as _paths
+
+    oauth_clients_path = os.path.join(_paths.config_dir(), "standalone.oauth_clients.json")
+    oauth_tokens_path = os.path.join(_paths.config_dir(), "standalone.oauth_tokens.json")
+    StandaloneMCPHandler.oauth_store = StandaloneOAuthStore(
+        clients_path=oauth_clients_path,
+        tokens_path=oauth_tokens_path,
+    )
     StandaloneMCPHandler.bind_host = host
     StandaloneMCPHandler.bind_port = int(port)
 
