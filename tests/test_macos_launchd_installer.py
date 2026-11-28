@@ -6,37 +6,11 @@ journalctl do not exist when the standalone health gate fails.
 """
 
 import os
-import shutil
 import subprocess
 import unittest
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 INSTALL_SH = os.path.join(REPO, "install.sh")
-
-
-def _bash():
-    """Return a bash that understands host paths (Git Bash on Windows, never WSL's System32 shim)."""
-    candidates = []
-    if os.name == "nt":
-        candidates.append(
-            os.path.join(
-                os.environ.get("ProgramFiles", r"C:\Program Files"),
-                "Git",
-                "bin",
-                "bash.exe",
-            )
-        )
-    candidates.append(shutil.which("bash"))
-    for candidate in candidates:
-        if not candidate or not os.path.exists(candidate):
-            continue
-        if os.name == "nt" and "system32" in candidate.replace("/", "\\").lower():
-            continue
-        return candidate
-    return None
-
-
-BASH = _bash()
 
 
 def _read_install_sh() -> str:
@@ -45,10 +19,10 @@ def _read_install_sh() -> str:
 
 
 class TestMacOSLaunchdInstaller(unittest.TestCase):
-    @unittest.skipUnless(BASH, "no POSIX/Git Bash available")
+    @unittest.skipIf(os.name == "nt", "install.sh is a POSIX shell script")
     def test_install_sh_syntax_is_valid(self):
         result = subprocess.run(
-            [BASH, "-n", INSTALL_SH],
+            ["bash", "-n", INSTALL_SH],
             capture_output=True,
             text=True,
             timeout=120,
